@@ -1,8 +1,15 @@
-// 豆瓣热门电影电视剧推荐功能
+// 豆瓣热门电影电视剧推荐功能 - 优化版
 
-// 豆瓣标签列表 - 修改为默认标签
+// 豆瓣标签列表 - 优化电视剧标签，添加更多最新内容分类
 let defaultMovieTags = ['热门', '最新', '经典', '豆瓣高分', '冷门佳片', '华语', '欧美', '韩国', '日本', '动作', '喜剧', '日综', '爱情', '科幻', '悬疑', '恐怖', '治愈'];
-let defaultTvTags = ['热门', '美剧', '英剧', '韩剧', '日剧', '国产剧', '港剧', '日本动画', '综艺', '纪录片'];
+
+// 优化电视剧标签 
+let defaultTvTags = [
+    '热门', '最新',
+    '美剧', '英剧', '韩剧', '日剧', '国产剧', '港剧',
+    '最新美剧', '最新韩剧', '最新日剧', '最新国产剧',
+    '日本动画', '综艺', '纪录片'
+];
 
 // 用户标签列表 - 存储用户实际使用的标签（包含保留的系统标签和用户添加的自定义标签）
 let movieTags = [];
@@ -406,7 +413,7 @@ function fetchDoubanTags() {
         });
 }
 
-// 渲染热门推荐内容
+// 优化渲染热门推荐内容函数 - 针对不同标签使用不同的排序和筛选策略
 function renderRecommend(tag, pageLimit, pageStart) {
     const container = document.getElementById("douban-results");
     if (!container) return;
@@ -423,11 +430,32 @@ function renderRecommend(tag, pageLimit, pageStart) {
     container.classList.add("relative");
     container.insertAdjacentHTML('beforeend', loadingOverlayHTML);
     
-    const target = `https://movie.douban.com/j/search_subjects?type=${doubanMovieTvCurrentSwitch}&tag=${tag}&sort=recommend&page_limit=${pageLimit}&page_start=${pageStart}`;
+    // 根据不同标签优化请求策略
+    let sortType = 'recommend';
+    let adjustedTag = tag;
+    
+    // 针对"最新"类标签使用时间排序
+    if (tag.includes('最新')) {
+        sortType = 'time';
+        
+        // 对于特定的最新标签，简化为基础分类以获得更好的结果
+        if (tag === '最新美剧') adjustedTag = '美剧';
+        else if (tag === '最新韩剧') adjustedTag = '韩剧';
+        else if (tag === '最新日剧') adjustedTag = '日剧';
+        else if (tag === '最新国产剧') adjustedTag = '国产剧';
+        else if (tag === '最新') adjustedTag = '热门';
+    }
+    
+    const target = `https://movie.douban.com/j/search_subjects?type=${doubanMovieTvCurrentSwitch}&tag=${adjustedTag}&sort=${sortType}&page_limit=${pageLimit}&page_start=${pageStart}`;
     
     // 使用通用请求函数
     fetchDoubanData(target)
         .then(data => {
+            // 对于最新内容标签，进行额外的过滤和排序
+            if (tag.includes('最新')) {
+                data = filterLatestContent(data, tag);
+            }
+            
             renderDoubanCards(data, container);
         })
         .catch(error => {
@@ -439,6 +467,56 @@ function renderRecommend(tag, pageLimit, pageStart) {
                 </div>
             `;
         });
+}
+
+// 新增：过滤最新内容的函数 - 使用动态年份判断
+function filterLatestContent(data, tag) {
+    if (!data.subjects || data.subjects.length === 0) return data;
+    
+    // 获取当前年份
+    const currentYear = new Date().getFullYear();
+    const lastYear = currentYear - 1;
+    
+    // 根据标签进行不同的过滤策略
+    let filteredSubjects = data.subjects;
+    
+    if (tag === '今年新剧') {
+        // 过滤当前年份的内容
+        filteredSubjects = data.subjects.filter(item => 
+            item.year && (item.year === currentYear.toString() || parseInt(item.year) === currentYear)
+        );
+    } else if (tag === '去年精选') {
+        // 过滤去年的高分内容
+        filteredSubjects = data.subjects.filter(item => 
+            item.year && parseInt(item.year) === lastYear && 
+            item.rate && parseFloat(item.rate) >= 7.0
+        );
+    } else if (tag.includes('最新')) {
+        // 过滤最近2年的内容，优先显示评分较高的
+        filteredSubjects = data.subjects.filter(item => {
+            const year = parseInt(item.year);
+            return year >= lastYear || !item.year; // 包含没有年份信息的（可能是最新的）
+        }).sort((a, b) => {
+            // 按评分降序排列
+            const rateA = parseFloat(a.rate) || 0;
+            const rateB = parseFloat(b.rate) || 0;
+            return rateB - rateA;
+        });
+    }
+    
+    // 如果过滤后内容太少，则混合使用原始数据
+    if (filteredSubjects.length < 8 && filteredSubjects.length < data.subjects.length) {
+        const remainingCount = Math.min(16 - filteredSubjects.length, data.subjects.length);
+        const remainingSubjects = data.subjects
+            .filter(item => !filteredSubjects.includes(item))
+            .slice(0, remainingCount);
+        filteredSubjects = [...filteredSubjects, ...remainingSubjects];
+    }
+    
+    return {
+        ...data,
+        subjects: filteredSubjects
+    };
 }
 
 async function fetchDoubanData(url) {
@@ -528,6 +606,9 @@ function renderDoubanCards(data, container) {
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;');
             
+            // 显示年份信息（新增）
+            const yearInfo = item.year ? `<span class="text-xs text-gray-400 ml-1">(${item.year})</span>` : '';
+            
             // 处理图片URL
             // 1. 直接使用豆瓣图片URL (添加no-referrer属性)
             const originalCoverUrl = item.cover;
@@ -556,7 +637,7 @@ function renderDoubanCards(data, container) {
                     <button onclick="fillAndSearchWithDouban('${safeTitle}')" 
                             class="text-sm font-medium text-white truncate w-full hover:text-pink-400 transition"
                             title="${safeTitle}">
-                        ${safeTitle}
+                        ${safeTitle}${yearInfo}
                     </button>
                 </div>
             `;
@@ -638,6 +719,9 @@ function showTagManageModal() {
                     <button type="submit" class="ml-2 bg-pink-600 hover:bg-pink-700 text-white px-4 py-2 rounded">添加</button>
                 </form>
                 <p class="text-xs text-gray-500 mt-2">提示：标签名称不能为空，不能重复，不能包含特殊字符</p>
+                ${!isMovie ? `<div class="mt-2 text-xs text-blue-400">
+                    <p>推荐电视剧标签：正在热播、今日更新、完结好剧、高分美剧、热门韩剧、经典日剧、国产好剧、英伦范、北欧剧等</p>
+                </div>` : ''}
             </div>
         </div>
     `;
