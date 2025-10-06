@@ -86,7 +86,6 @@ let currentEpisodes = [];
 let episodesReversed = false;
 let autoplayEnabled = true; // 默认开启自动连播
 let videoHasEnded = false; // 跟踪视频是否已经自然结束
-let userClickedPosition = null; // 记录用户点击的位置
 let shortcutHintTimeout = null; // 用于控制快捷键提示显示时间
 let adFilteringEnabled = true; // 默认开启广告过滤
 let progressSaveInterval = null; // 定期保存进度的计时器
@@ -1041,26 +1040,31 @@ function initPlayer(videoUrl) {
         }
     }
 
-    // 播放器加载完成后初始隐藏工具栏
-	art.on('ready', () => {
-		hideControls();
+    art.on('ready', () => {
+    hideControls();
     
-		// ✅ 修复:使用防抖避免频繁重置弹幕
-		let seekDebounceTimer = null;
-		art.on('seek', (currentTime) => {
-			// 清除之前的定时器
-			if (seekDebounceTimer) {
-				clearTimeout(seekDebounceTimer);
-			}
+    // 优化弹幕 seek 处理
+    let seekDebounceTimer = null;
+    let lastSeekTime = 0;
+    
+    art.on('seek', (currentTime) => {
+        lastSeekTime = currentTime;
         
-			// 延迟执行弹幕重置,避免拖拽时频繁触发
-			seekDebounceTimer = setTimeout(() => {
-				if (art.plugins.artplayerPluginDanmuku) {
-					art.plugins.artplayerPluginDanmuku.reset();
-				}
-			}, 200); // 200ms 防抖
-		});
-	});
+        if (seekDebounceTimer) {
+            clearTimeout(seekDebounceTimer);
+        }
+        
+        // 延迟同步弹幕，避免拖拽时频繁触发
+        seekDebounceTimer = setTimeout(() => {
+            if (art.plugins.artplayerPluginDanmuku) {
+                // 只调用 seek，不要 reset
+                if (typeof art.plugins.artplayerPluginDanmuku.seek === 'function') {
+                    art.plugins.artplayerPluginDanmuku.seek(lastSeekTime);
+                }
+            }
+        }, 300); // 增加到 300ms
+    });
+});
 
     // 全屏 Web 模式处理
     art.on('fullscreenWeb', function (isFullScreen) {
@@ -1101,11 +1105,6 @@ function initPlayer(videoUrl) {
             console.error('恢复播放进度失败:', e);
         }
     }
-
-    // ✅ 新增:设置进度条点击监听
-    setTimeout(() => {
-        setupProgressBarPreciseClicks();
-    }, 500);
 
     // 启动定期保存播放进度
     startProgressSaveInterval();
@@ -2387,67 +2386,5 @@ async function switchDanmuSource(animeId) {
     } catch (error) {
         console.error('切换弹幕源失败:', error);
         showToast('切换弹幕源失败', 'error');
-    }
-}
-
-// ✅ 设置进度条精确点击处理
-function setupProgressBarPreciseClicks() {
-    // 查找 ArtPlayer 的进度条元素
-    const progressBar = document.querySelector('.art-control-progress');
-    if (!progressBar || !art || !art.video) {
-        console.warn('进度条元素未找到或播放器未就绪');
-        return;
-    }
-
-    // 移除可能存在的旧事件监听器
-    progressBar.removeEventListener('click', handleProgressBarClick);
-    progressBar.removeEventListener('touchend', handleProgressBarTouch);
-
-    // 添加新的事件监听器 - 使用 click 和 touchend 不干扰拖动
-    progressBar.addEventListener('click', handleProgressBarClick);
-    progressBar.addEventListener('touchend', handleProgressBarTouch, { passive: true });
-
-    // 处理进度条点击
-    function handleProgressBarClick(e) {
-        if (!art || !art.video) return;
-        
-        // 忽略程序触发的点击事件
-        if (e.detail === 0) return;
-
-        const rect = e.currentTarget.getBoundingClientRect();
-        const percentage = (e.clientX - rect.left) / rect.width;
-        const duration = art.video.duration;
-        let clickTime = percentage * duration;
-
-        // 防止跳转到最后导致视频结束
-        if (duration - clickTime < 1) {
-            clickTime = Math.min(clickTime, duration - 1.5);
-        }
-
-        userClickedPosition = clickTime;
-        art.currentTime = clickTime;
-        
-        // ✅ 不阻止事件传播，让 ArtPlayer 正常工作
-    }
-
-    // 处理移动端触摸事件
-    function handleProgressBarTouch(e) {
-        if (!art || !art.video || !e.changedTouches || !e.changedTouches[0]) return;
-
-        const touch = e.changedTouches[0];
-        const rect = e.currentTarget.getBoundingClientRect();
-        const percentage = (touch.clientX - rect.left) / rect.width;
-        const duration = art.video.duration;
-        let clickTime = percentage * duration;
-
-        // 防止跳转到最后导致视频结束
-        if (duration - clickTime < 1) {
-            clickTime = Math.min(clickTime, duration - 1.5);
-        }
-
-        userClickedPosition = clickTime;
-        art.currentTime = clickTime;
-        
-        // ✅ 不阻止事件传播，让 ArtPlayer 正常工作
     }
 }
