@@ -602,6 +602,89 @@ function getCustomApiInfo(customApiIndex) {
     }
     return customAPIs[index];
 }
+// 优化搜索结果排序：按源分组，同源内按剧集顺序排列
+function optimizeSearchResults(results) {
+    // 按源名称分组
+    const groupedBySource = results.reduce((groups, item) => {
+        const sourceName = item.source_name || '未知来源';
+        if (!groups[sourceName]) {
+            groups[sourceName] = [];
+        }
+        groups[sourceName].push(item);
+        return groups;
+    }, {});
+    
+    // 对每个源内的结果进行排序
+    Object.keys(groupedBySource).forEach(sourceName => {
+        groupedBySource[sourceName].sort((a, b) => {
+            const nameA = a.vod_name || '';
+            const nameB = b.vod_name || '';
+            
+            // 提取剧名主体和季数信息
+            const parseSeriesInfo = (name) => {
+                // 匹配各种季数表示方式：第二季、第2季、S2、Season 2等
+                const seasonMatch = name.match(/(?:第(\d+)季|第([一二三四五六七八九十]+)季|[Ss](?:eason\s*)?(\d+)|(\d+)(?:st|nd|rd|th)?\s*season)/i);
+                
+                let seriesName = name;
+                let seasonNum = 1; // 默认为第一季
+                
+                if (seasonMatch) {
+                    // 移除季数信息，获取纯剧名
+                    seriesName = name.replace(seasonMatch[0], '').trim();
+                    
+                    // 提取季数
+                    if (seasonMatch[1]) {
+                        seasonNum = parseInt(seasonMatch[1]);
+                    } else if (seasonMatch[2]) {
+                        // 中文数字转换
+                        const chineseNums = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10};
+                        seasonNum = chineseNums[seasonMatch[2]] || 1;
+                    } else if (seasonMatch[3]) {
+                        seasonNum = parseInt(seasonMatch[3]);
+                    } else if (seasonMatch[4]) {
+                        seasonNum = parseInt(seasonMatch[4]);
+                    }
+                }
+                
+                return { seriesName, seasonNum };
+            };
+            
+            const infoA = parseSeriesInfo(nameA);
+            const infoB = parseSeriesInfo(nameB);
+            
+            // 提取年份信息
+            const getYear = (item) => {
+                const year = item.vod_year || '';
+                return year ? parseInt(year) : 0;
+            };
+            
+            const yearA = getYear(a);
+            const yearB = getYear(b);
+            
+            // 首先按年份倒序排列（新年份在前）
+            if (yearA !== yearB) {
+                return yearB - yearA;
+            }
+            
+            // 然后按剧名主体排序
+            const seriesCompare = infoA.seriesName.localeCompare(infoB.seriesName);
+            if (seriesCompare !== 0) return seriesCompare;
+            
+            // 如果是同一部剧，按季数倒序排列（新季在前）
+            return infoB.seasonNum - infoA.seasonNum;
+        });
+    });
+    
+    // 将各源的结果按源名称排序后合并
+    const sortedSources = Object.keys(groupedBySource).sort();
+    const finalResults = [];
+    
+    sortedSources.forEach(sourceName => {
+        finalResults.push(...groupedBySource[sourceName]);
+    });
+    
+    return finalResults;
+}
 
 // 搜索功能 - 修改为支持多选API和多页结果
 async function search() {
@@ -656,15 +739,8 @@ async function search() {
             }
         });
 
-        // 对搜索结果进行排序：按名称优先，名称相同时按接口源排序
-        allResults.sort((a, b) => {
-            // 首先按照视频名称排序
-            const nameCompare = (a.vod_name || '').localeCompare(b.vod_name || '');
-            if (nameCompare !== 0) return nameCompare;
-            
-            // 如果名称相同，则按照来源排序
-            return (a.source_name || '').localeCompare(b.source_name || '');
-        });
+        // 优化的排序逻辑：按源分组，同源内按剧集顺序排列
+        allResults = optimizeSearchResults(allResults);
 
         // 更新搜索结果计数
         const searchResultsCount = document.getElementById('searchResultsCount');
@@ -727,6 +803,19 @@ async function search() {
                 return !banned.some(keyword => typeName.includes(keyword));
             });
         }
+
+	// 过滤短剧内容
+        allResults = allResults.filter(item => {
+            const typeName = item.type_name || '';
+            const vodName = item.vod_name || '';
+            
+            // 短剧关键词过滤
+            const shortDramaKeywords = ['短剧', '微短剧', '竖屏剧', '小短剧'];
+            
+            return !shortDramaKeywords.some(keyword => 
+                typeName.includes(keyword) || vodName.includes(keyword)
+            );
+        });
 
         // 添加XSS保护，使用textContent和属性转义
         const safeResults = allResults.map(item => {
