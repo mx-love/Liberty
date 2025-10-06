@@ -393,3 +393,211 @@ input:checked + .slider:before {
 #username {
     display: none !important;
 }
+
+/* 竖屏模式：完全隐藏弹幕功能 */
+@media (orientation: portrait) {
+    .artplayer-plugin-danmuku,
+    div[class*="artplayer-plugin-danmuku"],
+    .apd-emitter,
+    .apd-toggle,
+    .apd-config {
+        display: none !important;
+    }
+    
+    .art-controls-center {
+        flex: 1 !important;
+    }
+}
+
+/* 横屏模式：优化弹幕布局 */
+@media (orientation: landscape) and (max-width: 1024px) {
+    /* 控制栏整体布局 */
+    .art-controls {
+        display: flex !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        gap: 8px !important;
+        padding: 0 8px !important;
+    }
+    
+    /* 左侧控制按钮区域 */
+    .art-controls-left {
+        flex: 0 0 auto !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 4px !important;
+    }
+    
+    /* 中间区域：弹幕输入 */
+    .art-controls-center {
+        flex: 1 1 auto !important;
+        max-width: 300px !important;
+        min-width: 0 !important;
+        display: flex !important;
+        justify-content: center !important;
+        overflow: visible !important;
+    }
+    
+    /* 右侧控制按钮区域 */
+    .art-controls-right {
+        flex: 0 0 auto !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 4px !important;
+        min-width: 100px !important;
+    }
+    
+    /* 弹幕插件容器 */
+    .artplayer-plugin-danmuku {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+    
+    /* 弹幕输入区域整体 - 居中布局 */
+    .apd-emitter {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 2px !important;
+        width: 100% !important;
+        max-width: 250px !important;
+        margin: 0 auto !important;
+    }
+    
+    /* 弹幕开关按钮 */
+    .apd-toggle {
+        flex: 0 0 auto !important;
+        margin: 0 !important;
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        min-height: 32px !important;
+    }
+    
+    /* 弹幕配置按钮 */
+    .apd-config {
+        flex: 0 0 auto !important;
+        margin: 0 !important;
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        min-height: 32px !important;
+    }
+    
+    /* 输入框 + 发送按钮容器 */
+    .apd-emitter > div:has(input.apd-input),
+    .apd-style {
+        display: flex !important;
+        flex: 1 1 auto !important;
+        align-items: center !important;
+        gap: 0 !important;
+        position: relative !important;
+        height: 32px !important;
+    }
+    
+    /* 输入框 */
+    input.apd-input {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        max-width: 140px !important;
+        font-size: 12px !important;
+        padding: 0 8px !important;
+        height: 32px !important;
+        border-radius: 4px !important;
+        box-sizing: border-box !important;
+        line-height: 32px !important;
+    }
+    
+    /* 发送按钮 - 独立圆角按钮 */
+    div.apd-send {
+        flex: 0 0 auto !important;
+        font-size: 12px !important;
+        padding: 0 12px !important;
+        width: auto !important;
+        min-width: 50px !important;
+        height: 32px !important;
+        line-height: 32px !important;
+        text-align: center !important;
+        border-radius: 4px !important;
+        margin: 0 !important;
+        margin-left: 4px !important;
+        box-sizing: border-box !important;
+        display: inline-block !important;
+    }
+}
+
+/* 小屏横屏设备进一步优化 */
+@media (orientation: landscape) and (max-width: 768px) {
+    .art-controls-center {
+        max-width: 220px !important;
+    }
+    
+    .apd-emitter {
+        max-width: 200px !important;
+        gap: 2px !important;
+    }
+    
+    .apd-toggle,
+    .apd-config {
+        width: 28px !important;
+        height: 28px !important;
+        min-width: 28px !important;
+        min-height: 28px !important;
+        margin: 0 !important;
+    }
+
+    /* 弹幕源切换按钮 */
+.danmu-source-switch-btn {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: none;
+}
+
+.danmu-source-switch-btn:hover {
+    background-color: rgba(255, 255, 255, 0.2);
+    transform: scale(1.05);
+}
+
+/* 弹幕源弹窗动画 */
+@keyframes modalFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes modalSlideIn {
+    from {
+        transform: translateY(-20px);
+        opacity: 0;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+#danmuSourceModal:not(.hidden) {
+    animation: modalFadeIn 0.2s ease-out;
+}
+
+#danmuSourceModal:not(.hidden) > div {
+    animation: modalSlideIn 0.3s ease-out;
+}
+
+#danmuSourceList button:hover {
+    transform: translateX(4px);
+}
+
+@media (max-width: 640px) {
+    #danmuSourceModal > div {
+        max-width: 95vw;
+        max-height: 85vh;
+    }
+}
