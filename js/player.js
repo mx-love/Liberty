@@ -1666,11 +1666,6 @@ function setupLongPressSpeedControl() {
 
     // 触摸开始事件
     playerElement.addEventListener('touchstart', function (e) {
-		// ✅ 排除弹幕设置面板的元素
-		if (e.target.closest('.artplayer-plugin-danmuku-setting')) {
-			return; // 不处理弹幕设置面板内的触摸
-		}
-		
         // 检查视频是否正在播放，如果没有播放则不触发长按功能
         if (art.video.paused) {
             return; // 视频暂停时不触发长按功能
@@ -1697,18 +1692,6 @@ function setupLongPressSpeedControl() {
             e.preventDefault();
         }, 500);
     }, { passive: false });
-    
-    // 触摸移动事件
-	playerElement.addEventListener('touchmove', function (e) {
-		// ✅ 排除弹幕设置面板
-		if (e.target.closest('.artplayer-plugin-danmuku-setting')) {
-			return;
-		}
-    
-		if (isLongPress) {
-			e.preventDefault();
-		}
-	}, { passive: false });
 
     // 触摸结束事件
     playerElement.addEventListener('touchend', function (e) {
