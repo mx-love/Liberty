@@ -144,11 +144,101 @@ let animeDetailCache = loadCache();
 const CACHE_EXPIRE_TIME = 24 * 60 * 60 * 1000; // 1 天
 
 // ===== 获取弹幕数据 =====
+
+// ✅ 新增：检测内容类型（动画 or 综艺）
+function detectContentType(title, episodes) {
+    // 综艺特征检测
+    const varietyKeywords = ['综艺', '快乐大本营', '天天向上', '跑男', '极限挑战', 
+                             '娱乐', '脱口秀', '访谈', '真人秀', '晚会', '演唱会'];
+    const hasVarietyKeyword = varietyKeywords.some(kw => title.includes(kw));
+    
+    // 检查期数格式（日期格式）
+    const hasDateFormat = episodes.some(ep => {
+        const epTitle = ep.episodeTitle || '';
+        return /\d{8}期/.test(epTitle) || /\d{4}[-年]\d{2}[-月]\d{2}[日期]/.test(epTitle);
+    });
+    
+    // 检查是否有"期"字
+    const hasPeriodChar = episodes.some(ep => 
+        (ep.episodeTitle || '').includes('期')
+    );
+    
+    if (hasDateFormat || (hasPeriodChar && hasVarietyKeyword)) {
+        return 'variety'; // 综艺
+    }
+    return 'anime'; // 动画
+}
+
+// ✅ 新增：提取期数/集数信息（增强版）
+function extractEpisodeInfo(episodeTitle, contentType) {
+    if (!episodeTitle) return null;
+    
+    const info = {
+        type: contentType,
+        number: null,      // 数字编号
+        date: null,        // 日期（综艺用）
+        title: episodeTitle
+    };
+    
+    if (contentType === 'variety') {
+        // 综艺：优先提取日期
+        // 格式1: 20250101期
+        let match = episodeTitle.match(/(\d{4})(\d{2})(\d{2})期/);
+        if (match) {
+            info.date = `${match[1]}-${match[2]}-${match[3]}`;
+            info.number = parseInt(match[1] + match[2] + match[3]);
+            return info;
+        }
+        
+        // 格式2: 2025年01月01日
+        match = episodeTitle.match(/(\d{4})[-年](\d{2})[-月](\d{2})[日期]/);
+        if (match) {
+            info.date = `${match[1]}-${match[2]}-${match[3]}`;
+            info.number = parseInt(match[1] + match[2] + match[3]);
+            return info;
+        }
+        
+        // 格式3: 第123期（部分综艺）
+        match = episodeTitle.match(/第\s*(\d+)\s*期/);
+        if (match) {
+            info.number = parseInt(match[1]);
+            return info;
+        }
+    } else {
+        // 动画：提取集数（保持原逻辑）
+        const patterns = [
+            /第\s*(\d+)\s*[集话話]/,
+            /[Ee][Pp]\.?\s*(\d+)/,
+            /#第(\d+)话#/,
+            /\[第(\d+)[集话話]\]/,
+            /\(第(\d+)[集话話]\)/,
+            /【第(\d+)[集话話]】/,
+            /^\s*(\d+)\s*$/,
+            /\b0*(\d+)\b/
+        ];
+        
+        for (const pattern of patterns) {
+            const match = episodeTitle.match(pattern);
+            if (match) {
+                info.number = parseInt(match[1]);
+                if (info.number > 0 && info.number <= 9999) {
+                    return info;
+                }
+            }
+        }
+    }
+    
+    return info;
+}
+
 async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
     if (!DANMU_CONFIG.enabled) return [];
 
     const cleanTitle = title.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
     let animeId = forceAnimeId || currentDanmuAnimeId;
+    
+    // ✅ 添加：初始化 contentType
+    let contentType = 'anime'; // 默认为动画
     
     if (!animeId) {
         try {
@@ -185,14 +275,14 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
     try {
         let episodes = null;
         let isMovie = false;
-
-        // ✅ 检查详情缓存
-        const cached = animeDetailCache[detailCacheKey];
+		// ✅ 检查详情缓存
+		const cached = animeDetailCache[detailCacheKey];
         if (cached && Date.now() - cached.timestamp < CACHE_EXPIRE_TIME) {
             console.log('✅ 使用详情缓存,跳过搜索和详情请求');
             animeId = cached.animeId;
             episodes = cached.episodes;
             isMovie = cached.isMovie;
+             contentType = cached.contentType || detectContentType(cleanTitle, episodes); 
         } else {
             console.log(cached ? '⏰ 缓存过期，执行完整请求' : 'ℹ️ 首次请求，执行完整请求');
 
@@ -246,16 +336,21 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
             }
 
             episodes = detailData.bangumi.episodes.filter(ep => {
-                const epTitle = ep.episodeTitle || '';
-                return !/(特典|花絮|番外|PV|预告|OP|ED|映像特典)/i.test(epTitle);
-            });
+				const epTitle = ep.episodeTitle || '';
+				return !/(特典|花絮|番外|PV|预告|OP|ED|映像特典)/i.test(epTitle);
+			});
+
+			// ✅ 新增：检测内容类型
+			contentType = detectContentType(cleanTitle, episodes);
+            console.log(`📺 内容类型: ${contentType === 'variety' ? '综艺' : '动画'}`);
 
             // ✅ 存入缓存（同时存 animeId 和 title 两个 key）
             const cacheEntry = {
                 timestamp: Date.now(),
                 animeId,
                 episodes,
-                isMovie
+                isMovie,
+                contentType
             };
             animeDetailCache[`anime_${animeId}`] = cacheEntry;
             animeDetailCache[`title_${cleanTitle}`] = cacheEntry;
@@ -277,9 +372,9 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
         }
 
         // 剧集处理
-        const matchedEpisode = findBestEpisodeMatch(episodes, episodeIndex, title);
+        const matchedEpisode = findBestEpisodeMatch(episodes, episodeIndex, title, contentType); 
         if (!matchedEpisode) {
-            console.error(`✗ [弹幕] 无法为第${episodeIndex + 1}集加载弹幕`);
+            console.error(`✗ [弹幕] 无法为第${episodeIndex + 1}${contentType === 'variety' ? '期' : '集'}加载弹幕`); // ✅ 修改这行
             return [];
         }
 
@@ -340,78 +435,74 @@ function findBestAnimeMatch(animes, targetTitle) {
     return scored[0].anime;
 }
 
-// ✅ 新增:智能匹配集数（增强版）
-function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
+// ✅ 修改：智能匹配集数（支持动画+综艺）
+function findBestEpisodeMatch(episodes, targetIndex, showTitle, contentType) {
     if (!episodes || episodes.length === 0) return null;
     
-    // 目标集数（从0开始，需要+1）
-    const targetNumber = targetIndex + 1;
-    
     // 提取所有集数信息
-    const episodesWithNumbers = episodes.map((ep, idx) => {
-        const title = ep.episodeTitle || '';
-        
-        // 多种集数提取模式（按优先级排序）
-        const patterns = [
-            /第\s*(\d+)\s*[集话話]/,           // 第1集、第 1 话
-            /[Ee][Pp]\.?\s*(\d+)/,             // EP1、EP.1、ep 01
-            /#第(\d+)话#/,                      // #第1话#
-            /\[第(\d+)[集话話]\]/,              // [第1集]
-            /\(第(\d+)[集话話]\)/,              // (第1集)
-            /【第(\d+)[集话話]】/,              // 【第1集】
-            /^\s*(\d+)\s*$/,                   // 纯数字
-            /\b0*(\d+)\b/                      // 任意数字（去除前导0）
-        ];
-        
-        let episodeNumber = null;
-        for (const pattern of patterns) {
-            const match = title.match(pattern);
-            if (match) {
-                episodeNumber = parseInt(match[1]);
-                if (episodeNumber > 0 && episodeNumber <= 9999) {
-                    break; // 找到合理的集数就停止
-                }
-            }
-        }
-        
+    const episodesWithInfo = episodes.map((ep, idx) => {
+        const info = extractEpisodeInfo(ep.episodeTitle || '', contentType);
         return {
             episode: ep,
-            number: episodeNumber !== null ? episodeNumber : (idx + 1),
-            title: title,
+            info: info,
             index: idx
         };
     });
     
-    // 策略1: 精确匹配集数编号
-    const exactMatch = episodesWithNumbers.find(ep => ep.number === targetNumber);
-    if (exactMatch) {
-        console.log(`✓ [弹幕] 精确匹配第${targetNumber}集: ${exactMatch.title}`);
-        return exactMatch.episode;
+    const targetNumber = targetIndex + 1;
+    
+    if (contentType === 'variety') {
+        // 综艺匹配策略：优先使用索引
+        
+        // 策略1: 索引匹配（最可靠）
+        if (targetIndex >= 0 && targetIndex < episodes.length) {
+            const matchedEp = episodesWithInfo[targetIndex];
+            console.log(`✓ [弹幕-综艺] 索引匹配第${targetNumber}期: ${matchedEp.episode.episodeTitle}`);
+            return matchedEp.episode;
+        }
+        
+        // 策略2: 如果有期数编号，尝试匹配
+        const targetEp = episodesWithInfo.find(ep => 
+            ep.info?.number && Math.abs(ep.info.number - targetNumber) <= 2
+        );
+        if (targetEp) {
+            console.log(`✓ [弹幕-综艺] 期数匹配第${targetNumber}期`);
+            return targetEp.episode;
+        }
+        
+    } else {
+        // 动画匹配策略（保持原逻辑）
+        
+        // 策略1: 精确匹配集数编号
+        const exactMatch = episodesWithInfo.find(ep => ep.info?.number === targetNumber);
+        if (exactMatch) {
+            console.log(`✓ [弹幕-动画] 精确匹配第${targetNumber}集: ${exactMatch.episode.episodeTitle}`);
+            return exactMatch.episode;
+        }
+        
+        // 策略2: 索引匹配
+        if (targetIndex >= 0 && targetIndex < episodes.length) {
+            const indexMatch = episodesWithInfo[targetIndex];
+            console.log(`✓ [弹幕-动画] 索引匹配第${targetNumber}集: ${indexMatch.episode.episodeTitle}`);
+            return indexMatch.episode;
+        }
+        
+        // 策略3: 模糊匹配（集数相近）
+        const nearMatch = episodesWithInfo.find(ep => 
+            ep.info?.number && Math.abs(ep.info.number - targetNumber) <= 2 && ep.info.number > 0
+        );
+        if (nearMatch) {
+            console.warn(`⚠ [弹幕-动画] 模糊匹配第${targetNumber}集 -> 使用第${nearMatch.info.number}集: ${nearMatch.episode.episodeTitle}`);
+            return nearMatch.episode;
+        }
     }
     
-    // 策略2: 使用索引匹配（适用于弹幕源集数连续但编号不同的情况）
-    if (targetIndex >= 0 && targetIndex < episodes.length) {
-        const indexMatch = episodesWithNumbers[targetIndex];
-        console.log(`✓ [弹幕] 索引匹配第${targetNumber}集 (弹幕源第${indexMatch.number}集): ${indexMatch.title}`);
-        return indexMatch.episode;
-    }
-    
-    // 策略3: 模糊匹配（集数相近）
-    const nearMatch = episodesWithNumbers.find(ep => 
-        Math.abs(ep.number - targetNumber) <= 2 && ep.number > 0
-    );
-    if (nearMatch) {
-        console.warn(`⚠ [弹幕] 模糊匹配第${targetNumber}集 -> 使用第${nearMatch.number}集: ${nearMatch.title}`);
-        return nearMatch.episode;
-    }
-    
-    // 策略4: 兜底 - 使用第一集
+    // 兜底：使用第一集
     if (episodes.length > 0) {
-        console.warn(`⚠ [弹幕] 无法匹配第${targetNumber}集，使用第一集弹幕`);
+        console.warn(`⚠ [弹幕] 无法匹配第${targetNumber}${contentType === 'variety' ? '期' : '集'}，使用第一集弹幕`);
         return episodes[0];
     }
     
-    console.error(`✗ [弹幕] 完全无法匹配第${targetNumber}集`);
     return null;
 }
 
@@ -2566,5 +2657,181 @@ async function switchDanmuSource(animeId) {
     } catch (error) {
         console.error('切换弹幕源失败:', error);
         showToast('切换弹幕源失败', 'error');
+    }
+}
+
+// ✅ 新增：显示手动选择弹幕集数的弹窗
+async function showManualDanmuEpisodeSelector() {
+    if (!currentDanmuAnimeId || !art || !art.plugins.artplayerPluginDanmuku) {
+        showToast('弹幕源未加载', 'error');
+        return;
+    }
+    
+    const detailUrl = `${DANMU_CONFIG.baseUrl}/api/v2/bangumi/${currentDanmuAnimeId}`;
+    // ✅ 添加：验证 animeId 是否有效
+    if (!currentDanmuAnimeId || currentDanmuAnimeId === 'null' || currentDanmuAnimeId === 'undefined') {
+        showToast('弹幕源ID无效，请先切换弹幕源', 'error');
+        return;
+    }
+    
+    showToast('正在加载弹幕集数列表...', 'info');
+    
+    try {
+        const response = await fetch(detailUrl);
+        if (!response.ok) throw new Error('获取失败');
+        
+        const data = await response.json();
+        const episodes = data.bangumi.episodes || [];
+        
+        if (episodes.length === 0) {
+            showToast('没有可用的弹幕集数', 'error');
+            return;
+        }
+        
+        // 检测内容类型
+        const cleanTitle = currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
+        const contentType = detectContentType(cleanTitle, episodes);
+        const unitText = contentType === 'variety' ? '期' : '集';
+        
+       // 创建或获取弹窗
+        let modal = document.getElementById('danmuEpisodeModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'danmuEpisodeModal';
+            modal.className = 'fixed inset-0 bg-black bg-opacity-75 z-[10000] hidden flex items-center justify-center p-4';  // ✅ 改为 z-[10000]
+            modal.innerHTML = `
+                <div class="bg-gray-800 rounded-lg p-6 max-w-4xl w-full max-h-[80vh] overflow-y-auto">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-lg font-bold text-white">选择弹幕${unitText}数</h3>
+                        <button onclick="document.getElementById('danmuEpisodeModal').classList.add('hidden')" 
+                                class="text-gray-400 hover:text-white">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="danmu-episode-list"></div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            
+            // 点击背景关闭
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    modal.classList.add('hidden');
+                }
+            });
+        }
+        
+        const modalContent = modal.querySelector('.danmu-episode-list');
+        
+        let html = `<div class="text-sm text-gray-400 mb-4 p-3 bg-gray-700 rounded">
+            当前视频：第 ${currentEpisodeIndex + 1} ${unitText}
+            <br>点击下方按钮切换到对应的弹幕${unitText}数
+        </div>`;
+        
+        html += '<div class="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 gap-2">';
+        
+        episodes.forEach((ep, idx) => {
+            const info = extractEpisodeInfo(ep.episodeTitle || '', contentType);
+            let displayText = `${idx + 1}`;
+            let tooltip = ep.episodeTitle || '';
+            
+            if (contentType === 'variety' && info?.date) {
+                // 综艺显示日期（月-日）
+                displayText = info.date.substring(5); // MM-DD
+            } else if (info?.number) {
+                displayText = info.number;
+            }
+            
+            const isActive = idx === currentEpisodeIndex;
+            
+            html += `
+                <button 
+                    onclick="loadManualDanmu(${idx})"
+                    class="px-3 py-2 rounded text-sm transition-colors ${
+                        isActive 
+                            ? 'bg-blue-600 text-white font-bold' 
+                            : 'bg-gray-700 hover:bg-gray-600 text-gray-200'
+                    }"
+                    title="${tooltip}">
+                    ${displayText}
+                </button>
+            `;
+        });
+        
+        html += '</div>';
+        modalContent.innerHTML = html;
+        modal.classList.remove('hidden');
+        
+    } catch (error) {
+        console.error('加载弹幕集数失败:', error);
+        showToast('加载失败，请重试', 'error');
+    }
+}
+
+// ✅ 新增：手动加载指定集数的弹幕
+async function loadManualDanmu(episodeIndex) {
+    const modal = document.getElementById('danmuEpisodeModal');
+    if (modal) modal.classList.add('hidden');
+    
+    showToast('正在加载弹幕...', 'info');
+    
+    try {
+        const currentTime = art.video ? art.video.currentTime : 0;
+        const isPlaying = art.video ? !art.video.paused : false;
+        
+        // 清空相关弹幕缓存，强制重新获取
+        Object.keys(danmuCache).forEach(key => {
+            if (key.includes(currentVideoTitle) || key.includes(String(currentDanmuAnimeId))) {
+                delete danmuCache[key];
+            }
+        });
+        
+        // 强制使用指定集数获取弹幕
+        const danmuku = await getDanmukuForVideo(
+            currentVideoTitle,
+            episodeIndex, // 使用手动选择的集数
+            currentDanmuAnimeId
+        );
+        
+        if (!danmuku || danmuku.length === 0) {
+            showToast('该集没有弹幕', 'warning');
+            return;
+        }
+        
+        // 重新加载弹幕
+        const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+        
+        if (typeof danmukuPlugin.clear === 'function') {
+            danmukuPlugin.clear();
+        }
+        
+        danmukuPlugin.config({
+            danmuku: danmuku,
+            synchronousPlayback: true
+        });
+        
+        danmukuPlugin.load();
+        
+        // 恢复播放位置
+        if (art.video && currentTime > 0) {
+            art.currentTime = currentTime;
+            if (typeof danmukuPlugin.seek === 'function') {
+                setTimeout(() => {
+                    danmukuPlugin.seek(currentTime);
+                }, 300);
+            }
+        }
+        
+        if (isPlaying && art.video.paused) {
+            setTimeout(() => art.play(), 100);
+        }
+        
+        showToast(`已加载第 ${episodeIndex + 1} 集弹幕 (${danmuku.length}条)`, 'success');
+        
+    } catch (error) {
+        console.error('手动加载弹幕失败:', error);
+        showToast('加载失败，请重试', 'error');
     }
 }
