@@ -233,9 +233,28 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
 
             // 2. 获取动漫详情
             const detailUrl = `${DANMU_CONFIG.baseUrl}/api/v2/bangumi/${animeId}`;
+            console.log(`📡 获取弹幕详情: ${detailUrl}`);
             const detailResponse = await fetch(detailUrl);
             if (!detailResponse.ok) {
-                console.warn('获取动漫详情失败');
+                console.error(`❌ 获取动漫详情失败 (${detailResponse.status}):`, detailUrl);
+                
+                // ✅ 如果是404，说明这个animeId无效，清除缓存并重试
+                if (detailResponse.status === 404) {
+                    console.warn('⚠️ 弹幕源ID失效，清除缓存并重新搜索');
+                    currentDanmuAnimeId = null;
+                    delete animeDetailCache[detailCacheKey];
+                    saveCache(animeDetailCache);
+                    
+                    // 清除localStorage中的弹幕源ID
+                    try {
+                        const titleHash = simpleHash(cleanTitle);
+                        localStorage.removeItem(`danmuSource_${titleHash}`);
+                    } catch (e) {}
+                    
+                    // 递归重试（不传入animeId）
+                    return await getDanmukuForVideo(title, episodeIndex, null);
+                }
+                
                 return [];
             }
 
@@ -284,6 +303,7 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
         }
 
         const episodeId = matchedEpisode.episodeId;
+        console.log(`🎯 匹配到集数: ${matchedEpisode.title} (episodeId: ${episodeId})`);
         return await fetchDanmaku(episodeId, danmuCacheKey);
 
     } catch (error) {
@@ -1231,10 +1251,13 @@ function initPlayer(videoUrl) {
         }
     }
 
-    // ✅ 自动加载弹幕
+    // ✅ 自动加载弹幕 - 增强错误处理
     if (DANMU_CONFIG.enabled && art.plugins.artplayerPluginDanmuku) {
         setTimeout(async () => {
             try {
+                console.log(`🎬 开始加载第${currentEpisodeIndex + 1}集弹幕...`);
+                
+                // ✅ 强制重新获取弹幕（不依赖缓存）
                 const danmuku = await getDanmukuForVideo(
                     currentVideoTitle, 
                     currentEpisodeIndex,
@@ -1242,26 +1265,39 @@ function initPlayer(videoUrl) {
                 );
                 
                 if (danmuku && danmuku.length > 0) {
-                    art.plugins.artplayerPluginDanmuku.config({
+                    // ✅ 完全重置弹幕插件
+                    const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+                    
+                    // 清空现有弹幕
+                    if (typeof danmukuPlugin.clear === 'function') {
+                        danmukuPlugin.clear();
+                    }
+                    
+                    // 重新配置
+                    danmukuPlugin.config({
                         danmuku: danmuku,
                         synchronousPlayback: true
                     });
-                    art.plugins.artplayerPluginDanmuku.load();
                     
+                    // 加载弹幕
+                    danmukuPlugin.load();
+                    
+                    // 如果有恢复位置，同步弹幕
                     if (restoredPosition > 0) {
                         setTimeout(() => {
-                            if (typeof art.plugins.artplayerPluginDanmuku.seek === 'function') {
-                                art.plugins.artplayerPluginDanmuku.seek(restoredPosition);
+                            if (typeof danmukuPlugin.seek === 'function') {
+                                danmukuPlugin.seek(restoredPosition);
                             }
                         }, 500);
                     }
                     
                     console.log(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
                 } else {
-                    console.warn('⚠ 未找到弹幕，继续播放视频');
+                    console.warn(`⚠ 第${currentEpisodeIndex + 1}集未找到弹幕，继续播放视频`);
                 }
             } catch (e) {
-                console.error('❌ 弹幕加载失败:', e);
+                console.error(`❌ 第${currentEpisodeIndex + 1}集弹幕加载失败:`, e);
+                // 弹幕加载失败不影响视频播放
             }
         }, 300);
     }
@@ -1509,6 +1545,12 @@ function playEpisode(index) {
     currentUrl.searchParams.set('url', url);
     currentUrl.searchParams.delete('position');
     window.history.replaceState({}, '', currentUrl.toString());
+    
+    // 清空当前集的弹幕缓存，强制重新加载
+    const titleHash = simpleHash(currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim());
+    const danmuCacheKey = currentDanmuAnimeId ? `danmu_${currentDanmuAnimeId}_ep${index}` : `danmu_${titleHash}_ep${index}`;
+    delete danmuCache[danmuCacheKey];
+    console.log('🔄 切换集数，清空弹幕缓存:', danmuCacheKey);
 
     if (isWebkit) {
         initPlayer(url);
