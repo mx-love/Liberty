@@ -5,34 +5,34 @@ const customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]'); // �
 function goBack(event) {
     // 防止默认链接行为
     if (event) event.preventDefault();
-    
+
     // 1. 优先检查URL参数中的returnUrl
     const urlParams = new URLSearchParams(window.location.search);
     const returnUrl = urlParams.get('returnUrl');
-    
+
     if (returnUrl) {
         // 如果URL中有returnUrl参数，优先使用
         window.location.href = decodeURIComponent(returnUrl);
         return;
     }
-    
+
     // 2. 检查localStorage中保存的lastPageUrl
     const lastPageUrl = localStorage.getItem('lastPageUrl');
     if (lastPageUrl && lastPageUrl !== window.location.href) {
         window.location.href = lastPageUrl;
         return;
     }
-    
+
     // 3. 检查是否是从搜索页面进入的播放器
     const referrer = document.referrer;
-    
+
     // 检查 referrer 是否包含搜索参数
     if (referrer && (referrer.includes('/s=') || referrer.includes('?s='))) {
         // 如果是从搜索页面来的，返回到搜索页面
         window.location.href = referrer;
         return;
     }
-    
+
     // 4. 如果是在iframe中打开的，尝试关闭iframe
     if (window.self !== window.top) {
         try {
@@ -43,13 +43,13 @@ function goBack(event) {
             console.error('调用父窗口closeVideoPlayer失败:', e);
         }
     }
-    
+
     // 5. 无法确定上一页，则返回首页
     if (!referrer || referrer === '') {
         window.location.href = '/';
         return;
     }
-    
+
     // 6. 以上都不满足，使用默认行为：返回上一页
     window.history.back();
 }
@@ -105,7 +105,6 @@ const DANMU_CONFIG = {
 const danmuCache = {};
 let currentDanmuAnimeId = null; // 当前选中的动漫ID
 let availableDanmuSources = []; // 可用的弹幕源列表
-let danmuLoadingPromise = null; // 用于防止重复加载弹幕
 
 // 简单的字符串哈希函数，用于生成短标识
 function simpleHash(str) {
@@ -147,13 +146,6 @@ const CACHE_EXPIRE_TIME = 24 * 60 * 60 * 1000; // 1 天
 // ===== 获取弹幕数据 =====
 async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
     if (!DANMU_CONFIG.enabled) return [];
-    
-    // 防止重复加载：如果正在加载相同的弹幕，直接返回现有的 Promise
-	const requestKey = `${title}_${episodeIndex}_${forceAnimeId || currentDanmuAnimeId || 'auto'}`;
-	if (danmuLoadingPromise && danmuLoadingPromise.key === requestKey) {
-		console.log('⏳ [弹幕] 正在加载中，等待完成...');
-		return danmuLoadingPromise.promise;
-	}
 
     const cleanTitle = title.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
     let animeId = forceAnimeId || currentDanmuAnimeId;
@@ -177,24 +169,22 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
             console.warn('恢复弹幕源ID失败:', e);
         }
     }
-
-    // ⚡ 缓存键：使用更精确的标识，避免冲突
+    
+ // ⚡ 缓存键：使用更精确的标识，避免冲突
 	// 格式：animeId_标题hash_集数 或 标题hash_集数
 	const titleHash = simpleHash(cleanTitle); // 使用标题hash避免长键名
 	let detailCacheKey = animeId ? `anime_${animeId}` : `title_${titleHash}`;
 	const danmuCacheKey = animeId ? `danmu_${animeId}_ep${episodeIndex}` : `danmu_${titleHash}_ep${episodeIndex}`;
 
     // 检查弹幕缓存
-	if (danmuCache[danmuCacheKey]) {
-		console.log('✅ 使用弹幕缓存');
-		return danmuCache[danmuCacheKey];
-	}
+    if (danmuCache[danmuCacheKey]) {
+        console.log('✅ 使用弹幕缓存');
+        return danmuCache[danmuCacheKey];
+    }
 
-	// ✅ 创建 Promise 并缓存，防止重复请求
-	const loadPromise = (async () => {
-		try {
-			let episodes = null;
-			let isMovie = false;
+    try {
+        let episodes = null;
+        let isMovie = false;
 
         // ✅ 检查详情缓存
         const cached = animeDetailCache[detailCacheKey];
@@ -243,28 +233,9 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
 
             // 2. 获取动漫详情
             const detailUrl = `${DANMU_CONFIG.baseUrl}/api/v2/bangumi/${animeId}`;
-            console.log(`📡 获取弹幕详情: ${detailUrl}`);
             const detailResponse = await fetch(detailUrl);
             if (!detailResponse.ok) {
-                console.error(`❌ 获取动漫详情失败 (${detailResponse.status}):`, detailUrl);
-                
-                // ✅ 如果是404，说明这个animeId无效，清除缓存并重试
-                if (detailResponse.status === 404) {
-                    console.warn('⚠️ 弹幕源ID失效，清除缓存并重新搜索');
-                    currentDanmuAnimeId = null;
-                    delete animeDetailCache[detailCacheKey];
-                    saveCache(animeDetailCache);
-                    
-                    // 清除localStorage中的弹幕源ID
-                    try {
-                        const titleHash = simpleHash(cleanTitle);
-                        localStorage.removeItem(`danmuSource_${titleHash}`);
-                    } catch (e) {}
-                    
-                    // 递归重试（不传入animeId）
-                    return await getDanmukuForVideo(title, episodeIndex, null);
-                }
-                
+                console.warn('获取动漫详情失败');
                 return [];
             }
 
@@ -313,162 +284,134 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
         }
 
         const episodeId = matchedEpisode.episodeId;
-		const episodeTitle = matchedEpisode.episodeTitle || matchedEpisode.title || `第${episodeIndex + 1}集`;
-		console.log(`🎯 匹配到集数: ${episodeTitle} (episodeId: ${episodeId})`);
-		return await fetchDanmaku(episodeId, danmuCacheKey);
+        return await fetchDanmaku(episodeId, danmuCacheKey);
 
     } catch (error) {
         console.error('获取弹幕失败:', error);
         return [];
-    } finally {
-        // 清除加载状态
-        if (danmuLoadingPromise && danmuLoadingPromise.key === requestKey) {
-            danmuLoadingPromise = null;
-        }
     }
-})();
-
-// 保存 Promise 引用
-danmuLoadingPromise = { key: requestKey, promise: loadPromise };
-
-return loadPromise;
 }
 
 // ✅ 新增：智能匹配最佳动漫结果
 function findBestAnimeMatch(animes, targetTitle) {
     if (!animes || animes.length === 0) return null;
-    
+
     // 计算相似度得分
     const scored = animes.map(anime => {
         const animeTitle = (anime.animeTitle || '').replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
-        
+
         let score = 0;
-        
+
         // 完全匹配得最高分
         if (animeTitle === targetTitle) {
             score += 1000;
         }
-        
+
         // 包含目标标题
         if (animeTitle.includes(targetTitle)) {
             score += 500;
         }
-        
+
         // 目标标题包含动漫标题
         if (targetTitle.includes(animeTitle)) {
             score += 300;
         }
-        
+
         // 字符串相似度（简单实现）
         const similarity = calculateSimilarity(animeTitle, targetTitle);
         score += similarity * 200;
-        
+
         // 优先选择集数较多的（更可能是正片）
         if (anime.episodeCount) {
             score += Math.min(anime.episodeCount, 50);
         }
-        
+
         return { anime, score };
     });
-    
+
     // 按得分排序，取最高分
     scored.sort((a, b) => b.score - a.score);
-    
+
     console.log('弹幕源匹配得分:', scored.map(s => ({
         title: s.anime.animeTitle,
         score: s.score
     })));
-    
+
     return scored[0].anime;
 }
 
-// ✅ 新增:智能匹配集数（通用版 - 精确匹配优先）
+// ✅ 新增:智能匹配集数（增强版）
 function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
     if (!episodes || episodes.length === 0) return null;
-    
+
     // 目标集数（从0开始，需要+1）
     const targetNumber = targetIndex + 1;
-    
-    // 提取所有集数信息（支持多种格式）
+
+    // 提取所有集数信息
     const episodesWithNumbers = episodes.map((ep, idx) => {
         const title = ep.episodeTitle || '';
-        
+
+        // 多种集数提取模式（按优先级排序）
+        const patterns = [
+            /第\s*(\d+)\s*[集话話]/,           // 第1集、第 1 话
+            /[Ee][Pp]\.?\s*(\d+)/,             // EP1、EP.1、ep 01
+            /#第(\d+)话#/,                      // #第1话#
+            /\[第(\d+)[集话話]\]/,              // [第1集]
+            /\(第(\d+)[集话話]\)/,              // (第1集)
+            /【第(\d+)[集话話]】/,              // 【第1集】
+            /^\s*(\d+)\s*$/,                   // 纯数字
+            /\b0*(\d+)\b/                      // 任意数字（去除前导0）
+        ];
+
         let episodeNumber = null;
-        let subPart = ''; // 上中下标识
-        let dateStr = ''; // 日期字符串
-        
-        // === 综合匹配模式（按优先级排序）===
-        
-        // 1. 日期+上中下 (20240315上, 2024-03-15下)
-        const datePartMatch = title.match(/(\d{4}[-\.]?\d{2}[-\.]?\d{2})([上中下])?/);
-        if (datePartMatch) {
-            dateStr = datePartMatch[1].replace(/[-\.]/g, '');
-            subPart = datePartMatch[2] || '';
-            // 如果只有日期没有数字，用日期后4位作为排序依据
-            if (!episodeNumber) {
-                episodeNumber = parseInt(dateStr.slice(-4));
-            }
-        }
-        
-        // 2. 期数+上中下 (第1期, 01上, 02下)
-        const periodMatch = title.match(/(?:第)?0*(\d+)期([上中下])?/);
-        if (periodMatch) {
-            episodeNumber = parseInt(periodMatch[1]);
-            subPart = periodMatch[2] || subPart;
-        }
-        
-        // 3. 普通集数 (第1集、EP1、第1话)
-        if (!episodeNumber) {
-            const patterns = [
-                /第\s*(\d+)\s*[集话話]/,           // 第1集、第 1 话
-                /[Ee][Pp]\.?\s*(\d+)/,             // EP1、EP.1、ep 01
-                /#第(\d+)话#/,                      // #第1话#
-                /\[第(\d+)[集话話]\]/,              // [第1集]
-                /\(第(\d+)[集话話]\)/,              // (第1集)
-                /【第(\d+)[集话話]】/,              // 【第1集】
-                /^\s*(\d+)\s*$/,                   // 纯数字
-                /\b0*(\d+)\b/                      // 任意数字（去除前导0）
-            ];
-            
-            for (const pattern of patterns) {
-                const match = title.match(pattern);
-                if (match) {
-                    episodeNumber = parseInt(match[1]);
-                    if (episodeNumber > 0 && episodeNumber <= 9999) {
-                        break;
-                    }
+        for (const pattern of patterns) {
+            const match = title.match(pattern);
+            if (match) {
+                episodeNumber = parseInt(match[1]);
+                if (episodeNumber > 0 && episodeNumber <= 9999) {
+                    break; // 找到合理的集数就停止
                 }
             }
         }
-        
+
         return {
-			episode: ep,
-			number: episodeNumber !== null ? episodeNumber : (idx + 1),
-			subPart: subPart,
-			dateStr: dateStr,
-			title: title || `第${idx + 1}集`,
-			index: idx
-		};
+            episode: ep,
+            number: episodeNumber !== null ? episodeNumber : (idx + 1),
+            title: title,
+            index: idx
+        };
     });
-    
-    // === 严格匹配策略（只使用可靠的匹配方式）===
-    
-    // 策略1: 直接索引匹配（最可靠，适用于大多数情况）
-    if (targetIndex >= 0 && targetIndex < episodes.length) {
-        const indexMatch = episodesWithNumbers[targetIndex];
-        console.log(`✓ [弹幕] 索引匹配 #${targetIndex + 1}: ${indexMatch.title}`);
-        return indexMatch.episode;
-    }
-    
-    // 策略2: 精确匹配集数编号（仅在索引超出范围时使用）
+
+    // 策略1: 精确匹配集数编号
     const exactMatch = episodesWithNumbers.find(ep => ep.number === targetNumber);
     if (exactMatch) {
         console.log(`✓ [弹幕] 精确匹配第${targetNumber}集: ${exactMatch.title}`);
         return exactMatch.episode;
     }
-    
-    // ❌ 无法匹配 - 不使用模糊匹配和兜底方案，避免加载错误弹幕
-    console.warn(`⚠ [弹幕] 无法找到第${targetIndex + 1}集的准确弹幕，已跳过加载`);
+
+    // 策略2: 使用索引匹配（适用于弹幕源集数连续但编号不同的情况）
+    if (targetIndex >= 0 && targetIndex < episodes.length) {
+        const indexMatch = episodesWithNumbers[targetIndex];
+        console.log(`✓ [弹幕] 索引匹配第${targetNumber}集 (弹幕源第${indexMatch.number}集): ${indexMatch.title}`);
+        return indexMatch.episode;
+    }
+
+    // 策略3: 模糊匹配（集数相近）
+    const nearMatch = episodesWithNumbers.find(ep => 
+        Math.abs(ep.number - targetNumber) <= 2 && ep.number > 0
+    );
+    if (nearMatch) {
+        console.warn(`⚠ [弹幕] 模糊匹配第${targetNumber}集 -> 使用第${nearMatch.number}集: ${nearMatch.title}`);
+        return nearMatch.episode;
+    }
+
+    // 策略4: 兜底 - 使用第一集
+    if (episodes.length > 0) {
+        console.warn(`⚠ [弹幕] 无法匹配第${targetNumber}集，使用第一集弹幕`);
+        return episodes[0];
+    }
+
+    console.error(`✗ [弹幕] 完全无法匹配第${targetNumber}集`);
     return null;
 }
 
@@ -476,24 +419,24 @@ function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
 function calculateSimilarity(str1, str2) {
     const longer = str1.length > str2.length ? str1 : str2;
     const shorter = str1.length > str2.length ? str2 : str1;
-    
+
     if (longer.length === 0) return 1.0;
-    
+
     const editDistance = levenshteinDistance(longer, shorter);
     return (longer.length - editDistance) / longer.length;
 }
 
 function levenshteinDistance(str1, str2) {
     const matrix = [];
-    
+
     for (let i = 0; i <= str2.length; i++) {
         matrix[i] = [i];
     }
-    
+
     for (let j = 0; j <= str1.length; j++) {
         matrix[0][j] = j;
     }
-    
+
     for (let i = 1; i <= str2.length; i++) {
         for (let j = 1; j <= str1.length; j++) {
             if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
@@ -507,13 +450,13 @@ function levenshteinDistance(str1, str2) {
             }
         }
     }
-    
+
     return matrix[str2.length][str1.length];
 }
 
 function isMovieContent(animeInfo) {
     if (!animeInfo) return false;
-    
+
     return (
         animeInfo.type?.includes('电影') ||
         animeInfo.typeDescription?.includes('电影') ||
@@ -527,23 +470,23 @@ function isMovieContent(animeInfo) {
 async function fetchDanmaku(episodeId, cacheKey) {
     const commentUrl = `${DANMU_CONFIG.baseUrl}/api/v2/comment/${episodeId}?withRelated=true&chConvert=1`;
     const commentResponse = await fetch(commentUrl);
-    
+
     if (!commentResponse.ok) {
         console.warn('获取弹幕失败');
         return [];
     }
-    
+
     const commentData = await commentResponse.json();
-    
+
     const danmakuList = [];
     if (commentData.comments && Array.isArray(commentData.comments)) {
         commentData.comments.forEach(comment => {
             const params = comment.p ? comment.p.split(',') : [];
             const colorValue = parseInt(params[2] || 16777215);
-            
+
             // ✅ 从 params[1] 获取弹幕模式
             let mode = parseInt(params[1] || 0);
-            
+
             // 弹幕模式映射：
             // 0-2: 滚动弹幕 -> ArtPlayer mode 0
             // 4: 底部弹幕 -> ArtPlayer mode 2  
@@ -553,7 +496,7 @@ async function fetchDanmaku(episodeId, cacheKey) {
             } else {
                 mode = 0;  // 其他都是滚动
             }
-            
+
             danmakuList.push({
                 text: comment.m || '',
                 time: parseFloat(params[0] || 0),
@@ -562,7 +505,7 @@ async function fetchDanmaku(episodeId, cacheKey) {
             });
         });
     }
-    
+
     danmuCache[cacheKey] = danmakuList;
     return danmakuList;
 }
@@ -940,6 +883,7 @@ function initPlayer(videoUrl) {
         art.destroy();
         art = null;
     }
+    
     // ✅ 尝试恢复用户上次选择的弹幕源
 	if (!currentDanmuAnimeId) {
 		try {
@@ -957,7 +901,7 @@ function initPlayer(videoUrl) {
 			console.warn('恢复弹幕源ID失败:', e);
 		}
 	}
-    
+
     // ✅ 在这里添加移动端检测
     const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
@@ -1208,18 +1152,18 @@ function initPlayer(videoUrl) {
 
     art.on('ready', () => {
     hideControls();
-    
+
     // 优化弹幕 seek 处理
     let seekDebounceTimer = null;
     let lastSeekTime = 0;
-    
+
     art.on('seek', (currentTime) => {
         lastSeekTime = currentTime;
-        
+
         if (seekDebounceTimer) {
             clearTimeout(seekDebounceTimer);
         }
-        
+
         // 延迟同步弹幕，避免拖拽时频繁触发
         seekDebounceTimer = setTimeout(() => {
             if (art.plugins.artplayerPluginDanmuku) {
@@ -1288,53 +1232,37 @@ function initPlayer(videoUrl) {
         }
     }
 
-    // ✅ 自动加载弹幕 - 增强错误处理
+    // ✅ 自动加载弹幕
     if (DANMU_CONFIG.enabled && art.plugins.artplayerPluginDanmuku) {
         setTimeout(async () => {
             try {
-                console.log(`🎬 开始加载第${currentEpisodeIndex + 1}集弹幕...`);
-                
-                // ✅ 强制重新获取弹幕（不依赖缓存）
                 const danmuku = await getDanmukuForVideo(
                     currentVideoTitle, 
                     currentEpisodeIndex,
                     currentDanmuAnimeId
                 );
-                
+
                 if (danmuku && danmuku.length > 0) {
-                    // ✅ 完全重置弹幕插件
-                    const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
-                    
-                    // 清空现有弹幕
-                    if (typeof danmukuPlugin.clear === 'function') {
-                        danmukuPlugin.clear();
-                    }
-                    
-                    // 重新配置
-                    danmukuPlugin.config({
+                    art.plugins.artplayerPluginDanmuku.config({
                         danmuku: danmuku,
                         synchronousPlayback: true
                     });
-                    
-                    // 加载弹幕
-                    danmukuPlugin.load();
-                    
-                    // 如果有恢复位置，同步弹幕
+                    art.plugins.artplayerPluginDanmuku.load();
+
                     if (restoredPosition > 0) {
                         setTimeout(() => {
-                            if (typeof danmukuPlugin.seek === 'function') {
-                                danmukuPlugin.seek(restoredPosition);
+                            if (typeof art.plugins.artplayerPluginDanmuku.seek === 'function') {
+                                art.plugins.artplayerPluginDanmuku.seek(restoredPosition);
                             }
                         }, 500);
                     }
-                    
+
                     console.log(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
                 } else {
-                    console.warn(`⚠ 第${currentEpisodeIndex + 1}集未找到弹幕，继续播放视频`);
+                    console.warn('⚠ 未找到弹幕，继续播放视频');
                 }
             } catch (e) {
-                console.error(`❌ 第${currentEpisodeIndex + 1}集弹幕加载失败:`, e);
-                // 弹幕加载失败不影响视频播放
+                console.error('❌ 弹幕加载失败:', e);
             }
         }, 300);
     }
@@ -1582,14 +1510,6 @@ function playEpisode(index) {
     currentUrl.searchParams.set('url', url);
     currentUrl.searchParams.delete('position');
     window.history.replaceState({}, '', currentUrl.toString());
-    
-    // 清空当前集的弹幕缓存，强制重新加载
-    const titleHash = simpleHash(currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim());
-    const danmuCacheKey = currentDanmuAnimeId ? `danmu_${currentDanmuAnimeId}_ep${index}` : `danmu_${titleHash}_ep${index}`;
-    delete danmuCache[danmuCacheKey];
-    console.log('🔄 切换集数，清空弹幕缓存:', danmuCacheKey);
-    // 清除弹幕加载状态，允许重新加载
-	danmuLoadingPromise = null;
 
     if (isWebkit) {
         initPlayer(url);
@@ -1601,7 +1521,7 @@ function playEpisode(index) {
     updateEpisodeInfo();
     updateButtonStates();
     renderEpisodes();
-    
+
     // 重置用户点击位置记录
     userClickedPosition = null;
 
@@ -1665,12 +1585,12 @@ function updateOrderButton() {
 // 在播放器初始化后添加视频到历史记录
 function saveToHistory() {
     console.log('[历史记录] 开始保存历史记录...');
-    
+
     if (!currentEpisodes || currentEpisodes.length === 0) {
         console.warn('[历史记录] ❌ 保存失败：没有集数信息');
         return false;
     }
-    
+
     if (!currentVideoUrl) {
         console.warn('[历史记录] ❌ 保存失败：没有视频URL');
         return false;
@@ -1707,7 +1627,7 @@ function saveToHistory() {
         duration: videoDuration,
         episodes: currentEpisodes && currentEpisodes.length > 0 ? [...currentEpisodes] : []
     };
-    
+
     try {
         const history = JSON.parse(localStorage.getItem('viewingHistory') || '[]');
 
@@ -1727,11 +1647,11 @@ function saveToHistory() {
             existingItem.url = videoInfo.url;
             existingItem.playbackPosition = videoInfo.playbackPosition > 10 ? videoInfo.playbackPosition : (existingItem.playbackPosition || 0);
             existingItem.duration = videoInfo.duration || existingItem.duration;
-            
+
             if (videoInfo.episodes && videoInfo.episodes.length > 0) {
                 existingItem.episodes = [...videoInfo.episodes];
             }
-            
+
             const updatedItem = history.splice(existingIndex, 1)[0];
             history.unshift(updatedItem);
             console.log('[历史记录] ✅ 更新现有记录:', videoInfo.title, '第', videoInfo.episodeIndex + 1, '集', `[源: ${sourceName}]`);
@@ -1745,7 +1665,7 @@ function saveToHistory() {
         localStorage.setItem('viewingHistory', JSON.stringify(history));
         console.log('[历史记录] ✅ 保存成功，共', history.length, '条记录');
         return true;
-        
+
     } catch (e) {
         console.error('[历史记录] ❌ 保存失败:', e);
         return false;
@@ -1810,7 +1730,7 @@ function startProgressSaveInterval() {
 function saveCurrentProgress() {
     // 清除之前的定时器，实现防抖
     clearTimeout(saveProgressTimer);
-    
+
     // 延迟 500ms 执行，避免频繁操作阻塞 UI
     saveProgressTimer = setTimeout(() => {
         if (!art || !art.video) return;
@@ -1825,7 +1745,7 @@ function saveCurrentProgress() {
             duration: duration,
             timestamp: Date.now()
         };
-        
+
         try {
             localStorage.setItem(progressKey, JSON.stringify(progressData));
         } catch (e) {
@@ -2003,11 +1923,11 @@ function renderResourceInfoBar() {
         console.error('找不到资源信息卡片容器');
         return;
     }
-    
+
     // 获取当前视频 source_code
     const urlParams = new URLSearchParams(window.location.search);
     const currentSource = urlParams.get('source') || '';
-    
+
     // 显示临时加载状态
     container.innerHTML = `
       <div class="resource-info-bar-left flex">
@@ -2053,7 +1973,7 @@ function renderResourceInfoBar() {
 async function testVideoSourceSpeed(sourceKey, vodId) {
     try {
         const startTime = performance.now();
-        
+
         // 构建API参数
         let apiParams = '';
         if (sourceKey.startsWith('custom_')) {
@@ -2070,33 +1990,33 @@ async function testVideoSourceSpeed(sourceKey, vodId) {
         } else {
             apiParams = '&source=' + sourceKey;
         }
-        
+
         // 添加时间戳防止缓存
         const timestamp = new Date().getTime();
         const cacheBuster = `&_t=${timestamp}`;
-        
+
         // 获取视频详情
         const response = await fetch(`/api/detail?id=${encodeURIComponent(vodId)}${apiParams}${cacheBuster}`, {
             method: 'GET',
             cache: 'no-cache'
         });
-        
+
         if (!response.ok) {
             return { speed: -1, error: '获取失败' };
         }
-        
+
         const data = await response.json();
-        
+
         if (!data.episodes || data.episodes.length === 0) {
             return { speed: -1, error: '无播放源' };
         }
-        
+
         // 测试第一个播放链接的响应速度
         const firstEpisodeUrl = data.episodes[0];
         if (!firstEpisodeUrl) {
             return { speed: -1, error: '链接无效' };
         }
-        
+
         // 测试视频链接响应时间
         const videoTestStart = performance.now();
         try {
@@ -2106,10 +2026,10 @@ async function testVideoSourceSpeed(sourceKey, vodId) {
                 cache: 'no-cache',
                 signal: AbortSignal.timeout(5000) // 5秒超时
             });
-            
+
             const videoTestEnd = performance.now();
             const totalTime = videoTestEnd - startTime;
-            
+
             // 返回总响应时间（毫秒）
             return { 
                 speed: Math.round(totalTime),
@@ -2126,7 +2046,7 @@ async function testVideoSourceSpeed(sourceKey, vodId) {
                 note: 'API响应' 
             };
         }
-        
+
     } catch (error) {
         return { 
             speed: -1, 
@@ -2140,11 +2060,11 @@ function formatSpeedDisplay(speedResult) {
     if (speedResult.speed === -1) {
         return `<span class="speed-indicator error">❌ ${speedResult.error}</span>`;
     }
-    
+
     const speed = speedResult.speed;
     let className = 'speed-indicator good';
     let icon = '🟢';
-    
+
     if (speed > 2000) {
         className = 'speed-indicator poor';
         icon = '🔴';
@@ -2152,7 +2072,7 @@ function formatSpeedDisplay(speedResult) {
         className = 'speed-indicator medium';
         icon = '🟡';
     }
-    
+
     const note = speedResult.note ? ` (${speedResult.note})` : '';
     return `<span class="${className}">${icon} ${speed}ms${note}</span>`;
 }
@@ -2213,32 +2133,32 @@ async function showSwitchResourceModal() {
         // 当前播放的源放在最前面
         const isCurrentA = String(keyA) === String(currentSourceCode) && String(resultA.vod_id) === String(currentVideoId);
         const isCurrentB = String(keyB) === String(currentSourceCode) && String(resultB.vod_id) === String(currentVideoId);
-        
+
         if (isCurrentA && !isCurrentB) return -1;
         if (!isCurrentA && isCurrentB) return 1;
-        
+
         // 其余按照速度排序，速度快的在前面（速度为-1表示失败，排到最后）
         const speedA = speedResults[keyA]?.speed || 99999;
         const speedB = speedResults[keyB]?.speed || 99999;
-        
+
         if (speedA === -1 && speedB !== -1) return 1;
         if (speedA !== -1 && speedB === -1) return -1;
         if (speedA === -1 && speedB === -1) return 0;
-        
+
         return speedA - speedB;
     });
 
     // 渲染资源列表
     let html = '<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 p-4">';
-    
+
     for (const [sourceKey, result] of sortedResults) {
         if (!result) continue;
-        
+
         // 修复 isCurrentSource 判断，确保类型一致
         const isCurrentSource = String(sourceKey) === String(currentSourceCode) && String(result.vod_id) === String(currentVideoId);
         const sourceName = resourceOptions.find(opt => opt.key === sourceKey)?.name || '未知资源';
         const speedResult = speedResults[sourceKey] || { speed: -1, error: '未测试' };
-        
+
         html += `
             <div class="relative group ${isCurrentSource ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:scale-105 transition-transform'}" 
                  ${!isCurrentSource ? `onclick="switchToResource('${sourceKey}', '${result.vod_id}')"` : ''}>
@@ -2270,7 +2190,7 @@ async function showSwitchResourceModal() {
             </div>
         `;
     }
-    
+
     html += '</div>';
     modalContent.innerHTML = html;
 }
@@ -2279,12 +2199,12 @@ async function showSwitchResourceModal() {
 async function switchToResource(sourceKey, vodId) {
     // 关闭模态框
     document.getElementById('modal').classList.add('hidden');
-    
+
     showLoading();
     try {
         // 构建API参数
         let apiParams = '';
-        
+
         // 处理自定义API源
         if (sourceKey.startsWith('custom_')) {
             const customIndex = sourceKey.replace('custom_', '');
@@ -2304,8 +2224,7 @@ async function switchToResource(sourceKey, vodId) {
             // 内置API
             apiParams = '&source=' + sourceKey;
         }
-        
-        // ✅ 只清空详情缓存(因为换了源,标题相同但集数可能不同)
+         // ✅ 只清空详情缓存(因为换了源,标题相同但集数可能不同)
 		// ⚠️ 不清空弹幕缓存,因为弹幕是根据标题匹配的,与视频源无关
 		try {
 			console.log('🔄 切换视频源,清空详情缓存...');
@@ -2319,14 +2238,14 @@ async function switchToResource(sourceKey, vodId) {
 		} catch (e) {
 			console.warn('清空缓存失败:', e);
 		}
-            
+
         // Add a timestamp to prevent caching
         const timestamp = new Date().getTime();
         const cacheBuster = `&_t=${timestamp}`;
         const response = await fetch(`/api/detail?id=${encodeURIComponent(vodId)}${apiParams}${cacheBuster}`);
-        
+
         const data = await response.json();
-        
+
         if (!data.episodes || data.episodes.length === 0) {
             showToast('未找到播放资源', 'error');
             hideLoading();
@@ -2335,17 +2254,17 @@ async function switchToResource(sourceKey, vodId) {
 
         // 获取当前播放的集数索引
         const currentIndex = currentEpisodeIndex;
-        
+
         // 确定要播放的集数索引
         let targetIndex = 0;
         if (currentIndex < data.episodes.length) {
             // 如果当前集数在新资源中存在，则使用相同集数
             targetIndex = currentIndex;
         }
-        
+
         // 获取目标集数的URL
         const targetUrl = data.episodes[targetIndex];
-        
+
         // ✅ 保存当前播放进度
 		let currentPlaybackTime = 0;
 		if (art && art.video && !art.video.paused) {
@@ -2354,7 +2273,7 @@ async function switchToResource(sourceKey, vodId) {
 
 		// 构建播放页面URL，带上播放位置
 		const watchUrl = `player.html?id=${vodId}&source=${sourceKey}&url=${encodeURIComponent(targetUrl)}&index=${targetIndex}&title=${encodeURIComponent(currentVideoTitle)}&position=${Math.floor(currentPlaybackTime)}`;
-        
+
         // ✅ 保存播放进度到临时存储
 		try {
 			const progressKey = `videoProgress_temp_${currentVideoTitle}_${targetIndex}`;
@@ -2382,7 +2301,7 @@ async function switchToResource(sourceKey, vodId) {
 				console.warn('保存弹幕源ID失败:', e);
 			}
 		}
-        
+
         // 保存当前状态到localStorage
         try {
             localStorage.setItem('currentVideoTitle', data.vod_name || '未知视频');
@@ -2396,7 +2315,7 @@ async function switchToResource(sourceKey, vodId) {
 
         // 跳转到播放页面
         window.location.href = watchUrl;
-        
+
     } catch (error) {
         console.error('切换资源失败:', error);
         showToast('切换资源失败，请稍后重试', 'error');
@@ -2410,28 +2329,28 @@ async function showDanmuSourceModal() {
         showToast('弹幕功能未启用', 'error');
         return;
     }
-    
+
     const modal = document.getElementById('danmuSourceModal');
     const modalContent = document.getElementById('danmuSourceList');
-    
+
     modalContent.innerHTML = '<div class="text-center py-8 text-gray-400">正在搜索弹幕源...</div>';
     modal.classList.remove('hidden');
-    
+
     try {
         // 提取纯标题用于搜索
         const cleanTitle = currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
         const searchUrl = `${DANMU_CONFIG.baseUrl}/api/v2/search/anime?keyword=${encodeURIComponent(cleanTitle)}`;
         const searchResponse = await fetch(searchUrl);
-        
+
         if (!searchResponse.ok) throw new Error('搜索失败');
-        
+
         const searchData = await searchResponse.json();
-        
+
         if (!searchData.animes || searchData.animes.length === 0) {
             modalContent.innerHTML = '<div class="text-center py-8 text-gray-400">未找到匹配的弹幕源</div>';
             return;
         }
-        
+
         const allSources = searchData.animes.map(anime => ({
             animeId: anime.animeId,
             animeTitle: anime.animeTitle,
@@ -2440,12 +2359,12 @@ async function showDanmuSourceModal() {
             typeDescription: anime.typeDescription || '',
             score: 0
         }));
-        
+
         // 计算相似度得分
         allSources.forEach(source => {
             let score = 0;
             const title = source.animeTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
-            
+
             if (String(source.animeId) === String(currentDanmuAnimeId)) {
                 score += 10000; // 当前使用的最优先
             }
@@ -2460,26 +2379,26 @@ async function showDanmuSourceModal() {
             }
             score += calculateSimilarity(title, cleanTitle) * 200;
             score += Math.min(source.episodeCount, 50); // 集数多的加分
-            
+
             source.score = score;
         });
-        
+
         allSources.sort((a, b) => b.score - a.score);
-        
+
         // 分离推荐和其他
         const recommended = allSources.slice(0, 5); // 前5个作为推荐
         const others = allSources.slice(5);
-        
+
         let html = `
             <div class="mb-3 pb-3 border-b border-gray-700">
                 <div class="text-sm font-medium text-gray-300 mb-2">推荐弹幕源</div>
                 <div class="space-y-2">
         `;
-        
+
         recommended.forEach(source => {
             const isActive = String(source.animeId) === String(currentDanmuAnimeId);
             const typeInfo = source.typeDescription || source.type;
-            
+
             html += `
                 <button 
                     onclick="switchDanmuSource('${source.animeId}')"
@@ -2496,9 +2415,9 @@ async function showDanmuSourceModal() {
                 </button>
             `;
         });
-        
+
         html += '</div></div>';
-        
+
         if (others.length > 0) {
             html += `
                 <div class="mb-2">
@@ -2513,7 +2432,7 @@ async function showDanmuSourceModal() {
                 </div>
                 <div id="otherSourcesList" class="space-y-2 hidden max-h-[40vh] overflow-y-auto">
             `;
-            
+
             others.forEach(source => {
                 const typeInfo = source.typeDescription || source.type;
                 html += `
@@ -2527,12 +2446,12 @@ async function showDanmuSourceModal() {
                     </button>
                 `;
             });
-            
+
             html += '</div>';
         }
-        
+
         modalContent.innerHTML = html;
-        
+
     } catch (error) {
         console.error('加载弹幕源失败:', error);
         modalContent.innerHTML = '<div class="text-center py-8 text-red-400">加载失败，请重试</div>';
@@ -2563,20 +2482,20 @@ async function switchDanmuSource(animeId) {
         showToast('播放器未就绪', 'error');
         return;
     }
-    
+
     // ✅ 立即关闭弹窗,让用户可以继续观看
     document.getElementById('danmuSourceModal').classList.add('hidden');
-    
+
     // ✅ 显示后台加载提示(右下角小提示)
     showToast('正在切换弹幕源...', 'info');
-    
+
     try {
         // 保存当前播放状态
         const currentTime = art.video ? art.video.currentTime : 0;
         const isPlaying = art.video ? !art.video.paused : false;
-        
+
         // ✅ 更新全局弹幕源ID
-		currentDanmuAnimeId = animeId;
+        currentDanmuAnimeId = animeId;
 
 		// ✅ 清空当前视频相关的弹幕缓存
 		Object.keys(danmuCache).forEach(key => {
@@ -2584,35 +2503,35 @@ async function switchDanmuSource(animeId) {
 				delete danmuCache[key];
 			}
 		});
-        
+
         // ✅ 重新获取当前集弹幕(强制使用新的 animeId)
         const newDanmuku = await getDanmukuForVideo(
             currentVideoTitle, 
             currentEpisodeIndex, 
             animeId
         );
-        
+
         if (!newDanmuku || newDanmuku.length === 0) {
             showToast('该弹幕源暂无弹幕', 'warning');
             return;
         }
-        
+
         // ✅ 完全重置弹幕插件
         const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
-        
+
         // 先清空现有弹幕
         if (typeof danmukuPlugin.clear === 'function') {
             danmukuPlugin.clear();
         }
-        
+
         // 重新配置
         danmukuPlugin.config({
             danmuku: newDanmuku,
             synchronousPlayback: true
         });
-        
+
         danmukuPlugin.load();
-        
+
         // ✅ 恢复播放位置(不暂停视频)
         if (art.video && currentTime > 0) {
             art.currentTime = currentTime;
@@ -2620,16 +2539,15 @@ async function switchDanmuSource(animeId) {
                 danmukuPlugin.seek(currentTime);
             }
         }
-        
+
         // ✅ 确保视频继续播放
         if (isPlaying && art.video.paused) {
             setTimeout(() => art.play(), 100);
         }
-        
+
         // 显示成功提示
         showToast(`已加载 ${newDanmuku.length} 条弹幕`, 'success');
-        
-        // ✅ 保存用户选择(使用纯标题作为key)
+         // ✅ 保存用户选择(使用纯标题作为key)
 		try {
 			const cleanTitle = currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
 			const titleHash = simpleHash(cleanTitle);
@@ -2643,7 +2561,7 @@ async function switchDanmuSource(animeId) {
 		} catch (e) {
 			console.warn('保存弹幕源偏好失败:', e);
 		}
-        
+
     } catch (error) {
         console.error('切换弹幕源失败:', error);
         showToast('切换弹幕源失败', 'error');
