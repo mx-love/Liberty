@@ -301,6 +301,11 @@ function findBestAnimeMatch(animes, targetTitle) {
         const animeTitle = (anime.animeTitle || '').replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
 
         let score = 0;
+        
+        // 🔥 新增：bilibili 弹幕源优先加分
+		if (anime.animeTitle && anime.animeTitle.includes('from bilibili')) {
+			score += 10000; // 给 bilibili 来源最高优先级
+		}
 
         // 完全匹配得最高分
         if (animeTitle === targetTitle) {
