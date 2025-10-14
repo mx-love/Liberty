@@ -360,36 +360,61 @@ function findBestAnimeMatch(animes, targetTitle) {
     return scored[0].anime;
 }
 
-// ✅ 新增:智能匹配集数（增强版）
+// ✅ 新增:智能匹配集数（通用版 - 精确匹配优先）
 function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
     if (!episodes || episodes.length === 0) return null;
     
     // 目标集数（从0开始，需要+1）
     const targetNumber = targetIndex + 1;
     
-    // 提取所有集数信息
+    // 提取所有集数信息（支持多种格式）
     const episodesWithNumbers = episodes.map((ep, idx) => {
         const title = ep.episodeTitle || '';
         
-        // 多种集数提取模式（按优先级排序）
-        const patterns = [
-            /第\s*(\d+)\s*[集话話]/,           // 第1集、第 1 话
-            /[Ee][Pp]\.?\s*(\d+)/,             // EP1、EP.1、ep 01
-            /#第(\d+)话#/,                      // #第1话#
-            /\[第(\d+)[集话話]\]/,              // [第1集]
-            /\(第(\d+)[集话話]\)/,              // (第1集)
-            /【第(\d+)[集话話]】/,              // 【第1集】
-            /^\s*(\d+)\s*$/,                   // 纯数字
-            /\b0*(\d+)\b/                      // 任意数字（去除前导0）
-        ];
-        
         let episodeNumber = null;
-        for (const pattern of patterns) {
-            const match = title.match(pattern);
-            if (match) {
-                episodeNumber = parseInt(match[1]);
-                if (episodeNumber > 0 && episodeNumber <= 9999) {
-                    break; // 找到合理的集数就停止
+        let subPart = ''; // 上中下标识
+        let dateStr = ''; // 日期字符串
+        
+        // === 综合匹配模式（按优先级排序）===
+        
+        // 1. 日期+上中下 (20240315上, 2024-03-15下)
+        const datePartMatch = title.match(/(\d{4}[-\.]?\d{2}[-\.]?\d{2})([上中下])?/);
+        if (datePartMatch) {
+            dateStr = datePartMatch[1].replace(/[-\.]/g, '');
+            subPart = datePartMatch[2] || '';
+            // 如果只有日期没有数字，用日期后4位作为排序依据
+            if (!episodeNumber) {
+                episodeNumber = parseInt(dateStr.slice(-4));
+            }
+        }
+        
+        // 2. 期数+上中下 (第1期, 01上, 02下)
+        const periodMatch = title.match(/(?:第)?0*(\d+)期([上中下])?/);
+        if (periodMatch) {
+            episodeNumber = parseInt(periodMatch[1]);
+            subPart = periodMatch[2] || subPart;
+        }
+        
+        // 3. 普通集数 (第1集、EP1、第1话)
+        if (!episodeNumber) {
+            const patterns = [
+                /第\s*(\d+)\s*[集话話]/,           // 第1集、第 1 话
+                /[Ee][Pp]\.?\s*(\d+)/,             // EP1、EP.1、ep 01
+                /#第(\d+)话#/,                      // #第1话#
+                /\[第(\d+)[集话話]\]/,              // [第1集]
+                /\(第(\d+)[集话話]\)/,              // (第1集)
+                /【第(\d+)[集话話]】/,              // 【第1集】
+                /^\s*(\d+)\s*$/,                   // 纯数字
+                /\b0*(\d+)\b/                      // 任意数字（去除前导0）
+            ];
+            
+            for (const pattern of patterns) {
+                const match = title.match(pattern);
+                if (match) {
+                    episodeNumber = parseInt(match[1]);
+                    if (episodeNumber > 0 && episodeNumber <= 9999) {
+                        break;
+                    }
                 }
             }
         }
@@ -397,41 +422,31 @@ function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
         return {
             episode: ep,
             number: episodeNumber !== null ? episodeNumber : (idx + 1),
+            subPart: subPart,
+            dateStr: dateStr,
             title: title,
             index: idx
         };
     });
     
-    // 策略1: 精确匹配集数编号
+    // === 严格匹配策略（只使用可靠的匹配方式）===
+    
+    // 策略1: 直接索引匹配（最可靠，适用于大多数情况）
+    if (targetIndex >= 0 && targetIndex < episodes.length) {
+        const indexMatch = episodesWithNumbers[targetIndex];
+        console.log(`✓ [弹幕] 索引匹配 #${targetIndex + 1}: ${indexMatch.title}`);
+        return indexMatch.episode;
+    }
+    
+    // 策略2: 精确匹配集数编号（仅在索引超出范围时使用）
     const exactMatch = episodesWithNumbers.find(ep => ep.number === targetNumber);
     if (exactMatch) {
         console.log(`✓ [弹幕] 精确匹配第${targetNumber}集: ${exactMatch.title}`);
         return exactMatch.episode;
     }
     
-    // 策略2: 使用索引匹配（适用于弹幕源集数连续但编号不同的情况）
-    if (targetIndex >= 0 && targetIndex < episodes.length) {
-        const indexMatch = episodesWithNumbers[targetIndex];
-        console.log(`✓ [弹幕] 索引匹配第${targetNumber}集 (弹幕源第${indexMatch.number}集): ${indexMatch.title}`);
-        return indexMatch.episode;
-    }
-    
-    // 策略3: 模糊匹配（集数相近）
-    const nearMatch = episodesWithNumbers.find(ep => 
-        Math.abs(ep.number - targetNumber) <= 2 && ep.number > 0
-    );
-    if (nearMatch) {
-        console.warn(`⚠ [弹幕] 模糊匹配第${targetNumber}集 -> 使用第${nearMatch.number}集: ${nearMatch.title}`);
-        return nearMatch.episode;
-    }
-    
-    // 策略4: 兜底 - 使用第一集
-    if (episodes.length > 0) {
-        console.warn(`⚠ [弹幕] 无法匹配第${targetNumber}集，使用第一集弹幕`);
-        return episodes[0];
-    }
-    
-    console.error(`✗ [弹幕] 完全无法匹配第${targetNumber}集`);
+    // ❌ 无法匹配 - 不使用模糊匹配和兜底方案，避免加载错误弹幕
+    console.warn(`⚠ [弹幕] 无法找到第${targetIndex + 1}集的准确弹幕，已跳过加载`);
     return null;
 }
 
