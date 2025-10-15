@@ -2230,17 +2230,28 @@ async function switchToResource(sourceKey, vodId) {
             // 内置API
             apiParams = '&source=' + sourceKey;
         }
-         // ✅ 只清空详情缓存(因为换了源,标题相同但集数可能不同)
-		// ⚠️ 不清空弹幕缓存,因为弹幕是根据标题匹配的,与视频源无关
+        // ✅ 清空详情缓存和当前视频的弹幕缓存
 		try {
-			console.log('🔄 切换视频源,清空详情缓存...');
+			console.log('🔄 切换视频源,清空缓存...');
+    
+			// 清空详情缓存
 			Object.keys(animeDetailCache).forEach(key => {
 				if (key.startsWith('title_')) {
 					delete animeDetailCache[key];
 				}
 			});
-		saveCache(animeDetailCache);
-			console.log('✅ 已清空详情缓存,保留弹幕缓存');
+			saveCache(animeDetailCache);
+    
+			// 清空当前视频相关的弹幕缓存
+			const cleanTitle = currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
+			const titleHash = simpleHash(cleanTitle);
+			Object.keys(danmuCache).forEach(key => {
+				if (key.includes(titleHash) || key.includes(String(currentDanmuAnimeId))) {
+					delete danmuCache[key];
+				}
+			});
+    
+			console.log('✅ 已清空详情缓存和弹幕缓存');
 		} catch (e) {
 			console.warn('清空缓存失败:', e);
 		}
@@ -2276,11 +2287,8 @@ async function switchToResource(sourceKey, vodId) {
 		if (art && art.video && !art.video.paused) {
 			currentPlaybackTime = art.video.currentTime;
 		}
-
-		// 构建播放页面URL，带上播放位置
-		const watchUrl = `player.html?id=${vodId}&source=${sourceKey}&url=${encodeURIComponent(targetUrl)}&index=${targetIndex}&title=${encodeURIComponent(currentVideoTitle)}&position=${Math.floor(currentPlaybackTime)}`;
-
-        // ✅ 保存播放进度到临时存储
+		
+		// ✅ 保存播放进度到临时存储
 		try {
 			const progressKey = `videoProgress_temp_${currentVideoTitle}_${targetIndex}`;
 			localStorage.setItem(progressKey, JSON.stringify({
@@ -2307,6 +2315,9 @@ async function switchToResource(sourceKey, vodId) {
 				console.warn('保存弹幕源ID失败:', e);
 			}
 		}
+
+		// 构建播放页面URL，带上播放位置
+		const watchUrl = `player.html?id=${vodId}&source=${sourceKey}&url=${encodeURIComponent(targetUrl)}&index=${targetIndex}&title=${encodeURIComponent(currentVideoTitle)}&position=${Math.floor(currentPlaybackTime)}`;
 
         // 保存当前状态到localStorage
         try {
