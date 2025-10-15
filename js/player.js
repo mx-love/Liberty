@@ -279,8 +279,8 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
         // 剧集处理
         const matchedEpisode = findBestEpisodeMatch(episodes, episodeIndex, title);
         if (!matchedEpisode) {
-            console.error(`✗ [弹幕] 无法为第${episodeIndex + 1}集加载弹幕`);
-            return [];
+            console.warn(`⚠ [弹幕] 无法为第${episodeIndex + 1}集加载弹幕，跳过弹幕加载`);
+            return []; // 返回空数组，视频继续播放但没有弹幕
         }
 
         const episodeId = matchedEpisode.episodeId;
@@ -288,7 +288,7 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
 
     } catch (error) {
         console.error('获取弹幕失败:', error);
-        return [];
+        return []; // 发生错误时返回空数组，不影响视频播放
     }
 }
 
@@ -401,22 +401,8 @@ function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
         return indexMatch.episode;
     }
 
-    // 策略3: 模糊匹配（集数相近）
-    const nearMatch = episodesWithNumbers.find(ep => 
-        Math.abs(ep.number - targetNumber) <= 2 && ep.number > 0
-    );
-    if (nearMatch) {
-        console.warn(`⚠ [弹幕] 模糊匹配第${targetNumber}集 -> 使用第${nearMatch.number}集: ${nearMatch.title}`);
-        return nearMatch.episode;
-    }
-
-    // 策略4: 兜底 - 使用第一集
-    if (episodes.length > 0) {
-        console.warn(`⚠ [弹幕] 无法匹配第${targetNumber}集，使用第一集弹幕`);
-        return episodes[0];
-    }
-
-    console.error(`✗ [弹幕] 完全无法匹配第${targetNumber}集`);
+    // ❌ 删除策略3和策略4 - 如果无法精确匹配，直接返回null
+    console.error(`✗ [弹幕] 无法为第${targetNumber}集找到匹配的弹幕源（共${episodes.length}集可用）`);
     return null;
 }
 
@@ -1237,10 +1223,17 @@ function initPlayer(videoUrl) {
         }
     }
 
-    // ✅ 自动加载弹幕
+    // ✅ 自动加载弹幕 - 增加延迟并确保播放器完全就绪
     if (DANMU_CONFIG.enabled && art.plugins.artplayerPluginDanmuku) {
-        setTimeout(async () => {
+        // 等待播放器完全就绪后再加载弹幕
+        const loadDanmaku = async () => {
             try {
+                // 确保视频已经开始加载
+                if (!art.video || art.video.readyState < 2) {
+                    setTimeout(loadDanmaku, 200);
+                    return;
+                }
+
                 const danmuku = await getDanmukuForVideo(
                     currentVideoTitle, 
                     currentEpisodeIndex,
@@ -1248,6 +1241,11 @@ function initPlayer(videoUrl) {
                 );
 
                 if (danmuku && danmuku.length > 0) {
+                    // 先清空旧弹幕
+                    if (typeof art.plugins.artplayerPluginDanmuku.clear === 'function') {
+                        art.plugins.artplayerPluginDanmuku.clear();
+                    }
+
                     art.plugins.artplayerPluginDanmuku.config({
                         danmuku: danmuku,
                         synchronousPlayback: true
@@ -1269,7 +1267,10 @@ function initPlayer(videoUrl) {
             } catch (e) {
                 console.error('❌ 弹幕加载失败:', e);
             }
-        }, 300);
+        };
+
+        // 延迟加载，确保播放器完全准备好
+        setTimeout(loadDanmaku, 800);
     }
 
     startProgressSaveInterval();
