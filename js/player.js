@@ -95,10 +95,112 @@ Artplayer.FULLSCREEN_WEB_IN_BODY = true;
 
 let saveProgressTimer = null; // 用于防抖保存进度
 
+// ===== 弹幕API代理管理系统 =====
+class DanmuProxyManager {
+  constructor() {
+    this.proxyList = [
+      {
+        id: 1,
+        name: '官方API',
+        url: 'https://danmu.manxue.eu.org',
+        token: '87654321',
+        enabled: true,
+        type: 'direct'
+      },
+      {
+        id: 2,
+        name: '本地代理',
+        url: '/api/danmu',
+        token: '',
+        enabled: true,
+        type: 'local'
+      }
+    ];
+    
+    // 从localStorage加载自定义配置
+    const saved = localStorage.getItem('danmuProxyList');
+    if (saved) {
+      try {
+        this.proxyList = JSON.parse(saved);
+      } catch (e) {
+        console.warn('代理配置加载失败', e);
+      }
+    }
+    
+    this.currentProxyIndex = 0;
+  }
+
+  getBaseUrl() {
+    const enabledProxies = this.proxyList.filter(p => p.enabled);
+    if (enabledProxies.length === 0) return null;
+    
+    const proxy = enabledProxies[this.currentProxyIndex];
+    return `${proxy.url}${proxy.token ? '/' + proxy.token : ''}`;
+  }
+
+  // 故障转移到下一个代理
+  switchToNextProxy() {
+    const enabledProxies = this.proxyList.filter(p => p.enabled);
+    this.currentProxyIndex = (this.currentProxyIndex + 1) % enabledProxies.length;
+    console.log(`[弹幕] 切换到代理: ${enabledProxies[this.currentProxyIndex].name}`);
+  }
+
+  async fetchWithRetry(url, options = {}, maxRetries = 3) {
+    let lastError;
+    const enabledProxies = this.proxyList.filter(p => p.enabled);
+    
+    if (enabledProxies.length === 0) {
+      throw new Error('没有可用的代理');
+    }
+
+    for (let attempt = 0; attempt < maxRetries && enabledProxies.length > 0; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        
+        const response = await fetch(url, {
+          ...options,
+          signal: controller.signal,
+          headers: {
+            'Content-Type': 'application/json',
+            ...options.headers
+          }
+        });
+        
+        clearTimeout(timeout);
+        
+        if (response.ok) {
+          return response;
+        } else {
+          throw new Error(`HTTP ${response.status}`);
+        }
+      } catch (error) {
+        lastError = error;
+        console.warn(`[弹幕] 代理请求失败 (${attempt + 1}/${maxRetries}): ${error.message}`);
+        
+        // 尝试下一个代理
+        if (attempt < maxRetries - 1) {
+          this.switchToNextProxy();
+          const baseUrl = this.getBaseUrl();
+          url = url.replace(/https?:\/\/[^/]+/, baseUrl);
+        }
+        
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+    
+    throw lastError || new Error('所有代理请求均失败');
+  }
+}
+
+const proxyManager = new DanmuProxyManager();
+
 // 弹幕配置
 const DANMU_CONFIG = {
-    baseUrl: 'https://danmu.manxue.eu.org/87654321', // 你的弹幕服务地址
-    enabled: true, // 是否启用弹幕
+  get baseUrl() {
+    return proxyManager.getBaseUrl() || 'https://danmu.manxue.eu.org/87654321';
+  },
+  enabled: true,
 };
 
 // 弹幕缓存
@@ -198,7 +300,7 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
 
             // 1. 搜索动漫
             const searchUrl = `${DANMU_CONFIG.baseUrl}/api/v2/search/anime?keyword=${encodeURIComponent(cleanTitle)}`;
-            const searchResponse = await fetch(searchUrl);
+            const searchResponse = await proxyManager.fetchWithRetry(searchUrl);
             if (!searchResponse.ok) {
                 console.warn('弹幕搜索失败:', searchResponse.status);
                 return [];
@@ -460,7 +562,7 @@ function isMovieContent(animeInfo) {
 // ✅ 新增：获取弹幕的独立函数
 async function fetchDanmaku(episodeId, cacheKey) {
     const commentUrl = `${DANMU_CONFIG.baseUrl}/api/v2/comment/${episodeId}?withRelated=true&chConvert=1`;
-    const commentResponse = await fetch(commentUrl);
+    const commentResponse = await proxyManager.fetchWithRetry(commentUrl);
 
     if (!commentResponse.ok) {
         console.warn('获取弹幕失败');
@@ -2357,7 +2459,7 @@ async function showDanmuSourceModal() {
         // 提取纯标题用于搜索
         const cleanTitle = currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
         const searchUrl = `${DANMU_CONFIG.baseUrl}/api/v2/search/anime?keyword=${encodeURIComponent(cleanTitle)}`;
-        const searchResponse = await fetch(searchUrl);
+        const searchResponse = await proxyManager.fetchWithRetry(searchUrl);
 
         if (!searchResponse.ok) throw new Error('搜索失败');
 
