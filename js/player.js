@@ -147,7 +147,12 @@ const CACHE_EXPIRE_TIME = 24 * 60 * 60 * 1000; // 1 天
 async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
     if (!DANMU_CONFIG.enabled) return [];
 
-    const cleanTitle = title.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
+    const cleanTitle = title
+    .replace(/\([^)]*\)/g, '')           // 去除圆括号
+    .replace(/【[^】]*】/g, '')          // 去除方括号
+    .replace(/\s*from\s+\w+/gi, '')     // ✅ 新增：去除 "from xxx"
+    .trim();
+    
     let animeId = forceAnimeId || currentDanmuAnimeId;
     
     if (!animeId) {
