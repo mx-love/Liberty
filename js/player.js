@@ -97,7 +97,7 @@ let saveProgressTimer = null; // 用于防抖保存进度
 
 // 弹幕配置
 const DANMU_CONFIG = {
-    baseUrl: '/api/danmu', // 改为使用前端代理路径
+    baseUrl: '/api/danmu/api/v2', // 改为使用前端代理路径
     enabled: true,
 };
 
