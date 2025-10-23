@@ -97,8 +97,8 @@ let saveProgressTimer = null; // 用于防抖保存进度
 
 // 弹幕配置
 const DANMU_CONFIG = {
-    baseUrl: 'https://danmu.manxue.eu.org/87654321', // 你的弹幕服务地址
-    enabled: true, // 是否启用弹幕
+    baseUrl: '/api/danmu', // 改为使用前端代理路径
+    enabled: true,
 };
 
 // 弹幕缓存
