@@ -642,9 +642,18 @@ async function search() {
 
         // 从所有选中的API源搜索
         let allResults = [];
-        const searchPromises = selectedAPIs.map(apiId => 
-            searchByAPIAndKeyWord(apiId, query)
-        );
+		const searchPromises = selectedAPIs.map(async (apiId) => {
+			const startTime = performance.now(); // 记录开始时间
+			const results = await searchByAPIAndKeyWord(apiId, query);
+			const endTime = performance.now(); // 记录结束时间
+			const responseTime = endTime - startTime; // 计算响应时间
+    
+			// 为每个结果添加响应时间信息
+			return results.map(item => ({
+				...item,
+				_responseTime: responseTime
+			}));
+		});
 
         // 等待所有搜索请求完成
         const resultsArray = await Promise.all(searchPromises);
@@ -656,15 +665,27 @@ async function search() {
             }
         });
 
-        // 对搜索结果进行排序：按名称优先，名称相同时按接口源排序
-        allResults.sort((a, b) => {
-            // 首先按照视频名称排序
-            const nameCompare = (a.vod_name || '').localeCompare(b.vod_name || '');
-            if (nameCompare !== 0) return nameCompare;
-            
-            // 如果名称相同，则按照来源排序
-            return (a.source_name || '').localeCompare(b.source_name || '');
-        });
+        // 🔥 高级排序：按源速度 + 更新时间
+		allResults.sort((a, b) => {
+			// 1. 优先按响应速度排序（快的在前）
+			const timeA = a._responseTime || Infinity;
+			const timeB = b._responseTime || Infinity;
+			if (Math.abs(timeA - timeB) > 500) { // 差距大于500ms才按速度排序
+				return timeA - timeB;
+			}
+    
+			// 2. 速度相近时，按来源分组
+			const sourceCompare = (a.source_name || '').localeCompare(b.source_name || '');
+			if (sourceCompare !== 0) return sourceCompare;
+    
+			// 3. 同一来源内，按年份降序（最新的在前）
+			const yearA = parseInt(a.vod_year) || 0;
+			const yearB = parseInt(b.vod_year) || 0;
+			if (yearA !== yearB) return yearB - yearA;
+    
+			// 4. 年份相同时，按视频名称排序
+			return (a.vod_name || '').localeCompare(b.vod_name || '');
+		});
 
         // 更新搜索结果计数
         const searchResultsCount = document.getElementById('searchResultsCount');
@@ -727,21 +748,49 @@ async function search() {
                 return !banned.some(keyword => typeName.includes(keyword));
             });
         }
+        
+        // 🔥 新增：过滤短视频、短剧、微电影等低质量内容
+		const shortVideoKeywords = [
+			'短剧', '短视频', '微电影', '竖屏', '网络短剧', 
+			'微短剧', '竖屏短剧', '横屏短剧', '快手', '抖音',
+			'小视频', '小短剧'
+		];
+
+		allResults = allResults.filter(item => {
+			const vodName = (item.vod_name || '').toLowerCase();
+			const typeName = (item.type_name || '').toLowerCase();
+			const remarks = (item.vod_remarks || '').toLowerCase();
+    
+			// 检查标题、类型、备注中是否包含短视频关键词
+			const hasShortVideoKeyword = shortVideoKeywords.some(keyword => 
+				vodName.includes(keyword.toLowerCase()) || 
+				typeName.includes(keyword.toLowerCase()) ||
+				remarks.includes(keyword.toLowerCase())
+			);
+    
+			return !hasShortVideoKeyword;
+		});
 
         // 添加XSS保护，使用textContent和属性转义
-        const safeResults = allResults.map(item => {
-            const safeId = item.vod_id ? item.vod_id.toString().replace(/[^\w-]/g, '') : '';
-            const safeName = (item.vod_name || '').toString()
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;');
-            const sourceInfo = item.source_name ?
-                `<span class="bg-[#222] text-xs px-1.5 py-0.5 rounded-full">${item.source_name}</span>` : '';
-            const sourceCode = item.source_code || '';
+		const safeResults = allResults.map(item => {
+			const safeId = item.vod_id ? item.vod_id.toString().replace(/[^\w-]/g, '') : '';
+			const safeName = (item.vod_name || '').toString()
+				.replace(/</g, '&lt;')
+				.replace(/>/g, '&gt;')
+				.replace(/"/g, '&quot;');
+    
+			// 🔥 添加响应时间和速度标签
+			const responseTime = item._responseTime ? Math.round(item._responseTime) : null;
+			const speedBadge = responseTime ? 
+				`<span class="text-xs ${responseTime < 1000 ? 'text-green-400' : responseTime < 2000 ? 'text-yellow-400' : 'text-red-400'}">${responseTime}ms</span>` : '';
+			const sourceInfo = item.source_name ?
+				`<span class="bg-[#222] text-xs px-1.5 py-0.5 rounded-full">${item.source_name} ${speedBadge}</span>` : '';
+    
+			const sourceCode = item.source_code || '';
 
-            // 添加API URL属性，用于详情获取
-            const apiUrlAttr = item.api_url ?
-                `data-api-url="${item.api_url.replace(/"/g, '&quot;')}"` : '';
+			// 添加API URL属性，用于详情获取
+			const apiUrlAttr = item.api_url ?
+				`data-api-url="${item.api_url.replace(/"/g, '&quot;')}"` : '';
 
             // 修改为水平卡片布局，图片在左侧，文本在右侧，并优化样式
             const hasCover = item.vod_pic && item.vod_pic.startsWith('http');
