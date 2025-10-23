@@ -196,6 +196,54 @@ async function handleApiRequest(url) {
                 throw fetchError;
             }
         }
+        
+         // ===== 在这里添加弹幕代理处理 =====
+        // 弹幕API代理处理
+        if (url.pathname.startsWith('/api/danmu/')) {
+            // 提取弹幕API的实际路径
+            const danmuPath = url.pathname.replace('/api/danmu/', '');
+            const queryString = url.search; // 保留查询参数
+            
+            // 构建完整的弹幕API URL
+            const danmuApiUrl = `https://danmu.manxue.eu.org/87654321/${danmuPath}${queryString}`;
+            
+            console.log('[弹幕代理] 请求URL:', danmuApiUrl);
+            
+            // 添加超时处理
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            
+            try {
+                // 通过现有的代理服务器转发请求
+                const proxiedUrl = await window.ProxyAuth?.addAuthToProxyUrl ? 
+                    await window.ProxyAuth.addAuthToProxyUrl(PROXY_URL + encodeURIComponent(danmuApiUrl)) :
+                    PROXY_URL + encodeURIComponent(danmuApiUrl);
+                
+                const response = await fetch(proxiedUrl, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+                        'Accept': 'application/json'
+                    },
+                    signal: controller.signal
+                });
+                
+                clearTimeout(timeoutId);
+                
+                if (!response.ok) {
+                    throw new Error(`弹幕API请求失败: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                console.log('[弹幕代理] 成功获取数据');
+                
+                return JSON.stringify(data);
+            } catch (fetchError) {
+                clearTimeout(timeoutId);
+                console.error('[弹幕代理] 请求失败:', fetchError);
+                throw new Error(`弹幕请求失败: ${fetchError.message}`);
+            }
+        }
+        // ===== 弹幕代理处理结束 =====
 
         throw new Error('未知的API路径');
     } catch (error) {
