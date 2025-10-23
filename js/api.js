@@ -1,3 +1,53 @@
+// 拦截API请求
+(function() {
+    const originalFetch = window.fetch;
+    
+    window.fetch = async function(input, init) {
+        const requestUrl = typeof input === 'string' ? new URL(input, window.location.origin) : input.url;
+        
+        // ===== 添加调试日志 =====
+        console.log('[FETCH 拦截] 完整URL:', input);
+        console.log('[FETCH 拦截] pathname:', requestUrl.pathname);
+        console.log('[FETCH 拦截] 是否以 /api/ 开头:', requestUrl.pathname.startsWith('/api/'));
+        
+        if (requestUrl.pathname.startsWith('/api/danmu/')) {
+            console.log('[FETCH 拦截] ✅ 检测到弹幕请求!');
+        }
+        // ===== 调试日志结束 =====
+        
+        if (requestUrl.pathname.startsWith('/api/')) {
+            if (window.isPasswordProtected && window.isPasswordVerified) {
+                if (window.isPasswordProtected() && !window.isPasswordVerified()) {
+                    return;
+                }
+            }
+            try {
+                console.log('[API处理] 开始处理:', requestUrl.pathname);
+                const data = await handleApiRequest(requestUrl);
+                return new Response(data, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*',
+                    },
+                });
+            } catch (error) {
+                console.error('[API处理] 错误:', error);
+                return new Response(JSON.stringify({
+                    code: 500,
+                    msg: '服务器内部错误',
+                }), {
+                    status: 500,
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                });
+            }
+        }
+        
+        // 非API请求使用原始fetch
+        return originalFetch.apply(this, arguments);
+    };
+})();
 // 改进的API请求处理函数
 async function handleApiRequest(url) {
     const customApi = url.searchParams.get('customApi') || '';
