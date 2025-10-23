@@ -300,15 +300,6 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
 // ✅ 新增：智能匹配最佳动漫结果
 function findBestAnimeMatch(animes, targetTitle) {
     if (!animes || animes.length === 0) return null;
-    
-    // ✅ 调试：打印原始数据
-    console.log('🔍 [弹幕源数据] 前3个源的完整信息:', animes.slice(0, 3).map(a => ({
-        animeTitle: a.animeTitle,
-        animeId: a.animeId,
-        type: a.type,
-        typeDescription: a.typeDescription,
-        episodeCount: a.episodeCount
-    })));
 
     // 计算相似度得分
     const scored = animes.map(anime => {
@@ -316,20 +307,11 @@ function findBestAnimeMatch(animes, targetTitle) {
 
         let score = 0;
 
-        // 🔥 平台优先级（从高到低）
-		const platformPriority = {
-			'bilibili1': 2000,   // B站优先（弹幕质量最高）
-			'iqiyi': 1500,      // 爱奇艺
-			'qq': 1200,         // 腾讯视频
-			'youku': 800,       // 优酷
-		};
-
-		// 从标题中提取平台信息
+        // 从标题中提取弹幕源信息
 		const platformMatch = anime.animeTitle.match(/from\s+(\w+)/i);
 		if (platformMatch) {
 			const platform = platformMatch[1].toLowerCase();
-			score += platformPriority[platform] || 500; // 其他平台500分
-			console.log(`  平台: ${platform}, 加分: ${platformPriority[platform] || 500}`);
+			console.log(`  弹幕源: ${platform}`);
 		}
 
         // 完全匹配得最高分（提高权重，确保不会被平台分超过）
@@ -1569,7 +1551,7 @@ function playEpisode(index) {
 	}
 
 	// ✅ 重置弹幕源ID（让新集数重新匹配）
-	currentDanmuAnimeId = null;
+	// currentDanmuAnimeId = null;
 
     clearVideoProgress();
 
@@ -2305,7 +2287,9 @@ async function switchToResource(sourceKey, vodId) {
 			});
 			saveCache(animeDetailCache);
 
-			// 清空当前视频相关的弹幕缓存
+			/*
+			
+			 清空当前视频相关的弹幕缓存
 			const cleanTitle = currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
 			const titleHash = simpleHash(cleanTitle);
 			Object.keys(danmuCache).forEach(key => {
@@ -2313,6 +2297,8 @@ async function switchToResource(sourceKey, vodId) {
 					delete danmuCache[key];
 				}
 			});
+			
+			*/
 
 			console.log('✅ 已清空详情缓存和弹幕缓存');
 		} catch (e) {
