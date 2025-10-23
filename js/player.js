@@ -298,48 +298,57 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
 }
 
 // ✅ 新增：智能匹配最佳动漫结果
-// 计算相似度得分
-const scored = animes.map(anime => {
-    const animeTitle = (anime.animeTitle || '').replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
+function findBestAnimeMatch(animes, targetTitle) {
+    if (!animes || animes.length === 0) return null;
 
-    let score = 0;
-    
-    // 🔥 新增：bilibili 弹幕源优先加分
-    if (anime.animeTitle && anime.animeTitle.includes('from bilibili1')) {
-        score += 10000;
-    }
+    // 计算相似度得分
+    const scored = animes.map(anime => {
+        const animeTitle = (anime.animeTitle || '').replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
 
-    if (animeTitle === targetTitle) {
-        score += 1000;
-    }
+        let score = 0;
 
-    if (animeTitle.includes(targetTitle)) {
-        score += 500;
-    }
+        // 🔥 新增：bilibili 弹幕源优先加分
+		if (anime.animeTitle && anime.animeTitle.includes('from bilibili')) {
+			score += 10000; // 给 bilibili 来源最高优先级
+		}
 
-    if (targetTitle.includes(animeTitle)) {
-        score += 300;
-    }
+        // 完全匹配得最高分
+        if (animeTitle === targetTitle) {
+            score += 1000;
+        }
 
-    const similarity = calculateSimilarity(animeTitle, targetTitle);
-    score += similarity * 200;
+        // 包含目标标题
+        if (animeTitle.includes(targetTitle)) {
+            score += 500;
+        }
 
-    if (anime.episodeCount) {
-        score += Math.min(anime.episodeCount, 50);
-    }
+        // 目标标题包含动漫标题
+        if (targetTitle.includes(animeTitle)) {
+            score += 300;
+        }
 
-    return { anime, score };
-});
+        // 字符串相似度（简单实现）
+        const similarity = calculateSimilarity(animeTitle, targetTitle);
+        score += similarity * 200;
 
-// 按得分排序，取最高分
-scored.sort((a, b) => b.score - a.score);
+        // 优先选择集数较多的（更可能是正片）
+        if (anime.episodeCount) {
+            score += Math.min(anime.episodeCount, 50);
+        }
 
-console.log('弹幕源匹配得分:', scored.map(s => ({
-    title: s.anime.animeTitle,
-    score: s.score
-})));
+        return { anime, score };
+    });
 
-return scored[0].anime;
+    // 按得分排序，取最高分
+    scored.sort((a, b) => b.score - a.score);
+
+    console.log('弹幕源匹配得分:', scored.map(s => ({
+        title: s.anime.animeTitle,
+        score: s.score
+    })));
+
+    return scored[0].anime;
+}
 
 // ✅ 新增:智能匹配集数（增强版）
 function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
