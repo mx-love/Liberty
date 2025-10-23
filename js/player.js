@@ -323,29 +323,41 @@ function findBestAnimeMatch(animes, targetTitle) {
 			console.log(`  平台: ${platform}, 加分: ${platformPriority[platform] || 500}`);
 		}
 
-        // 完全匹配得最高分
-        if (animeTitle === targetTitle) {
-            score += 1000;
-        }
+        // 完全匹配得最高分（提高权重，确保不会被平台分超过）
+		if (animeTitle === targetTitle) {
+			score += 5000;  // ✅ 大幅提高，确保完全匹配优先
+		}
 
-        // 包含目标标题
-        if (animeTitle.includes(targetTitle)) {
-            score += 500;
-        }
+		// 包含目标标题
+		if (animeTitle.includes(targetTitle)) {
+			score += 2500;  // ✅ 提高权重
+		}
 
-        // 目标标题包含动漫标题
-        if (targetTitle.includes(animeTitle)) {
-            score += 300;
-        }
+		// 目标标题包含动漫标题
+		if (targetTitle.includes(animeTitle)) {
+			score += 1500;  // ✅ 提高权重
+		}
 
-        // 字符串相似度（简单实现）
-        const similarity = calculateSimilarity(animeTitle, targetTitle);
-        score += similarity * 200;
+		// 字符串相似度
+		const similarity = calculateSimilarity(animeTitle, targetTitle);
+		score += similarity * 1000;  // ✅ 提高权重
 
-        // 优先选择集数较多的（更可能是正片）
-        if (anime.episodeCount) {
-            score += Math.min(anime.episodeCount, 50);
-        }
+		// 优先选择集数合理的（12、13、24、26等常见集数）
+		if (anime.episodeCount) {
+			const commonEpisodeCounts = [12, 13, 24, 25, 26, 52];
+			if (commonEpisodeCounts.includes(anime.episodeCount)) {
+				score += 200;  // ✅ 常见集数加分
+			} else {
+				score += Math.min(anime.episodeCount, 100);
+			}
+		}
+
+		// 降低电影/OVA/特典的优先级（除非标题明确包含）
+		if (anime.type && (anime.type.includes('OVA') || anime.type.includes('特典'))) {
+			if (!targetTitle.includes('OVA') && !targetTitle.includes('特典')) {
+					score -= 1000;  // ✅ 大幅降低非正片内容的优先级
+			}
+		}
 
         return { anime, score };
     });
@@ -353,10 +365,12 @@ function findBestAnimeMatch(animes, targetTitle) {
     // 按得分排序，取最高分
     scored.sort((a, b) => b.score - a.score);
 
-    console.log('弹幕源匹配得分:', scored.map(s => ({
-        title: s.anime.animeTitle,
-        score: s.score
-    })));
+    console.log('🎯 [弹幕源匹配] 前5个候选:', scored.slice(0, 5).map(s => ({
+		title: s.anime.animeTitle,
+		episodes: s.anime.episodeCount,
+		score: s.score,
+		platform: s.anime.animeTitle.match(/from\s+(\w+)/i)?.[1] || '未知'
+	})));
 
     return scored[0].anime;
 }
