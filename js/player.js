@@ -97,7 +97,7 @@ let saveProgressTimer = null; // 用于防抖保存进度
 
 // 弹幕配置
 const DANMU_CONFIG = {
-    baseUrl: '/api/danmu/api/v2', // 改为使用前端代理路径
+    baseUrl: '/api/danmu', // 简单的基础路径
     enabled: true,
 };
 
@@ -202,7 +202,7 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
             console.log(cached ? '⏰ 缓存过期，执行完整请求' : 'ℹ️ 首次请求，执行完整请求');
 
             // 1. 搜索动漫
-            const searchUrl = `${DANMU_CONFIG.baseUrl}/api/v2/search/anime?keyword=${encodeURIComponent(cleanTitle)}`;
+            const searchUrl = `/api/danmu/api/v2/search/anime?keyword=${encodeURIComponent(cleanTitle)}`;
             const searchResponse = await fetch(searchUrl);
             if (!searchResponse.ok) {
                 console.warn('弹幕搜索失败:', searchResponse.status);
@@ -237,7 +237,7 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
             isMovie = isMovieContent(animeInfo);
 
             // 2. 获取动漫详情
-            const detailUrl = `${DANMU_CONFIG.baseUrl}/api/v2/bangumi/${animeId}`;
+            const detailUrl = `/api/danmu/api/v2/bangumi/${animeId}`;
             const detailResponse = await fetch(detailUrl);
             if (!detailResponse.ok) {
                 console.warn('获取动漫详情失败');
@@ -464,7 +464,7 @@ function isMovieContent(animeInfo) {
 
 // ✅ 新增：获取弹幕的独立函数
 async function fetchDanmaku(episodeId, cacheKey) {
-    const commentUrl = `${DANMU_CONFIG.baseUrl}/api/v2/comment/${episodeId}?withRelated=true&chConvert=1`;
+    const commentUrl = `/api/danmu/api/v2/comment/${episodeId}?withRelated=true&chConvert=1`;
     const commentResponse = await fetch(commentUrl);
 
     if (!commentResponse.ok) {
