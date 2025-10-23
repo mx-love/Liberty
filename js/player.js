@@ -309,7 +309,7 @@ function findBestAnimeMatch(animes, targetTitle) {
 
         // 🔥 平台优先级（从高到低）
 		const platformPriority = {
-			'bilibili': 2000,   // B站优先（弹幕质量最高）
+			'bilibili1': 2000,   // B站优先（弹幕质量最高）
 			'iqiyi': 1500,      // 爱奇艺
 			'qq': 1200,         // 腾讯视频
 			'youku': 800,       // 优酷
