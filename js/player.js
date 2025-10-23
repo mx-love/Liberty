@@ -309,10 +309,10 @@ function findBestAnimeMatch(animes, targetTitle) {
 
         // 🔥 平台优先级（从高到低）
 		const platformPriority = {
-			'bilibili1': 2000,   // B站优先（弹幕质量最高）
-			'iqiyi': 1500,      // 爱奇艺
-			'qq': 1200,         // 腾讯视频
-			'youku': 800,       // 优酷
+			'bilibili': 5000,   // B站
+			'iqiyi': 3500,       // 爱奇艺
+			'qq': 3000,          // 腾讯视频（降低优先级）
+			'youku': 2000,       // 优酷
 		};
 
 		// 从标题中提取平台信息
@@ -323,24 +323,24 @@ function findBestAnimeMatch(animes, targetTitle) {
 			console.log(`  平台: ${platform}, 加分: ${platformPriority[platform] || 500}`);
 		}
 
-        // 完全匹配得最高分（提高权重，确保不会被平台分超过）
+        // 完全匹配（降低权重，让平台优先级起主要作用）
 		if (animeTitle === targetTitle) {
-			score += 5000;  // ✅ 大幅提高，确保完全匹配优先
+			score += 2000;  // ✅ 降低权重
 		}
 
 		// 包含目标标题
 		if (animeTitle.includes(targetTitle)) {
-			score += 2500;  // ✅ 提高权重
+			score += 1000;  // ✅ 降低权重
 		}
 
 		// 目标标题包含动漫标题
 		if (targetTitle.includes(animeTitle)) {
-			score += 1500;  // ✅ 提高权重
+			score += 800;   // ✅ 降低权重
 		}
 
 		// 字符串相似度
 		const similarity = calculateSimilarity(animeTitle, targetTitle);
-		score += similarity * 1000;  // ✅ 提高权重
+		score += similarity * 500;  // ✅ 降低权重，平台优先级会更有影响力
 
 		// 优先选择集数合理的（12、13、24、26等常见集数）
 		if (anime.episodeCount) {
@@ -1560,7 +1560,7 @@ function playEpisode(index) {
 	}
 
 	// ✅ 重置弹幕源ID（让新集数重新匹配）
-	currentDanmuAnimeId = null;
+	// currentDanmuAnimeId = null;
 
     clearVideoProgress();
 
