@@ -307,9 +307,20 @@ function findBestAnimeMatch(animes, targetTitle) {
 
         let score = 0;
 
-        // 🔥 新增：bilibili 弹幕源优先加分
-		if (anime.animeTitle && anime.animeTitle.includes('from bilibili')) {
-			score += 10000; // 给 bilibili 来源最高优先级
+        // 🔥 平台优先级（从高到低）
+		const platformPriority = {
+			'bilibili': 2000,   // B站优先（弹幕质量最高）
+			'iqiyi': 1500,      // 爱奇艺
+			'qq': 1200,         // 腾讯视频
+			'youku': 800,       // 优酷
+		};
+
+		// 从标题中提取平台信息
+		const platformMatch = anime.animeTitle.match(/from\s+(\w+)/i);
+		if (platformMatch) {
+			const platform = platformMatch[1].toLowerCase();
+			score += platformPriority[platform] || 500; // 其他平台500分
+			console.log(`  平台: ${platform}, 加分: ${platformPriority[platform] || 500}`);
 		}
 
         // 完全匹配得最高分
@@ -462,48 +473,57 @@ function isMovieContent(animeInfo) {
     );
 }
 
-// ✅ 新增：获取弹幕的独立函数
+// ✅ 新增：获取弹幕的独立函数（增强错误处理）
 async function fetchDanmaku(episodeId, cacheKey) {
-    const commentUrl = `${DANMU_CONFIG.baseUrl}/api/v2/comment/${episodeId}?withRelated=true&chConvert=1`;
-    const commentResponse = await fetch(commentUrl);
+    try {
+        // ✅ 验证 episodeId
+        if (!episodeId || episodeId === 'undefined' || episodeId === 'null') {
+            console.error('❌ [弹幕] episodeId 无效:', episodeId);
+            return [];
+        }
 
-    if (!commentResponse.ok) {
-        console.warn('获取弹幕失败');
+        const commentUrl = `${DANMU_CONFIG.baseUrl}/api/v2/comment/${episodeId}?withRelated=true&chConvert=1`;
+        console.log(`🔍 [弹幕] 请求URL: ${commentUrl}`);
+        
+        const commentResponse = await fetch(commentUrl);
+
+        if (!commentResponse.ok) {
+            console.warn(`⚠ [弹幕] 获取失败 (HTTP ${commentResponse.status})，episodeId: ${episodeId}`);
+            return [];
+        }
+
+        const commentData = await commentResponse.json();
+
+        const danmakuList = [];
+        if (commentData.comments && Array.isArray(commentData.comments)) {
+            commentData.comments.forEach(comment => {
+                const params = comment.p ? comment.p.split(',') : [];
+                const colorValue = parseInt(params[2] || 16777215);
+
+                let mode = parseInt(params[1] || 0);
+
+                if (mode >= 4 && mode <= 5) {
+                    mode = mode === 4 ? 2 : 1;
+                } else {
+                    mode = 0;
+                }
+
+                danmakuList.push({
+                    text: comment.m || '',
+                    time: parseFloat(params[0] || 0),
+                    mode: mode,
+                    color: '#' + colorValue.toString(16).padStart(6, '0').toUpperCase(),
+                });
+            });
+        }
+
+        console.log(`✅ [弹幕] 成功获取 ${danmakuList.length} 条弹幕`);
+        danmuCache[cacheKey] = danmakuList;
+        return danmakuList;
+    } catch (error) {
+        console.error(`❌ [弹幕] 获取失败:`, error);
         return [];
     }
-
-    const commentData = await commentResponse.json();
-
-    const danmakuList = [];
-    if (commentData.comments && Array.isArray(commentData.comments)) {
-        commentData.comments.forEach(comment => {
-            const params = comment.p ? comment.p.split(',') : [];
-            const colorValue = parseInt(params[2] || 16777215);
-
-            // ✅ 从 params[1] 获取弹幕模式
-            let mode = parseInt(params[1] || 0);
-
-            // 弹幕模式映射：
-            // 0-2: 滚动弹幕 -> ArtPlayer mode 0
-            // 4: 底部弹幕 -> ArtPlayer mode 2  
-            // 5: 顶部弹幕 -> ArtPlayer mode 1
-            if (mode >= 4 && mode <= 5) {
-                mode = mode === 4 ? 2 : 1;  // 4=底部, 5=顶部
-            } else {
-                mode = 0;  // 其他都是滚动
-            }
-
-            danmakuList.push({
-                text: comment.m || '',
-                time: parseFloat(params[0] || 0),
-                mode: mode,  // ✅ 使用实际的弹幕模式
-                color: '#' + colorValue.toString(16).padStart(6, '0').toUpperCase(),
-            });
-        });
-    }
-
-    danmuCache[cacheKey] = danmakuList;
-    return danmakuList;
 }
 
 // 兼容旧的函数名
@@ -1512,6 +1532,21 @@ function playEpisode(index) {
     currentEpisodeIndex = index;
     currentVideoUrl = url;
     videoHasEnded = false; // 重置视频结束标志
+    
+    // ✅ 清空旧弹幕
+	if (art && art.plugins.artplayerPluginDanmuku) {
+		try {
+			if (typeof art.plugins.artplayerPluginDanmuku.clear === 'function') {
+				art.plugins.artplayerPluginDanmuku.clear();
+			}
+			console.log('✅ 已清空旧弹幕');
+		} catch (e) {
+			console.error('清空弹幕失败:', e);
+		}
+	}
+
+	// ✅ 重置弹幕源ID（让新集数重新匹配）
+	currentDanmuAnimeId = null;
 
     clearVideoProgress();
 
