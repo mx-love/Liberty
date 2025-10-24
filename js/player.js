@@ -1253,57 +1253,63 @@ function initPlayer(videoUrl) {
         }
     }
 
-    // ✅ 自动加载弹幕 - 增加延迟并确保播放器完全就绪
-    if (DANMU_CONFIG.enabled && art.plugins.artplayerPluginDanmuku) {
-        // 等待播放器完全就绪后再加载弹幕
-        const loadDanmaku = async () => {
-            try {
-                // 确保视频已经开始加载
-                if (!art.video || art.video.readyState < 2) {
-                    setTimeout(loadDanmaku, 200);
-                    return;
-                }
+    // ✅ 自动加载弹幕 - 优化加载时机和进度同步
+	if (DANMU_CONFIG.enabled && art.plugins.artplayerPluginDanmuku) {
+	const loadDanmaku = async () => {
+		try {
+		// 1. 确保视频已经开始加载
+		if (!art.video || art.video.readyState < 2) {
+			setTimeout(loadDanmaku, 200);
+			return;
+		}
 
-                const danmuku = await getDanmukuForVideo(
-                    currentVideoTitle, 
-                    currentEpisodeIndex,
-                    currentDanmuAnimeId
-                );
+		// 2. 获取弹幕（会自动使用 bilibili1 优先）
+		const danmuku = await getDanmukuForVideo(
+			currentVideoTitle, 
+			currentEpisodeIndex,
+			currentDanmuAnimeId
+		);
 
-                if (danmuku && danmuku.length > 0) {
-                    // 先清空旧弹幕
-                    if (typeof art.plugins.artplayerPluginDanmuku.clear === 'function') {
-                        art.plugins.artplayerPluginDanmuku.clear();
-                    }
+		if (danmuku && danmuku.length > 0) {
+			// 3. 完全重置弹幕插件
+			if (typeof art.plugins.artplayerPluginDanmuku.clear === 'function') {
+			art.plugins.artplayerPluginDanmuku.clear();
+			}
 
-                    art.plugins.artplayerPluginDanmuku.config({
-                        danmuku: danmuku,
-                        synchronousPlayback: true
-                    });
-                    art.plugins.artplayerPluginDanmuku.load();
+			// 4. 配置新弹幕
+			art.plugins.artplayerPluginDanmuku.config({
+			danmuku: danmuku,
+			synchronousPlayback: true
+			});
+        
+			// 5. 加载弹幕
+			art.plugins.artplayerPluginDanmuku.load();
+	
+			// 6. 同步播放进度到弹幕（关键！）
+			if (restoredPosition > 0) {
+			// 等待弹幕加载完成后再同步进度
+			setTimeout(() => {
+				if (typeof art.plugins.artplayerPluginDanmuku.seek === 'function') {
+				art.plugins.artplayerPluginDanmuku.seek(restoredPosition);
+				console.log(`✅ 弹幕进度已同步到: ${restoredPosition.toFixed(2)}秒`);
+				}
+			}, 1000); // 增加延迟到1秒，确保弹幕完全加载
+		  }
+	
+			console.log(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
+		} else {
+			console.warn('⚠ 未找到弹幕，继续播放视频');
+		}
+	  } catch (e) {
+		console.error('❌ 弹幕加载失败:', e);
+      }
+     };
 
-                    if (restoredPosition > 0) {
-                        setTimeout(() => {
-                            if (typeof art.plugins.artplayerPluginDanmuku.seek === 'function') {
-                                art.plugins.artplayerPluginDanmuku.seek(restoredPosition);
-                            }
-                        }, 500);
-                    }
+	// 延迟加载，确保播放器完全准备好
+	setTimeout(loadDanmaku, 1000); // 增加延迟到1秒
+	}
 
-                    console.log(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
-                } else {
-                    console.warn('⚠ 未找到弹幕，继续播放视频');
-                }
-            } catch (e) {
-                console.error('❌ 弹幕加载失败:', e);
-            }
-        };
-
-        // 延迟加载，确保播放器完全准备好
-        setTimeout(loadDanmaku, 800);
-    }
-
-    startProgressSaveInterval();
+	startProgressSaveInterval();
 })
 
     // 错误处理
@@ -1538,20 +1544,45 @@ function playEpisode(index) {
     currentVideoUrl = url;
     videoHasEnded = false; // 重置视频结束标志
     
-    // ✅ 清空旧弹幕
+    // ✅ 清空旧弹幕并完全重置弹幕插件
 	if (art && art.plugins.artplayerPluginDanmuku) {
-		try {
-			if (typeof art.plugins.artplayerPluginDanmuku.clear === 'function') {
-				art.plugins.artplayerPluginDanmuku.clear();
-			}
-			console.log('✅ 已清空旧弹幕');
-		} catch (e) {
-			console.error('清空弹幕失败:', e);
+	try {
+		// 1. 清空现有弹幕
+		if (typeof art.plugins.artplayerPluginDanmuku.clear === 'function') {
+		art.plugins.artplayerPluginDanmuku.clear();
 		}
+    
+		// 2. 重置弹幕配置为空数组
+		art.plugins.artplayerPluginDanmuku.config({
+		danmuku: [],
+		synchronousPlayback: true
+		});
+    
+		// 3. 重新加载空弹幕列表
+		art.plugins.artplayerPluginDanmuku.load();
+    
+		console.log('✅ 已清空旧弹幕并重置弹幕插件');
+	} catch (e) {
+		console.error('清空弹幕失败:', e);
+	}
 	}
 
-	// ✅ 重置弹幕源ID（让新集数重新匹配）
-	// currentDanmuAnimeId = null;
+	// ✅ 完全重置弹幕源ID（强制让新视频源重新匹配弹幕）
+	currentDanmuAnimeId = null;  // 取消注释这行！
+
+	// ✅ 清理标题相关的弹幕缓存
+	try {
+		const cleanTitle = currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
+	  const titleHash = simpleHash(cleanTitle);
+	Object.keys(danmuCache).forEach(key => {
+		if (key.includes(titleHash)) {
+		delete danmuCache[key];
+		}
+	});
+	console.log('✅ 已清理标题相关的弹幕缓存');
+	} catch (e) {
+	console.warn('清理弹幕缓存失败:', e);
+	}
 
     clearVideoProgress();
 
@@ -1975,50 +2006,49 @@ function renderResourceInfoBar() {
         return;
     }
 
-    // 获取当前视频 source_code
-    const urlParams = new URLSearchParams(window.location.search);
-    const currentSource = urlParams.get('source') || '';
+   // 获取当前视频 source_code
+	const urlParams = new URLSearchParams(window.location.search);
+	const currentSource = urlParams.get('source') || '';
 
-    // 显示临时加载状态
-    container.innerHTML = `
-      <div class="resource-info-bar-left flex">
-        <span>加载中...</span>
-        <span class="resource-info-bar-videos">-</span>
-      </div>
-      <button class="resource-switch-btn flex" id="switchResourceBtn" onclick="showSwitchResourceModal()">
-        <span class="resource-switch-icon">
-          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 4v16m0 0l-6-6m6 6l6-6" stroke="#a67c2d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        切换资源
-      </button>
-    `;
+	// 显示临时加载状态
+	container.innerHTML = `
+	<div class="resource-info-bar-left flex">
+		<span>加载中...</span>
+		<span class="resource-info-bar-videos">-</span>
+	</div>
+	<button class="resource-switch-btn flex" id="switchResourceBtn" onclick="showSwitchResourceModal('bilibili1')">
+		<span class="resource-switch-icon">
+		<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 4v16m0 0l-6-6m6 6l6-6" 			stroke="#a67c2d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+		</span>
+		切换资源
+	</button>
+	`;
 
-    // 查找当前源名称，从 API_SITES 和 custom_api 中查找即可
-    let resourceName = currentSource
-    if (currentSource && API_SITES[currentSource]) {
-        resourceName = API_SITES[currentSource].name;
-    }
-    if (resourceName === currentSource) {
-        const customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]');
-        const customIndex = parseInt(currentSource.replace('custom_', ''), 10);
-        if (customAPIs[customIndex]) {
-            resourceName = customAPIs[customIndex].name || '自定义资源';
-        }
-    }
+	// 查找当前源名称，从 API_SITES 和 custom_api 中查找即可
+	let resourceName = currentSource
+	if (currentSource && API_SITES[currentSource]) {
+		resourceName = API_SITES[currentSource].name;
+	}
+	if (resourceName === currentSource) {
+		const customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]');
+		const customIndex = parseInt(currentSource.replace('custom_', ''), 10);
+		if (customAPIs[customIndex]) {
+			resourceName = customAPIs[customIndex].name || '自定义资源';
+		}
+	}
 
-    container.innerHTML = `
-      <div class="resource-info-bar-left flex">
-        <span>${resourceName}</span>
-        <span class="resource-info-bar-videos">${currentEpisodes.length} 个视频</span>
-      </div>
-      <button class="resource-switch-btn flex" id="switchResourceBtn" onclick="showSwitchResourceModal()">
-        <span class="resource-switch-icon">
-          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 4v16m0 0l-6-6m6 6l6-6" stroke="#a67c2d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        切换资源
-      </button>
-    `;
-}
+	container.innerHTML = `
+	<div class="resource-info-bar-left flex">
+		<span>${resourceName}</span>
+		<span class="resource-info-bar-videos">${currentEpisodes.length} 个视频</span>
+	</div>
+	<button class="resource-switch-btn flex" id="switchResourceBtn" onclick="showSwitchResourceModal('bilibili1')">
+		<span class="resource-switch-icon">
+		<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 4v16m0 0l-6-6m6 6l6-6" 	stroke="#a67c2d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+		</span>
+		切换资源
+	</button>
+	`;
 
 // 测试视频源速率的函数
 async function testVideoSourceSpeed(sourceKey, vodId) {
@@ -2128,7 +2158,7 @@ function formatSpeedDisplay(speedResult) {
     return `<span class="${className}">${icon} ${speed}ms${note}</span>`;
 }
 
-async function showSwitchResourceModal() {
+async function showSwitchResourceModal(preferredPlatform = 'bilibili1') {
     const urlParams = new URLSearchParams(window.location.search);
     const currentSourceCode = urlParams.get('source');
     const currentVideoId = urlParams.get('id');
