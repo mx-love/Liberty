@@ -2309,28 +2309,31 @@ async function switchToResource(sourceKey, vodId) {
 		try {
 			console.log('🔄 切换视频源,清空缓存...');
 
-			// 清空详情缓存
+			// ✅ 1. 完全清空详情缓存（包括anime_和title_开头的）
 			Object.keys(animeDetailCache).forEach(key => {
-				if (key.startsWith('title_')) {
-					delete animeDetailCache[key];
-				}
+				delete animeDetailCache[key];  // 删除所有缓存
 			});
 			saveCache(animeDetailCache);
 
-			/*
-			
-			 清空当前视频相关的弹幕缓存
-			const cleanTitle = currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
-			const titleHash = simpleHash(cleanTitle);
+			// ✅ 2. 清空弹幕缓存（内存中的）
 			Object.keys(danmuCache).forEach(key => {
-				if (key.includes(titleHash) || key.includes(String(currentDanmuAnimeId))) {
-					delete danmuCache[key];
-				}
+				delete danmuCache[key];
 			});
-			
-			*/
 
-			console.log('✅ 已清空详情缓存和弹幕缓存');
+			// ✅ 3. 清空弹幕源ID（重要！）
+			currentDanmuAnimeId = null;
+
+			// ✅ 4. 清空 localStorage 中的弹幕源记录
+			const danmuSourceKeys = [];
+			for (let i = 0; i < localStorage.length; i++) {
+				const key = localStorage.key(i);
+				if (key && key.startsWith('danmuSource_')) {
+					danmuSourceKeys.push(key);
+				}
+			}
+			danmuSourceKeys.forEach(key => localStorage.removeItem(key));
+
+			console.log('✅ 已完全清空所有弹幕相关缓存');
 		} catch (e) {
 			console.warn('清空缓存失败:', e);
 		}
