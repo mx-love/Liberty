@@ -105,6 +105,7 @@ const DANMU_CONFIG = {
 const danmuCache = {};
 let currentDanmuAnimeId = null; // 当前选中的动漫ID
 let availableDanmuSources = []; // 可用的弹幕源列表
+let forceDanmuSearch = false; // ✅ 新增：标记是否需要强制搜索弹幕
 
 // 简单的字符串哈希函数，用于生成短标识
 function simpleHash(str) {
@@ -193,13 +194,22 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
 
         // ✅ 检查详情缓存
         const cached = animeDetailCache[detailCacheKey];
-        if (cached && Date.now() - cached.timestamp < CACHE_EXPIRE_TIME) {
-            console.log('✅ 使用详情缓存,跳过搜索和详情请求');
-            animeId = cached.animeId;
-            episodes = cached.episodes;
-            isMovie = cached.isMovie;
-        } else {
-            console.log(cached ? '⏰ 缓存过期，执行完整请求' : 'ℹ️ 首次请求，执行完整请求');
+		const shouldUseCache = cached && 
+							   Date.now() - cached.timestamp < CACHE_EXPIRE_TIME && 
+							   !forceDanmuSearch;
+
+		if (shouldUseCache) {
+			console.log('✅ 使用详情缓存,跳过搜索和详情请求');
+			animeId = cached.animeId;
+			episodes = cached.episodes;
+			isMovie = cached.isMovie;
+		} else {
+			if (forceDanmuSearch) {
+				console.log('🔄 强制重新搜索弹幕源...');
+				forceDanmuSearch = false;  // ✅ 重置标志，下次加载再用缓存
+			} else {
+				console.log(cached ? '⏰ 缓存过期，执行完整请求' : 'ℹ️ 首次请求，执行完整请求');
+			}
 
             // 1. 搜索动漫
             const searchUrl = `${DANMU_CONFIG.baseUrl}/api/v2/search/anime?keyword=${encodeURIComponent(cleanTitle)}`;
@@ -2332,6 +2342,17 @@ async function switchToResource(sourceKey, vodId) {
 				}
 			}
 			danmuSourceKeys.forEach(key => localStorage.removeItem(key));
+
+			// ✅ 5. 同时清空详情缓存中的所有anime_和title_开头的条目（防止调用缓存）
+			Object.keys(animeDetailCache).forEach(key => {
+				if (key.startsWith('anime_') || key.startsWith('title_')) {
+					delete animeDetailCache[key];
+				}
+			});
+			saveCache(animeDetailCache);
+
+			// ✅ 新增：设置强制搜索标志
+			forceDanmuSearch = true;  // 标记需要强制搜索
 
 			console.log('✅ 已完全清空所有弹幕相关缓存');
 		} catch (e) {
