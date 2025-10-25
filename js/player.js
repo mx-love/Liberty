@@ -85,13 +85,11 @@ function advancedCleanTitle(title) {
     
     // 【新增】保存原始特征
     const features = {
-		hasParentheses: /[（\(]/.test(title),
-		hasBrackets: /[【\[]/.test(title),
-		hasEnglish: /[a-zA-Z]{3,}/.test(title),
-		hasSpecialMarker: /(剧场版|OVA|OAD|SP|特别篇)/.test(title),
-		isDrama: /(日剧|韩剧|美剧|电视剧)/.test(title),
-		isVariety: /(综艺|晚会|真人秀|盛典)/.test(title)
-	};
+        hasParentheses: /[（\(]/.test(title),
+        hasBrackets: /[【\[]/.test(title),
+        hasEnglish: /[a-zA-Z]{3,}/.test(title),
+        hasSpecialMarker: /(剧场版|OVA|OAD|SP|特别篇)/.test(title)
+    };
     
     // 清理标题（更温和的策略）
     cleaned = title
@@ -380,53 +378,13 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
 
     const targetInfo = advancedCleanTitle(targetTitle);
     
-    // 【新增】短标题判断 - 在这里添加
-    const isShortTitle = targetInfo.clean.length <= 4; // 4个字符以内算短标题
-    
-    // 【新增】预过滤：排除明显不相关的内容
-    let filteredAnimes = animes;
-    if (isShortTitle) {
-        console.log('⚠️ 检测到短标题，启用严格匹配模式');
-        
-        // 对短标题进行预过滤，排除综艺、晚会等
-        filteredAnimes = animes.filter(anime => {
-            const animeTitle = (anime.animeTitle || '').toLowerCase();
-            const typeDesc = (anime.typeDescription || '').toLowerCase();
-            
-            // 排除明确的综艺/晚会关键词
-            const excludeKeywords = [
-                '春晚', '晚会', '盛典', '颁奖', '演唱会', '音乐会',
-                '综艺', '访谈', '真人秀', '乒乓球', '体育',
-                '新闻', '纪录片', '直播', '发布会'
-            ];
-            
-            const shouldExclude = excludeKeywords.some(keyword => 
-                animeTitle.includes(keyword) || typeDesc.includes(keyword)
-            );
-            
-            if (shouldExclude) {
-                console.log(`❌ 过滤掉: ${anime.animeTitle} (包含排除关键词)`);
-                return false;
-            }
-            
-            return true;
-        });
-        
-        console.log(`📊 过滤后剩余 ${filteredAnimes.length}/${animes.length} 个候选`);
-        
-        if (filteredAnimes.length === 0) {
-            console.warn('⚠️ 过滤后无剩余结果，使用原始列表');
-            filteredAnimes = animes;
-        }
-    }
-    
-    const scored = filteredAnimes.map(anime => {
+    const scored = animes.map(anime => {
         const animeInfo = advancedCleanTitle(anime.animeTitle);
         let score = 0;
         
         // 1. 来源优先级（调整权重）
         if (anime.animeTitle?.includes('from bilibili')) {
-            score += 1000;
+            score += 10000;  // 降低bilibili的绝对优势
         }
         
         // 2. 标题相似度（核心）- 传递完整信息
@@ -436,17 +394,11 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
             animeInfo,
             targetInfo
         );
+        score += similarity * 40000;  // 提高相似度权重
         
-        // 【修改】对短标题提高相似度要求
-        if (isShortTitle) {
-            score += similarity * 50000; // 短标题时相似度权重更高
-        } else {
-            score += similarity * 40000;
-        }
-        
-        // 【新增】3. 完全匹配奖励（短标题时更重要）
+        // 【新增】3. 完全匹配奖励
         if (animeInfo.clean === targetInfo.clean) {
-            score += isShortTitle ? 25000 : 15000;
+            score += 15000;
         }
         
         // 【新增】4. 核心词匹配
@@ -455,66 +407,45 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
         const coreMatch = coreWords1.filter(w => coreWords2.includes(w)).length;
         score += coreMatch * 2000;
         
-        // 【新增】短标题特殊处理：严格的子串匹配
-        if (isShortTitle) {
-            const targetClean = targetInfo.clean.replace(/\s+/g, '');
-            const animeClean = animeInfo.clean.replace(/\s+/g, '');
-            
-            // 目标标题必须是动漫标题的子串，或完全相等
-            if (animeClean.includes(targetClean) || targetClean.includes(animeClean)) {
-                score += 20000;
-            } else if (!animeClean.includes(targetClean)) {
-                // 如果短标题不是子串，大幅降低评分
-                score -= 30000;
-            }
-        }
-        
         // 5. 季度匹配（更宽松）
         if (targetInfo.season && animeInfo.season) {
             if (targetInfo.season === animeInfo.season) {
-                score += 8000;
+                score += 8000;  // 降低季度权重
             } else if (Math.abs(targetInfo.season - animeInfo.season) === 1) {
-                score += 2000;
+                score += 2000;  // 相邻季度小幅加分
             } else {
-                score -= 3000;
+                score -= 3000;  // 减少惩罚
             }
         } else if (!targetInfo.season && !animeInfo.season) {
-            score += 1000;
+            score += 1000;  // 都没有季度信息也给点分
         }
         
         // 6. 年份匹配（更宽松）
         if (targetInfo.year && animeInfo.year) {
             const yearDiff = Math.abs(targetInfo.year - animeInfo.year);
             if (yearDiff === 0) {
-                score += 3000;
+                score += 3000;  // 降低年份权重
             } else if (yearDiff <= 1) {
                 score += 1000;
             } else if (yearDiff <= 2) {
-                score += 500;
+                score += 500;  // 2年内也给点分
             }
         }
         
         // 7. 集数合理性（更宽松）
         if (currentEpisodeCount > 0 && anime.episodeCount) {
             const epDiff = Math.abs(anime.episodeCount - currentEpisodeCount);
-            if (epDiff <= 3) {
+            if (epDiff <= 3) {  // 扩大容差范围
                 score += 2000;
             } else if (anime.episodeCount >= currentEpisodeCount) {
                 score += 500;
             }
         }
         
-        // 8. 类型匹配（增强）
+        // 8. 类型匹配
         if (anime.typeDescription) {
-            const typeDesc = anime.typeDescription.toLowerCase();
-            const isSeries = /tv|连载|番剧|日剧|韩剧|美剧|电视剧/.test(typeDesc);
-            const isMovie = /电影|剧场版/.test(typeDesc);
-            const isVariety = /综艺|晚会|真人秀/.test(typeDesc);
-            
-            // 【新增】如果是综艺类，大幅降低评分
-            if (isVariety) {
-                score -= 50000;
-            }
+            const isSeries = /TV|连载|番剧/.test(anime.typeDescription);
+            const isMovie = /电影|剧场版/.test(anime.typeDescription);
             
             if (currentEpisodeCount === 1 && isMovie) {
                 score += 5000;
@@ -525,12 +456,8 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
         
         // 9. 标题长度惩罚（更温和）
         const lenDiff = Math.abs(animeInfo.clean.length - targetInfo.clean.length);
-        
-        // 【修改】短标题时对长度差异更敏感
-        if (isShortTitle && lenDiff > 5) {
-            score -= lenDiff * 50; // 短标题时长度差异惩罚更重
-        } else if (lenDiff > 15) {
-            score -= lenDiff * 5;
+        if (lenDiff > 15) {  // 提高阈值
+            score -= lenDiff * 5;  // 减少惩罚
         }
         
         // 【新增】10. 特殊标记匹配
@@ -548,8 +475,7 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
                 targetClean: targetInfo.clean,
                 animeClean: animeInfo.clean,
                 similarity: similarity.toFixed(3),
-                coreMatch,
-                isShortTitle
+                coreMatch
             }
         };
     });
@@ -561,19 +487,15 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
         score: s.score,
         similarity: s.similarity.toFixed(3),
         episodes: s.anime.episodeCount,
-        coreMatch: s.debug.coreMatch,
-        isShortTitle: s.debug.isShortTitle
+        coreMatch: s.debug.coreMatch
     })));
     
-    // 【修改】短标题时提高阈值
+    // 【修改】降低阈值，允许更宽松的匹配
     const topMatch = scored[0];
-    const minSimilarity = isShortTitle ? 0.7 : 0.5; // 短标题要求更高的相似度
-    const minScore = isShortTitle ? 30000 : 20000; // 短标题要求更高的总分
-    
-    if (topMatch.similarity < minSimilarity) {
-        console.warn(`⚠️ 最佳匹配相似度过低: ${topMatch.similarity.toFixed(3)} (要求: ${minSimilarity})`);
-        if (topMatch.score < minScore) {
-            console.error(`❌ 评分也过低: ${topMatch.score} (要求: ${minScore})`);
+    if (topMatch.similarity < 0.5) {  // 从0.7降低到0.5
+        console.warn(`⚠️ 最佳匹配相似度过低: ${topMatch.similarity.toFixed(3)}`);
+        // 【新增】如果评分足够高，即使相似度低也接受
+        if (topMatch.score < 20000) {
             return null;
         }
         console.log('✅ 虽然相似度低，但综合评分高，仍然匹配');
@@ -2914,32 +2836,32 @@ async function showDanmuSourceModal() {
         `;
 
         recommended.forEach(source => {
-			const isActive = String(source.animeId) === String(currentDanmuAnimeId);
-			const typeInfo = source.typeDescription || source.type;
+		const isActive = String(source.animeId) === String(currentDanmuAnimeId);
+		const typeInfo = source.typeDescription || source.type;
     
-			// 【新增】计算相似度并显示
-			const similarity = calculateSimilarity(
-				source.animeTitle.replace(/\([^)]*\)/g, '').trim(),
-				cleanTitle
-			);
+		// 【新增】计算相似度并显示
+		const similarity = calculateSimilarity(
+			source.animeTitle.replace(/\([^)]*\)/g, '').trim(),
+			cleanTitle
+		);
 
-			html += `
-				<button 
-					onclick="switchDanmuSource('${source.animeId}')"
-					class="w-full text-left px-4 py-3 rounded-lg transition-colors ${
-						isActive 
-							? 'bg-blue-600 text-white' 
-							: 'bg-gray-800 hover:bg-gray-700 text-gray-200'
-					}">
-					<div class="font-medium">${source.animeTitle}</div>
-					<div class="text-sm opacity-75 mt-1">
-						${typeInfo} · ${source.episodeCount} 集
-						· 相似度: ${(similarity * 100).toFixed(0)}%
-						${isActive ? ' · <span class="text-yellow-300">✓ 当前</span>' : ''}
-					</div>
-				</button>
-			`;
-		});
+		html += `
+			<button 
+				onclick="switchDanmuSource('${source.animeId}')"
+				class="w-full text-left px-4 py-3 rounded-lg transition-colors ${
+					isActive 
+						? 'bg-blue-600 text-white' 
+						: 'bg-gray-800 hover:bg-gray-700 text-gray-200'
+				}">
+				<div class="font-medium">${source.animeTitle}</div>
+				<div class="text-sm opacity-75 mt-1">
+					${typeInfo} · ${source.episodeCount} 集
+					· 相似度: ${(similarity * 100).toFixed(0)}%
+					${isActive ? ' · <span class="text-yellow-300">✓ 当前</span>' : ''}
+				</div>
+			</button>
+		`;
+	});
 
         html += '</div></div>';
 
