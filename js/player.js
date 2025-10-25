@@ -2250,13 +2250,20 @@ async function switchToResource(sourceKey, vodId) {
 			// 清空当前视频相关的弹幕缓存
 			const cleanTitle = currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
 			const titleHash = simpleHash(cleanTitle);
+			// ✅ 清空当前视频相关的弹幕缓存
 			Object.keys(danmuCache).forEach(key => {
 				if (key.includes(titleHash) || key.includes(String(currentDanmuAnimeId))) {
 					delete danmuCache[key];
 				}
 			});
 
-			console.log('✅ 已清空详情缓存和弹幕缓存');
+			// ✅ 清空当前弹幕源ID，让系统重新搜索匹配
+			currentDanmuAnimeId = null;
+
+			// ✅ 同时清空 localStorage 中保存的弹幕源ID
+			localStorage.removeItem(`danmuSource_${titleHash}`);
+
+			console.log('✅ 已清空详情缓存、弹幕缓存和弹幕源ID');
 		} catch (e) {
 			console.warn('清空缓存失败:', e);
 		}
