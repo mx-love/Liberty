@@ -192,3 +192,8 @@ const CUSTOM_API_CONFIG = {
 
 // 隐藏内置黄色采集站API的变量
 const HIDE_BUILTIN_ADULT_APIS = false;
+
+window.extendAPISites = function(customSites) {
+    Object.assign(API_SITES, customSites);
+    console.log('已加载自定义站点:', Object.keys(customSites));
+};
