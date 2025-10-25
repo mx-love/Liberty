@@ -7,7 +7,7 @@ const customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]'); // �
 
 // 配置常量
 const MATCH_CONFIG = {
-    minSimilarity: 0.5,
+    minSimilarity: 0.7,
     titleCleanPatterns: [
         /\([^)]*\)/g,
         /（[^）]*）/g,
@@ -23,7 +23,6 @@ const MATCH_CONFIG = {
         /Season\s*(\d+)/i,
         /S(\d+)/i,
         /\s(\d{4})\s/,
-        /Season\s*([IVX]+)/i,
     ],
     episodePatterns: [
         /第\s*(\d+)\s*[集话話]/,
@@ -44,31 +43,19 @@ function sanitizeTitle(title) {
 
 // 新的增强版标题清理
 function advancedCleanTitle(title) {
-    if (!title) return { clean: '', season: null, year: null, original: title, features: {}, variants: [] };
+    if (!title) return { clean: '', season: null, year: null, original: title };
     
     let cleaned = title;
     let season = null;
     let year = null;
     
-    // 【新增】扩展的季度匹配模式
-    const seasonPatterns = [
-        /第([一二三四五六七八九十\d]+)季/,
-        /Season\s*(\d+)/i,
-        /S(\d+)(?:\s|$|E)/i,  // 更严格的S01匹配
-        /\s(\d{4})\s/,
-        /Season\s*([IVX]+)/i,  // 支持罗马数字
-    ];
-    
     // 提取季度信息
-    for (const pattern of seasonPatterns) {
+    for (const pattern of MATCH_CONFIG.seasonPatterns) {
         const match = title.match(pattern);
         if (match) {
             const seasonNum = match[1];
             if (/^\d+$/.test(seasonNum)) {
                 season = parseInt(seasonNum);
-            } else if (/^[IVX]+$/.test(seasonNum)) {
-                // 罗马数字转换
-                season = romanToInt(seasonNum);
             } else {
                 const cnMap = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10};
                 season = cnMap[seasonNum] || null;
@@ -77,60 +64,20 @@ function advancedCleanTitle(title) {
         }
     }
     
-    // 提取年份（更精确）
-    const yearMatch = title.match(/[\(\（\[]?(19|20)\d{2}[\)\）\]]?/);
+    // 提取年份
+    const yearMatch = title.match(/\b(19|20)\d{2}\b/);
     if (yearMatch) {
-        year = parseInt(yearMatch[0].replace(/[\(\（\[\)\）\]]/g, ''));
+        year = parseInt(yearMatch[0]);
     }
     
-    // 【新增】保存原始特征
-    const features = {
-        hasParentheses: /[（\(]/.test(title),
-        hasBrackets: /[【\[]/.test(title),
-        hasEnglish: /[a-zA-Z]{3,}/.test(title),
-        hasSpecialMarker: /(剧场版|OVA|OAD|SP|特别篇)/.test(title)
-    };
-    
-    // 清理标题（更温和的策略）
-    cleaned = title
-        .replace(/\s*[（(]完[）)]\s*/g, ' ')
-        .replace(/\s*[（(].*?僅限.*?[）)]\s*/g, ' ')
-        .replace(/\s+from\s+\w+/gi, ' ')
-        .replace(/【.*?】/g, ' ')
-        .replace(/\[.*?\]/g, ' ')
-        .replace(/\s{2,}/g, ' ')
-        .trim()
-        .toLowerCase();
-    
-    // 【新增】生成多个匹配候选
-    const variants = [
-        cleaned,
-        cleaned.replace(/\s+/g, ''),
-        cleaned.replace(/[^\w\u4e00-\u9fa5]/g, ''),
-    ];
-    
-    return { 
-        clean: cleaned, 
-        season, 
-        year, 
-        original: title,
-        features,
-        variants: [...new Set(variants)]
-    };
-}
-
-// 罗马数字转换
-function romanToInt(s) {
-    const map = { I: 1, V: 5, X: 10, L: 50, C: 100 };
-    let result = 0;
-    for (let i = 0; i < s.length; i++) {
-        if (i > 0 && map[s[i]] > map[s[i - 1]]) {
-            result += map[s[i]] - 2 * map[s[i - 1]];
-        } else {
-            result += map[s[i]];
-        }
+    // 清理标题
+    for (const pattern of MATCH_CONFIG.titleCleanPatterns) {
+        cleaned = cleaned.replace(pattern, ' ');
     }
-    return result;
+    
+    cleaned = cleaned.trim().toLowerCase();
+    
+    return { clean: cleaned, season, year, original: title };
 }
 
 // 统一的缓存清理函数
@@ -382,89 +329,62 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
         const animeInfo = advancedCleanTitle(anime.animeTitle);
         let score = 0;
         
-        // 1. 来源优先级（调整权重）
+        // 1. 来源优先级
         if (anime.animeTitle?.includes('from bilibili')) {
-            score += 10000;  // 降低bilibili的绝对优势
-        }
-        
-        // 2. 标题相似度（核心）- 传递完整信息
-        const similarity = enhancedSimilarity(
-            animeInfo.clean, 
-            targetInfo.clean,
-            animeInfo,
-            targetInfo
-        );
-        score += similarity * 40000;  // 提高相似度权重
-        
-        // 【新增】3. 完全匹配奖励
-        if (animeInfo.clean === targetInfo.clean) {
             score += 15000;
         }
         
-        // 【新增】4. 核心词匹配
-        const coreWords1 = animeInfo.clean.split(/\s+/).filter(w => w.length >= 2);
-        const coreWords2 = targetInfo.clean.split(/\s+/).filter(w => w.length >= 2);
-        const coreMatch = coreWords1.filter(w => coreWords2.includes(w)).length;
-        score += coreMatch * 2000;
+        // 2. 标题相似度（核心）
+        const similarity = enhancedSimilarity(animeInfo.clean, targetInfo.clean);
+        score += similarity * 30000;
         
-        // 5. 季度匹配（更宽松）
+        // 3. 季度匹配
         if (targetInfo.season && animeInfo.season) {
             if (targetInfo.season === animeInfo.season) {
-                score += 8000;  // 降低季度权重
-            } else if (Math.abs(targetInfo.season - animeInfo.season) === 1) {
-                score += 2000;  // 相邻季度小幅加分
+                score += 10000;
             } else {
-                score -= 3000;  // 减少惩罚
+                score -= 5000;
             }
-        } else if (!targetInfo.season && !animeInfo.season) {
-            score += 1000;  // 都没有季度信息也给点分
         }
         
-        // 6. 年份匹配（更宽松）
+        // 4. 年份匹配
         if (targetInfo.year && animeInfo.year) {
             const yearDiff = Math.abs(targetInfo.year - animeInfo.year);
             if (yearDiff === 0) {
-                score += 3000;  // 降低年份权重
+                score += 5000;
             } else if (yearDiff <= 1) {
-                score += 1000;
-            } else if (yearDiff <= 2) {
-                score += 500;  // 2年内也给点分
+                score += 2000;
             }
         }
         
-        // 7. 集数合理性（更宽松）
+        // 5. 集数合理性
         if (currentEpisodeCount > 0 && anime.episodeCount) {
             const epDiff = Math.abs(anime.episodeCount - currentEpisodeCount);
-            if (epDiff <= 3) {  // 扩大容差范围
-                score += 2000;
+            if (epDiff <= 2) {
+                score += 3000;
             } else if (anime.episodeCount >= currentEpisodeCount) {
-                score += 500;
+                score += 1000;
+            } else {
+                score -= 2000;
             }
         }
         
-        // 8. 类型匹配
+        // 6. 类型匹配
         if (anime.typeDescription) {
             const isSeries = /TV|连载|番剧/.test(anime.typeDescription);
             const isMovie = /电影|剧场版/.test(anime.typeDescription);
             
             if (currentEpisodeCount === 1 && isMovie) {
-                score += 5000;
+                score += 8000;
             } else if (currentEpisodeCount > 1 && isSeries) {
-                score += 3000;
+                score += 5000;
             }
         }
         
-        // 9. 标题长度惩罚（更温和）
+        // 7. 标题长度惩罚
         const lenDiff = Math.abs(animeInfo.clean.length - targetInfo.clean.length);
-        if (lenDiff > 15) {  // 提高阈值
-            score -= lenDiff * 5;  // 减少惩罚
-        }
-        
-        // 【新增】10. 特殊标记匹配
-        if (targetInfo.features && animeInfo.features) {
-            if (targetInfo.features.hasSpecialMarker && animeInfo.features.hasSpecialMarker) {
-                score += 2000;
-            }
+        if (lenDiff > 10) {
+            score -= lenDiff * 10;
         }
         
         return {
@@ -474,8 +394,7 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
             debug: {
                 targetClean: targetInfo.clean,
                 animeClean: animeInfo.clean,
-                similarity: similarity.toFixed(3),
-                coreMatch
+                similarity: similarity.toFixed(3)
             }
         };
     });
@@ -486,19 +405,14 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
         title: s.anime.animeTitle,
         score: s.score,
         similarity: s.similarity.toFixed(3),
-        episodes: s.anime.episodeCount,
-        coreMatch: s.debug.coreMatch
+        episodes: s.anime.episodeCount
     })));
     
-    // 【修改】降低阈值，允许更宽松的匹配
+    // 阈值检查
     const topMatch = scored[0];
-    if (topMatch.similarity < 0.5) {  // 从0.7降低到0.5
+    if (topMatch.similarity < MATCH_CONFIG.minSimilarity) {
         console.warn(`⚠️ 最佳匹配相似度过低: ${topMatch.similarity.toFixed(3)}`);
-        // 【新增】如果评分足够高，即使相似度低也接受
-        if (topMatch.score < 20000) {
-            return null;
-        }
-        console.log('✅ 虽然相似度低，但综合评分高，仍然匹配');
+        return null;
     }
     
     return topMatch.anime;
@@ -516,48 +430,30 @@ function calculateSimilarity(str1, str2) {
 }
 
 // 增强版相似度计算
-function enhancedSimilarity(str1, str2, info1 = {}, info2 = {}) {
+function enhancedSimilarity(str1, str2) {
     const s1 = str1.toLowerCase();
     const s2 = str2.toLowerCase();
     
     if (s1 === s2) return 1.0;
     
-    // 【新增】尝试所有变体的匹配
-    let maxSimilarity = 0;
-    const variants1 = info1.variants || [s1];
-    const variants2 = info2.variants || [s2];
+    // Jaccard 相似度
+    const tokens1 = new Set(s1.split(/\s+/));
+    const tokens2 = new Set(s2.split(/\s+/));
+    const intersection = new Set([...tokens1].filter(x => tokens2.has(x)));
+    const union = new Set([...tokens1, ...tokens2]);
+    const jaccardScore = intersection.size / union.size;
     
-    for (const v1 of variants1) {
-        for (const v2 of variants2) {
-            if (!v1 || !v2) continue;
-            
-            // Jaccard 相似度
-            const tokens1 = new Set(v1.split(/\s+/).filter(t => t.length > 0));
-            const tokens2 = new Set(v2.split(/\s+/).filter(t => t.length > 0));
-            const intersection = new Set([...tokens1].filter(x => tokens2.has(x)));
-            const union = new Set([...tokens1, ...tokens2]);
-            const jaccardScore = union.size > 0 ? intersection.size / union.size : 0;
-            
-            // Levenshtein 相似度
-            const levDistance = levenshteinDistance(v1, v2);
-            const maxLen = Math.max(v1.length, v2.length);
-            const levScore = maxLen > 0 ? (maxLen - levDistance) / maxLen : 0;
-            
-            // 最长公共子序列
-            const lcsLen = longestCommonSubsequence(v1, v2);
-            const lcsScore = lcsLen / Math.max(v1.length, v2.length);
-            
-            // 【新增】最长公共子串（连续）
-            const lcsSubstring = longestCommonSubstring(v1, v2);
-            const substringScore = lcsSubstring / Math.max(v1.length, v2.length);
-            
-            // 综合评分（调整权重）
-            const similarity = jaccardScore * 0.25 + levScore * 0.3 + lcsScore * 0.25 + substringScore * 0.2;
-            maxSimilarity = Math.max(maxSimilarity, similarity);
-        }
-    }
+    // Levenshtein 相似度
+    const levDistance = levenshteinDistance(s1, s2);
+    const maxLen = Math.max(s1.length, s2.length);
+    const levScore = maxLen > 0 ? (maxLen - levDistance) / maxLen : 0;
     
-    return maxSimilarity;
+    // 最长公共子序列相似度
+    const lcsLen = longestCommonSubsequence(s1, s2);
+    const lcsScore = lcsLen / Math.max(s1.length, s2.length);
+    
+    // 综合评分
+    return jaccardScore * 0.3 + levScore * 0.4 + lcsScore * 0.3;
 }
 
 // 最长公共子序列
@@ -606,25 +502,6 @@ function levenshteinDistance(str1, str2) {
     }
 
     return matrix[str2.length][str1.length];
-}
-
-// 【新增】最长公共子串
-function longestCommonSubstring(str1, str2) {
-    const m = str1.length;
-    const n = str2.length;
-    let maxLen = 0;
-    const dp = Array(m + 1).fill(0).map(() => Array(n + 1).fill(0));
-    
-    for (let i = 1; i <= m; i++) {
-        for (let j = 1; j <= n; j++) {
-            if (str1[i - 1] === str2[j - 1]) {
-                dp[i][j] = dp[i - 1][j - 1] + 1;
-                maxLen = Math.max(maxLen, dp[i][j]);
-            }
-        }
-    }
-    
-    return maxLen;
 }
 
 // ✅ 【新增】判断是否电影内容
@@ -846,22 +723,6 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
         let animeId = forceAnimeId || currentDanmuAnimeId;
         if (!animeId) {
             animeId = await findOrSearchAnimeId(cleanTitle);
-            
-            // 【在这里添加新代码】
-            // 如果失败，尝试更简化的标题
-            if (!animeId) {
-                console.warn('⚠️ 首次搜索失败，尝试简化标题...');
-                const simplifiedTitle = title
-                    .replace(/[（(].*?[）)]/g, '')
-                    .replace(/【.*?】/g, '')
-                    .replace(/\[.*?\]/g, '')
-                    .trim();
-                
-                if (simplifiedTitle !== title) {
-                    animeId = await findOrSearchAnimeId(simplifiedTitle);
-                }
-            }
-            
             if (!animeId) {
                 console.warn('⚠ 未找到弹幕源:', title);
                 return [];
@@ -2836,32 +2697,25 @@ async function showDanmuSourceModal() {
         `;
 
         recommended.forEach(source => {
-		const isActive = String(source.animeId) === String(currentDanmuAnimeId);
-		const typeInfo = source.typeDescription || source.type;
-    
-		// 【新增】计算相似度并显示
-		const similarity = calculateSimilarity(
-			source.animeTitle.replace(/\([^)]*\)/g, '').trim(),
-			cleanTitle
-		);
+            const isActive = String(source.animeId) === String(currentDanmuAnimeId);
+            const typeInfo = source.typeDescription || source.type;
 
-		html += `
-			<button 
-				onclick="switchDanmuSource('${source.animeId}')"
-				class="w-full text-left px-4 py-3 rounded-lg transition-colors ${
-					isActive 
-						? 'bg-blue-600 text-white' 
-						: 'bg-gray-800 hover:bg-gray-700 text-gray-200'
-				}">
-				<div class="font-medium">${source.animeTitle}</div>
-				<div class="text-sm opacity-75 mt-1">
-					${typeInfo} · ${source.episodeCount} 集
-					· 相似度: ${(similarity * 100).toFixed(0)}%
-					${isActive ? ' · <span class="text-yellow-300">✓ 当前</span>' : ''}
-				</div>
-			</button>
-		`;
-	});
+            html += `
+                <button 
+                    onclick="switchDanmuSource('${source.animeId}')"
+                    class="w-full text-left px-4 py-3 rounded-lg transition-colors ${
+                        isActive 
+                            ? 'bg-blue-600 text-white' 
+                            : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
+                    }">
+                    <div class="font-medium">${source.animeTitle}</div>
+                    <div class="text-sm opacity-75 mt-1">
+                        ${typeInfo} · ${source.episodeCount} 集
+                        ${isActive ? ' · <span class="text-yellow-300">✓ 当前</span>' : ''}
+                    </div>
+                </button>
+            `;
+        });
 
         html += '</div></div>';
 
