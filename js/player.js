@@ -1176,30 +1176,55 @@ function initPlayer(videoUrl) {
     }
 
     art.on('ready', () => {
-    hideControls();
+		hideControls();
 
-    // 优化弹幕 seek 处理
-    let seekDebounceTimer = null;
-    let lastSeekTime = 0;
+		// ✅ 优化弹幕时间同步
+		let seekDebounceTimer = null;
 
-    art.on('seek', (currentTime) => {
-        lastSeekTime = currentTime;
+		// 监听进度跳转
+		art.on('seek', (currentTime) => {
+			if (seekDebounceTimer) {
+				clearTimeout(seekDebounceTimer);
+			}
 
-        if (seekDebounceTimer) {
-            clearTimeout(seekDebounceTimer);
-        }
+			// 延迟同步弹幕，避免拖拽时频繁触发
+			seekDebounceTimer = setTimeout(() => {
+				const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+				if (danmukuPlugin && typeof danmukuPlugin.seek === 'function') {
+					console.log(`🎯 弹幕同步到: ${currentTime.toFixed(2)}s`);
+					danmukuPlugin.seek(currentTime);
+				}
+			}, 200);
+		});
 
-        // 延迟同步弹幕，避免拖拽时频繁触发
-        seekDebounceTimer = setTimeout(() => {
-            if (art.plugins.artplayerPluginDanmuku) {
-                // 只调用 seek，不要 reset
-                if (typeof art.plugins.artplayerPluginDanmuku.seek === 'function') {
-                    art.plugins.artplayerPluginDanmuku.seek(lastSeekTime);
-                }
-            }
-        }, 300); // 增加到 300ms
-    });
-});
+		// ✅ 监听播放事件，确保弹幕跟随播放
+		art.on('video:playing', () => {
+			const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+			if (danmukuPlugin && art.video) {
+				const currentTime = art.video.currentTime;
+				// 播放时同步一次弹幕时间
+				if (typeof danmukuPlugin.seek === 'function') {
+					danmukuPlugin.seek(currentTime);
+				}
+			}
+		});
+
+		// ✅ 监听时间更新，定期校准弹幕（每5秒）
+		let lastSyncTime = 0;
+		art.on('video:timeupdate', () => {
+			if (!art.video) return;
+			const currentTime = art.video.currentTime;
+        
+			// 每5秒校准一次弹幕时间
+			if (Math.abs(currentTime - lastSyncTime) > 5) {
+				const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+				if (danmukuPlugin && typeof danmukuPlugin.seek === 'function') {
+					danmukuPlugin.seek(currentTime);
+					lastSyncTime = currentTime;
+				}
+			}
+		});
+	});
 
     // 全屏 Web 模式处理
     art.on('fullscreenWeb', function (isFullScreen) {
@@ -1236,6 +1261,14 @@ function initPlayer(videoUrl) {
     if (restoredPosition > 10 && restoredPosition < art.duration - 2) {
         art.currentTime = restoredPosition;
         showPositionRestoreHint(restoredPosition);
+        // ✅ 恢复位置后同步弹幕
+		setTimeout(() => {
+			const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+			if (danmukuPlugin && typeof danmukuPlugin.seek === 'function') {
+				console.log(`🎯 恢复播放位置，弹幕同步到: ${restoredPosition.toFixed(2)}s`);
+				danmukuPlugin.seek(restoredPosition);
+			}
+		}, 500);
     } else {
         try {
             const progressKey = 'videoProgress_' + getVideoId();
@@ -1250,6 +1283,14 @@ function initPlayer(videoUrl) {
                 ) {
                     art.currentTime = progress.position;
                     showPositionRestoreHint(progress.position);
+                    // ✅ 恢复位置后同步弹幕
+					setTimeout(() => {
+						const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+						if (danmukuPlugin && typeof danmukuPlugin.seek === 'function') {
+							console.log(`🎯 恢复播放位置，弹幕同步到: ${progress.position.toFixed(2)}s`);
+							danmukuPlugin.seek(progress.position);
+						}
+					}, 500);
                 }
             }
         } catch (e) {
@@ -1295,6 +1336,15 @@ function initPlayer(videoUrl) {
                     }
 
                     console.log(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
+                    // ✅ 加载弹幕后立即同步时间
+					if (restoredPosition > 0) {
+						setTimeout(() => {
+							if (typeof art.plugins.artplayerPluginDanmuku.seek === 'function') {
+								console.log(`🎯 弹幕加载完成，同步到: ${restoredPosition.toFixed(2)}s`);
+								art.plugins.artplayerPluginDanmuku.seek(restoredPosition);
+							}
+						}, 300);
+					}
                 } else {
                     console.warn('⚠ 未找到弹幕，继续播放视频');
                 }
@@ -1671,12 +1721,13 @@ function saveToHistory() {
 
         const history = JSON.parse(localStorage.getItem('viewingHistory') || '[]');
 
+        // ✅ 修改：只按标题查找，不管视频源
         const existingIndex = history.findIndex(item =>
-            item.title === videoInfo.title &&
-            item.sourceName === videoInfo.sourceName
+            item.title === videoInfo.title
         );
 
         if (existingIndex !== -1) {
+            // ✅ 更新现有记录（覆盖视频源信息）
             const existingItem = history[existingIndex];
             existingItem.episodeIndex = videoInfo.episodeIndex;
             existingItem.timestamp = videoInfo.timestamp;
@@ -1694,10 +1745,11 @@ function saveToHistory() {
 
             const updatedItem = history.splice(existingIndex, 1)[0];
             history.unshift(updatedItem);
-            console.log('[历史记录] ✅ 更新现有记录:', videoInfo.title, '第', videoInfo.episodeIndex + 1, '集', `[源: ${sourceName}]`);
+            console.log('[历史记录] ✅ 更新记录:', videoInfo.title, '第', videoInfo.episodeIndex + 1, '集', `[源: ${sourceName}]`);
         } else {
+            // ✅ 新增记录
             history.unshift(videoInfo);
-            console.log('[历史记录] ✅ 添加新记录:', videoInfo.title, '第', videoInfo.episodeIndex + 1, '集');
+            console.log('[历史记录] ✅ 新增记录:', videoInfo.title, '第', videoInfo.episodeIndex + 1, '集', `[源: ${sourceName}]`);
         }
 
         if (history.length > 50) history.splice(50);
