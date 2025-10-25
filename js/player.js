@@ -426,7 +426,7 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
         
         // 1. 来源优先级（调整权重）
         if (anime.animeTitle?.includes('from bilibili')) {
-            score += 10000;
+            score += 1000;
         }
         
         // 2. 标题相似度（核心）- 传递完整信息
