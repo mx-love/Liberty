@@ -97,8 +97,8 @@ let saveProgressTimer = null; // 用于防抖保存进度
 
 // 弹幕配置
 const DANMU_CONFIG = {
-    baseUrl: 'https://danmu.manxue.eu.org/87654321', // 改为使用前端代理路径
-    enabled: true,
+    baseUrl: 'https://danmu.manxue.eu.org/87654321', // 你的弹幕服务地址
+    enabled: true, // 是否启用弹幕
 };
 
 // 弹幕缓存
@@ -152,9 +152,9 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
     .replace(/【[^】]*】/g, '')          // 去除方括号
     .replace(/\s*from\s+\w+/gi, '')     // ✅ 新增：去除 "from xxx"
     .trim();
-    
+
     let animeId = forceAnimeId || currentDanmuAnimeId;
-    
+
     if (!animeId) {
         try {
             const titleHash = simpleHash(cleanTitle);
@@ -174,7 +174,7 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
             console.warn('恢复弹幕源ID失败:', e);
         }
     }
-    
+
  // ⚡ 缓存键：使用更精确的标识，避免冲突
 	// 格式：animeId_标题hash_集数 或 标题hash_集数
 	const titleHash = simpleHash(cleanTitle); // 使用标题hash避免长键名
@@ -306,7 +306,7 @@ function findBestAnimeMatch(animes, targetTitle) {
         const animeTitle = (anime.animeTitle || '').replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
 
         let score = 0;
-        
+
         // 🔥 新增：bilibili 弹幕源优先加分
 		if (anime.animeTitle && anime.animeTitle.includes('from bilibili')) {
 			score += 10000; // 给 bilibili 来源最高优先级
@@ -806,13 +806,13 @@ function showShortcutHint(text, direction) {
 
 // 初始化播放器
 function initPlayer(videoUrl) {
-	
+
 	// ✅ 缓存清理：只保留最近30天的弹幕缓存
     function cleanOldDanmuCache() {
         const MAX_CACHE_AGE = 30 * 24 * 60 * 60 * 1000; // 30天
         const MAX_CACHE_SIZE = 100; // 最多保留100个弹幕缓存
         const now = Date.now();
-        
+
         try {
             // 清理内存缓存（只保留当前视频相关）
             const currentTitleHash = simpleHash(currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim());
@@ -821,11 +821,11 @@ function initPlayer(videoUrl) {
                     delete danmuCache[key];
                 }
             });
-            
+
             // 清理 localStorage 中的详情缓存
             const cacheKeys = Object.keys(animeDetailCache);
             const validCaches = [];
-            
+
             cacheKeys.forEach(key => {
                 const cache = animeDetailCache[key];
                 if (cache && cache.timestamp && (now - cache.timestamp < MAX_CACHE_AGE)) {
@@ -834,16 +834,16 @@ function initPlayer(videoUrl) {
                     delete animeDetailCache[key];
                 }
             });
-            
+
             // 如果缓存数量超过限制，删除最旧的
             if (validCaches.length > MAX_CACHE_SIZE) {
                 validCaches.sort((a, b) => a.timestamp - b.timestamp);
                 const toDelete = validCaches.slice(0, validCaches.length - MAX_CACHE_SIZE);
                 toDelete.forEach(item => delete animeDetailCache[item.key]);
             }
-            
+
             saveCache(animeDetailCache);
-            
+
             // 清理 localStorage 中的弹幕源ID（保留最近使用的50个）
             const danmuSourceKeys = [];
             for (let i = 0; i < localStorage.length; i++) {
@@ -852,12 +852,12 @@ function initPlayer(videoUrl) {
                     danmuSourceKeys.push(key);
                 }
             }
-            
+
             if (danmuSourceKeys.length > 50) {
                 // 简单策略：删除多余的（实际应该按访问时间，但这里简化处理）
                 danmuSourceKeys.slice(50).forEach(key => localStorage.removeItem(key));
             }
-            
+
             console.log('✅ 缓存清理完成');
         } catch (e) {
             console.warn('缓存清理失败:', e);
@@ -869,7 +869,7 @@ function initPlayer(videoUrl) {
         cleanOldDanmuCache();
         window.danmuCacheCleanedThisSession = true;
     }
-	
+
     if (!videoUrl) {
         return
     }
@@ -879,7 +879,7 @@ function initPlayer(videoUrl) {
         art.destroy();
         art = null;
     }
-    
+
     // ✅ 尝试恢复用户上次选择的弹幕源
 	if (!currentDanmuAnimeId) {
 		try {
@@ -2238,7 +2238,7 @@ async function switchToResource(sourceKey, vodId) {
         // ✅ 清空详情缓存和当前视频的弹幕缓存
 		try {
 			console.log('🔄 切换视频源,清空缓存...');
-    
+
 			// 清空详情缓存
 			Object.keys(animeDetailCache).forEach(key => {
 				if (key.startsWith('title_')) {
@@ -2246,7 +2246,7 @@ async function switchToResource(sourceKey, vodId) {
 				}
 			});
 			saveCache(animeDetailCache);
-    
+
 			// 清空当前视频相关的弹幕缓存
 			const cleanTitle = currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
 			const titleHash = simpleHash(cleanTitle);
@@ -2255,7 +2255,7 @@ async function switchToResource(sourceKey, vodId) {
 					delete danmuCache[key];
 				}
 			});
-    
+
 			console.log('✅ 已清空详情缓存和弹幕缓存');
 		} catch (e) {
 			console.warn('清空缓存失败:', e);
@@ -2292,7 +2292,7 @@ async function switchToResource(sourceKey, vodId) {
 		if (art && art.video && !art.video.paused) {
 			currentPlaybackTime = art.video.currentTime;
 		}
-		
+
 		// ✅ 保存播放进度到临时存储
 		try {
 			const progressKey = `videoProgress_temp_${currentVideoTitle}_${targetIndex}`;
@@ -2303,7 +2303,7 @@ async function switchToResource(sourceKey, vodId) {
 		} catch (e) {
 			console.error('保存临时进度失败:', e);
 		}
-		
+
 		// ✅ 保存弹幕源ID到 localStorage (使用纯标题作为key)
 		if (currentDanmuAnimeId) {
 			try {
