@@ -1743,6 +1743,7 @@ function saveToHistory() {
                 existingItem.episodes = [...videoInfo.episodes];
             }
 
+            // ✅ 移到最前面
             const updatedItem = history.splice(existingIndex, 1)[0];
             history.unshift(updatedItem);
             console.log('[历史记录] ✅ 更新记录:', videoInfo.title, '第', videoInfo.episodeIndex + 1, '集', `[源: ${sourceName}]`);
