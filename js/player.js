@@ -253,6 +253,30 @@ const CACHE_EXPIRE_TIME = 24 * 60 * 60 * 1000; // 1 天
 
 // ===== 获取弹幕数据 =====
 
+// ✅ 【新增】提取季度信息
+function extractSeasonInfo(title) {
+    const patterns = [
+        /第([一二三四五六七八九十\d]+)[季部]/,  // 第一季、第2季
+        /[第\s]*([1-9]\d*)[季部]/,              // 1季、第1季
+        /season\s*([1-9]\d*)/i,                // Season 1
+        /S0*([1-9]\d*)/i,                      // S01, S1
+    ];
+    
+    for (const pattern of patterns) {
+        const match = title.match(pattern);
+        if (match) {
+            let season = match[1];
+            // 转换中文数字
+            const chineseNums = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10};
+            if (chineseNums[season]) {
+                season = chineseNums[season];
+            }
+            return parseInt(season);
+        }
+    }
+    return null;
+}
+
 // ✅ 【新增】智能匹配最佳动漫结果
 function findBestAnimeMatch(animes, targetTitle) {
     if (!animes || animes.length === 0) return null;
@@ -261,43 +285,94 @@ function findBestAnimeMatch(animes, targetTitle) {
         const animeTitle = (anime.animeTitle || '').replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
         let score = 0;
 
-        // bilibili 弹幕源优先加分
-        if (anime.animeTitle && anime.animeTitle.includes('from bilibili')) {
-            score += 10000;
-        }
+        // 提取季度信息
+        const targetSeason = extractSeasonInfo(targetTitle);
+        const animeSeason = extractSeasonInfo(animeTitle);
 
-        // 完全匹配得最高分
+        // 1. 完全匹配 - 最高优先级
         if (animeTitle === targetTitle) {
-            score += 1000;
+            score += 100000;
+            console.log(`🎯 完全匹配: "${animeTitle}"`);
         }
 
-        // 包含目标标题
+        // 1.5 季度匹配检测 - 防止"爱情公寓1"匹配到"爱情公寓2"
+        if (targetSeason !== null && animeSeason !== null) {
+            if (targetSeason === animeSeason) {
+                score += 80000; // 季度完全匹配，高分
+                console.log(`✓ 季度匹配: 目标第${targetSeason}季 = 弹幕源第${animeSeason}季`);
+            } else {
+                score -= 50000; // 季度不匹配，严重扣分
+                console.log(`✗ 季度不匹配: 目标第${targetSeason}季 ≠ 弹幕源第${animeSeason}季`);
+            }
+        } else if (targetSeason !== null && animeSeason === null) {
+            // 目标有季度，但弹幕源没有（可能是"爱情公寓"总集）
+            score += 5000; // 小幅加分，作为备选
+        } else if (targetSeason === null && animeSeason !== null) {
+            // 目标没季度，但弹幕源有（避免"爱情公寓"误匹配"爱情公寓1"）
+            score -= 10000; // 适度扣分
+        }
+        
+        // 2. 字数差异惩罚 - 防止"热点"匹配到"春晚热点"
+        const lengthDiff = Math.abs(animeTitle.length - targetTitle.length);
+        if (lengthDiff === 0) {
+            score += 50000;
+        } else if (lengthDiff <= 2) {
+            score += 20000;
+        } else if (lengthDiff <= 5) {
+            score += 5000;
+        } else {
+            score -= lengthDiff * 500;
+        }
+
+        // 3. 关键词污染过滤
+        const hasPrefix = animeTitle.length > targetTitle.length && 
+                         animeTitle.includes(targetTitle) && 
+                         !animeTitle.startsWith(targetTitle);
+        const hasSuffix = animeTitle.length > targetTitle.length && 
+                         animeTitle.includes(targetTitle) && 
+                         !animeTitle.endsWith(targetTitle);
+        
+        if (hasPrefix || hasSuffix) {
+            score -= 30000;
+            console.log(`⚠️ 检测到污染关键词: "${animeTitle}" vs "${targetTitle}"`);
+        }
+
+        // 4. bilibili 弹幕源优先
+        if (anime.animeTitle && anime.animeTitle.includes('from bilibili')) {
+            score += 15000;
+        }
+
+        // 5. 包含关系判断
         if (animeTitle.includes(targetTitle)) {
-            score += 500;
+            if (animeTitle.startsWith(targetTitle) || animeTitle.endsWith(targetTitle)) {
+                score += 8000;
+            } else {
+                score += 3000;
+            }
         }
 
-        // 目标标题包含动漫标题
         if (targetTitle.includes(animeTitle)) {
-            score += 300;
+            score += 2000;
         }
 
-        // 字符串相似度
+        // 6. 字符串相似度
         const similarity = calculateSimilarity(animeTitle, targetTitle);
-        score += similarity * 200;
+        score += similarity * 10000;
 
-        // 优先选择集数较多的
+        // 7. 集数加分
         if (anime.episodeCount) {
             score += Math.min(anime.episodeCount, 50);
         }
 
-        return { anime, score };
+        return { anime, score, animeTitle };
     });
 
     scored.sort((a, b) => b.score - a.score);
 
-    console.log('弹幕源匹配得分:', scored.map(s => ({
-        title: s.anime.animeTitle,
-        score: s.score
+    console.log('🔍 弹幕源匹配得分 (目标: "' + targetTitle + '"):', scored.slice(0, 5).map(s => ({
+        title: s.animeTitle,
+        score: Math.round(s.score),
+        episodes: s.anime.episodeCount
     })));
 
     return scored[0].anime;
