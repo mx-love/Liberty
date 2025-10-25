@@ -1,16 +1,83 @@
 const selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || '[]');
 const customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]'); // 存储自定义API列表
 
-// ============ 新增：通用工具函数 ============
+// ============================================
+// 📌 增强版标题处理
+// ============================================
 
-// 统一的标题清理函数
+// 配置常量
+const MATCH_CONFIG = {
+    minSimilarity: 0.7,
+    titleCleanPatterns: [
+        /\([^)]*\)/g,
+        /（[^）]*）/g,
+        /【[^】]*】/g,
+        /\[[^\]]*\]/g,
+        /\s*from\s+\w+/gi,
+        /\s*-\s*\d+\s*$/,
+        /^\d+\.\s*/,
+        /\s{2,}/g,
+    ],
+    seasonPatterns: [
+        /第([一二三四五六七八九十\d]+)季/,
+        /Season\s*(\d+)/i,
+        /S(\d+)/i,
+        /\s(\d{4})\s/,
+    ],
+    episodePatterns: [
+        /第\s*(\d+)\s*[集话話]/,
+        /[Ee][Pp]\.?\s*(\d+)/,
+        /#第(\d+)[话話]#/,
+        /\[第(\d+)[集话話]\]/,
+        /【第(\d+)[集话話]】/,
+        /^\s*0*(\d+)\s*$/,
+        /\b0*(\d+)\b/,
+    ]
+};
+
+// 保留旧函数兼容性
 function sanitizeTitle(title) {
-    if (!title) return '';
-    return title
-        .replace(/\([^)]*\)/g, '')
-        .replace(/【[^】]*】/g, '')
-        .replace(/\s*from\s+\w+/gi, '')
-        .trim();
+    const result = advancedCleanTitle(title);
+    return result.clean;
+}
+
+// 新的增强版标题清理
+function advancedCleanTitle(title) {
+    if (!title) return { clean: '', season: null, year: null, original: title };
+    
+    let cleaned = title;
+    let season = null;
+    let year = null;
+    
+    // 提取季度信息
+    for (const pattern of MATCH_CONFIG.seasonPatterns) {
+        const match = title.match(pattern);
+        if (match) {
+            const seasonNum = match[1];
+            if (/^\d+$/.test(seasonNum)) {
+                season = parseInt(seasonNum);
+            } else {
+                const cnMap = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10};
+                season = cnMap[seasonNum] || null;
+            }
+            break;
+        }
+    }
+    
+    // 提取年份
+    const yearMatch = title.match(/\b(19|20)\d{2}\b/);
+    if (yearMatch) {
+        year = parseInt(yearMatch[0]);
+    }
+    
+    // 清理标题
+    for (const pattern of MATCH_CONFIG.titleCleanPatterns) {
+        cleaned = cleaned.replace(pattern, ' ');
+    }
+    
+    cleaned = cleaned.trim().toLowerCase();
+    
+    return { clean: cleaned, season, year, original: title };
 }
 
 // 统一的缓存清理函数
@@ -252,130 +319,103 @@ let animeDetailCache = loadCache();
 const CACHE_EXPIRE_TIME = 24 * 60 * 60 * 1000; // 1 天
 
 // ===== 获取弹幕数据 =====
-
-// ✅ 【新增】提取季度信息
-function extractSeasonInfo(title) {
-    const patterns = [
-        /第([一二三四五六七八九十\d]+)[季部]/,  // 第一季、第2季
-        /[第\s]*([1-9]\d*)[季部]/,              // 1季、第1季
-        /season\s*([1-9]\d*)/i,                // Season 1
-        /S0*([1-9]\d*)/i,                      // S01, S1
-    ];
-    
-    for (const pattern of patterns) {
-        const match = title.match(pattern);
-        if (match) {
-            let season = match[1];
-            // 转换中文数字
-            const chineseNums = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10};
-            if (chineseNums[season]) {
-                season = chineseNums[season];
-            }
-            return parseInt(season);
-        }
-    }
-    return null;
-}
-
-// ✅ 【新增】智能匹配最佳动漫结果
-function findBestAnimeMatch(animes, targetTitle) {
+// ✅ 智能匹配最佳动漫结果（增强版）
+function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
     if (!animes || animes.length === 0) return null;
 
+    const targetInfo = advancedCleanTitle(targetTitle);
+    
     const scored = animes.map(anime => {
-        const animeTitle = (anime.animeTitle || '').replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
+        const animeInfo = advancedCleanTitle(anime.animeTitle);
         let score = 0;
-
-        // 提取季度信息
-        const targetSeason = extractSeasonInfo(targetTitle);
-        const animeSeason = extractSeasonInfo(animeTitle);
-
-        // 1. 完全匹配 - 最高优先级
-        if (animeTitle === targetTitle) {
-            score += 100000;
-            console.log(`🎯 完全匹配: "${animeTitle}"`);
-        }
-
-        // 1.5 季度匹配检测 - 防止"爱情公寓1"匹配到"爱情公寓2"
-        if (targetSeason !== null && animeSeason !== null) {
-            if (targetSeason === animeSeason) {
-                score += 80000; // 季度完全匹配，高分
-                console.log(`✓ 季度匹配: 目标第${targetSeason}季 = 弹幕源第${animeSeason}季`);
-            } else {
-                score -= 50000; // 季度不匹配，严重扣分
-                console.log(`✗ 季度不匹配: 目标第${targetSeason}季 ≠ 弹幕源第${animeSeason}季`);
-            }
-        } else if (targetSeason !== null && animeSeason === null) {
-            // 目标有季度，但弹幕源没有（可能是"爱情公寓"总集）
-            score += 5000; // 小幅加分，作为备选
-        } else if (targetSeason === null && animeSeason !== null) {
-            // 目标没季度，但弹幕源有（避免"爱情公寓"误匹配"爱情公寓1"）
-            score -= 10000; // 适度扣分
-        }
         
-        // 2. 字数差异惩罚 - 防止"热点"匹配到"春晚热点"
-        const lengthDiff = Math.abs(animeTitle.length - targetTitle.length);
-        if (lengthDiff === 0) {
-            score += 50000;
-        } else if (lengthDiff <= 2) {
-            score += 20000;
-        } else if (lengthDiff <= 5) {
-            score += 5000;
-        } else {
-            score -= lengthDiff * 500;
-        }
-
-        // 3. 关键词污染过滤
-        const hasPrefix = animeTitle.length > targetTitle.length && 
-                         animeTitle.includes(targetTitle) && 
-                         !animeTitle.startsWith(targetTitle);
-        const hasSuffix = animeTitle.length > targetTitle.length && 
-                         animeTitle.includes(targetTitle) && 
-                         !animeTitle.endsWith(targetTitle);
-        
-        if (hasPrefix || hasSuffix) {
-            score -= 30000;
-            console.log(`⚠️ 检测到污染关键词: "${animeTitle}" vs "${targetTitle}"`);
-        }
-
-        // 4. bilibili 弹幕源优先
-        if (anime.animeTitle && anime.animeTitle.includes('from bilibili')) {
+        // 1. 来源优先级
+        if (anime.animeTitle?.includes('from bilibili')) {
             score += 15000;
         }
-
-        // 5. 包含关系判断
-        if (animeTitle.includes(targetTitle)) {
-            if (animeTitle.startsWith(targetTitle) || animeTitle.endsWith(targetTitle)) {
-                score += 8000;
+        
+        // 2. 标题相似度（核心）
+        const similarity = enhancedSimilarity(animeInfo.clean, targetInfo.clean);
+        score += similarity * 30000;
+        
+        // 3. 季度匹配
+        if (targetInfo.season && animeInfo.season) {
+            if (targetInfo.season === animeInfo.season) {
+                score += 10000;
             } else {
-                score += 3000;
+                score -= 5000;
             }
         }
-
-        if (targetTitle.includes(animeTitle)) {
-            score += 2000;
+        
+        // 4. 年份匹配
+        if (targetInfo.year && animeInfo.year) {
+            const yearDiff = Math.abs(targetInfo.year - animeInfo.year);
+            if (yearDiff === 0) {
+                score += 5000;
+            } else if (yearDiff <= 1) {
+                score += 2000;
+            }
         }
-
-        // 6. 字符串相似度
-        const similarity = calculateSimilarity(animeTitle, targetTitle);
-        score += similarity * 10000;
-
-        // 7. 集数加分
-        if (anime.episodeCount) {
-            score += Math.min(anime.episodeCount, 50);
+        
+        // 5. 集数合理性
+        if (currentEpisodeCount > 0 && anime.episodeCount) {
+            const epDiff = Math.abs(anime.episodeCount - currentEpisodeCount);
+            if (epDiff <= 2) {
+                score += 3000;
+            } else if (anime.episodeCount >= currentEpisodeCount) {
+                score += 1000;
+            } else {
+                score -= 2000;
+            }
         }
-
-        return { anime, score, animeTitle };
+        
+        // 6. 类型匹配
+        if (anime.typeDescription) {
+            const isSeries = /TV|连载|番剧/.test(anime.typeDescription);
+            const isMovie = /电影|剧场版/.test(anime.typeDescription);
+            
+            if (currentEpisodeCount === 1 && isMovie) {
+                score += 8000;
+            } else if (currentEpisodeCount > 1 && isSeries) {
+                score += 5000;
+            }
+        }
+        
+        // 7. 标题长度惩罚
+        const lenDiff = Math.abs(animeInfo.clean.length - targetInfo.clean.length);
+        if (lenDiff > 10) {
+            score -= lenDiff * 10;
+        }
+        
+        return {
+            anime,
+            score,
+            similarity,
+            debug: {
+                targetClean: targetInfo.clean,
+                animeClean: animeInfo.clean,
+                similarity: similarity.toFixed(3)
+            }
+        };
     });
-
+    
     scored.sort((a, b) => b.score - a.score);
-
-    console.log('🔍 弹幕源匹配得分 (目标: "' + targetTitle + '"):', scored.slice(0, 5).map(s => ({
-        title: s.animeTitle,
-        score: Math.round(s.score),
+    
+    console.log('🎯 弹幕匹配评分 (前5):', scored.slice(0, 5).map(s => ({
+        title: s.anime.animeTitle,
+        score: s.score,
+        similarity: s.similarity.toFixed(3),
         episodes: s.anime.episodeCount
     })));
-
-    return scored[0].anime;
+    
+    // 阈值检查
+    const topMatch = scored[0];
+    if (topMatch.similarity < MATCH_CONFIG.minSimilarity) {
+        console.warn(`⚠️ 最佳匹配相似度过低: ${topMatch.similarity.toFixed(3)}`);
+        return null;
+    }
+    
+    return topMatch.anime;
 }
 
 // ✅ 【新增】计算字符串相似度
@@ -387,6 +427,52 @@ function calculateSimilarity(str1, str2) {
 
     const editDistance = levenshteinDistance(longer, shorter);
     return (longer.length - editDistance) / longer.length;
+}
+
+// 增强版相似度计算
+function enhancedSimilarity(str1, str2) {
+    const s1 = str1.toLowerCase();
+    const s2 = str2.toLowerCase();
+    
+    if (s1 === s2) return 1.0;
+    
+    // Jaccard 相似度
+    const tokens1 = new Set(s1.split(/\s+/));
+    const tokens2 = new Set(s2.split(/\s+/));
+    const intersection = new Set([...tokens1].filter(x => tokens2.has(x)));
+    const union = new Set([...tokens1, ...tokens2]);
+    const jaccardScore = intersection.size / union.size;
+    
+    // Levenshtein 相似度
+    const levDistance = levenshteinDistance(s1, s2);
+    const maxLen = Math.max(s1.length, s2.length);
+    const levScore = maxLen > 0 ? (maxLen - levDistance) / maxLen : 0;
+    
+    // 最长公共子序列相似度
+    const lcsLen = longestCommonSubsequence(s1, s2);
+    const lcsScore = lcsLen / Math.max(s1.length, s2.length);
+    
+    // 综合评分
+    return jaccardScore * 0.3 + levScore * 0.4 + lcsScore * 0.3;
+}
+
+// 最长公共子序列
+function longestCommonSubsequence(str1, str2) {
+    const m = str1.length;
+    const n = str2.length;
+    const dp = Array(m + 1).fill(0).map(() => Array(n + 1).fill(0));
+    
+    for (let i = 1; i <= m; i++) {
+        for (let j = 1; j <= n; j++) {
+            if (str1[i - 1] === str2[j - 1]) {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+            } else {
+                dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+            }
+        }
+    }
+    
+    return dp[m][n];
 }
 
 // ✅ 【新增】编辑距离算法
@@ -456,7 +542,7 @@ async function findOrSearchAnimeId(cleanTitle) {
             return null;
         }
 
-        const bestMatch = findBestAnimeMatch(data.animes, cleanTitle);
+        const bestMatch = findBestAnimeMatch(data.animes, cleanTitle, currentEpisodes.length);
         if (!bestMatch) return null;
 
         return bestMatch.animeId;
@@ -466,28 +552,18 @@ async function findOrSearchAnimeId(cleanTitle) {
     }
 }
 
-// ✅ 【新增】智能匹配集数（增强版）
+// ✅ 智能匹配集数（增强版）
 function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
     if (!episodes || episodes.length === 0) return null;
 
     const targetNumber = targetIndex + 1;
 
-    const episodesWithNumbers = episodes.map((ep, idx) => {
+    const episodesWithInfo = episodes.map((ep, idx) => {
         const title = ep.episodeTitle || '';
-
-        const patterns = [
-            /第\s*(\d+)\s*[集话話]/,
-            /[Ee][Pp]\.?\s*(\d+)/,
-            /#第(\d+)话#/,
-            /\[第(\d+)[集话話]\]/,
-            /\(第(\d+)[集话話]\)/,
-            /【第(\d+)[集话話]】/,
-            /^\s*(\d+)\s*$/,
-            /\b0*(\d+)\b/
-        ];
-
         let episodeNumber = null;
-        for (const pattern of patterns) {
+        
+        // 按优先级匹配集数
+        for (const pattern of MATCH_CONFIG.episodePatterns) {
             const match = title.match(pattern);
             if (match) {
                 episodeNumber = parseInt(match[1]);
@@ -496,30 +572,58 @@ function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
                 }
             }
         }
-
+        
+        // 特殊处理：纯数字标题
+        if (!episodeNumber && /^\d+$/.test(title.trim())) {
+            episodeNumber = parseInt(title.trim());
+        }
+        
         return {
             episode: ep,
             number: episodeNumber !== null ? episodeNumber : (idx + 1),
             title: title,
-            index: idx
+            index: idx,
+            confidence: episodeNumber !== null ? 'high' : 'low'
         };
     });
 
-    // 策略1: 精确匹配集数编号
-    const exactMatch = episodesWithNumbers.find(ep => ep.number === targetNumber);
+    // 策略1: 精确匹配
+    const exactMatch = episodesWithInfo.find(ep => 
+        ep.number === targetNumber && ep.confidence === 'high'
+    );
     if (exactMatch) {
-        console.log(`✓ [弹幕] 精确匹配第${targetNumber}集: ${exactMatch.title}`);
+        console.log(`✅ [弹幕] 精确匹配 第${targetNumber}集: ${exactMatch.title}`);
         return exactMatch.episode;
     }
 
-    // 策略2: 使用索引匹配
+    // 策略2: 索引匹配（检查连续性）
     if (targetIndex >= 0 && targetIndex < episodes.length) {
-        const indexMatch = episodesWithNumbers[targetIndex];
-        console.log(`✓ [弹幕] 索引匹配第${targetNumber}集 (弹幕源第${indexMatch.number}集): ${indexMatch.title}`);
-        return indexMatch.episode;
+        const indexMatch = episodesWithInfo[targetIndex];
+        
+        // 检查集数是否连续
+        const isSequential = episodesWithInfo.every((ep, i) => {
+            if (i === 0) return true;
+            return ep.number === episodesWithInfo[i - 1].number + 1;
+        });
+        
+        if (isSequential || indexMatch.confidence === 'high') {
+            console.log(`✅ [弹幕] 索引匹配 第${targetNumber}集 → 弹幕第${indexMatch.number}集`);
+            return indexMatch.episode;
+        }
     }
 
-    console.error(`✗ [弹幕] 无法为第${targetNumber}集找到匹配的弹幕源（共${episodes.length}集可用）`);
+    // 策略3: 模糊匹配（±1偏差）
+    const fuzzyMatch = episodesWithInfo.find(ep => 
+        Math.abs(ep.number - targetNumber) <= 1 && ep.confidence === 'high'
+    );
+    if (fuzzyMatch) {
+        console.log(`⚠️ [弹幕] 模糊匹配 第${targetNumber}集 → 弹幕第${fuzzyMatch.number}集 (±1)`);
+        return fuzzyMatch.episode;
+    }
+
+    console.error(`❌ [弹幕] 无法匹配第${targetNumber}集 (共${episodes.length}集)`);
+    console.log('可用集数:', episodesWithInfo.map(e => `${e.index}:${e.number}`));
+    
     return null;
 }
 
@@ -1299,6 +1403,8 @@ function initPlayer(videoUrl) {
 				}
 			}
 		});
+		// ✅ 添加弹幕偏移控制
+		addDanmuOffsetControl(art);
 	});
 
     // 全屏 Web 模式处理
@@ -2763,4 +2869,76 @@ async function switchDanmuSource(animeId) {
         console.error('切换弹幕源失败:', error);
         showToast('切换弹幕源失败', 'error');
     }
+}
+
+// ============================================
+// 🎨 弹幕偏移调整功能
+// ============================================
+
+function saveDanmuOffset(videoTitle, episodeIndex, offset) {
+    try {
+        const offsetKey = `danmuOffset_${simpleHash(videoTitle)}_ep${episodeIndex}`;
+        localStorage.setItem(offsetKey, JSON.stringify({
+            offset: offset,
+            timestamp: Date.now()
+        }));
+        console.log(`✅ 已保存弹幕偏移: ${offset}秒`);
+    } catch (e) {
+        console.warn('保存弹幕偏移失败:', e);
+    }
+}
+
+function getDanmuOffset(videoTitle, episodeIndex) {
+    try {
+        const offsetKey = `danmuOffset_${simpleHash(videoTitle)}_ep${episodeIndex}`;
+        const data = localStorage.getItem(offsetKey);
+        if (data) {
+            const parsed = JSON.parse(data);
+            if (Date.now() - parsed.timestamp < 30 * 24 * 60 * 60 * 1000) {
+                return parsed.offset;
+            }
+        }
+    } catch (e) {
+        console.warn('读取弹幕偏移失败:', e);
+    }
+    return 0;
+}
+
+function addDanmuOffsetControl(artInstance) {
+    if (!artInstance || !artInstance.controls) return;
+    
+    let currentOffset = getDanmuOffset(currentVideoTitle, currentEpisodeIndex);
+    
+    artInstance.controls.add({
+        name: 'danmuOffset',
+        position: 'right',
+        html: `<div style="display:flex;align-items:center;gap:5px;padding:0 10px;">
+            <button id="danmuOffsetMinus" style="padding:5px 10px;background:#333;border:none;border-radius:4px;color:#fff;cursor:pointer;">-0.5s</button>
+            <span id="danmuOffsetValue" style="min-width:50px;text-align:center;color:#fff;">${currentOffset}s</span>
+            <button id="danmuOffsetPlus" style="padding:5px 10px;background:#333;border:none;border-radius:4px;color:#fff;cursor:pointer;">+0.5s</button>
+        </div>`,
+        mounted: ($control) => {
+            const updateOffset = (delta) => {
+                currentOffset += delta;
+                currentOffset = Math.round(currentOffset * 10) / 10;
+                
+                const valueEl = document.getElementById('danmuOffsetValue');
+                if (valueEl) valueEl.textContent = `${currentOffset}s`;
+                
+                if (artInstance.plugins.artplayerPluginDanmuku) {
+                    const currentTime = artInstance.currentTime;
+                    artInstance.plugins.artplayerPluginDanmuku.seek(currentTime + currentOffset);
+                }
+                
+                saveDanmuOffset(currentVideoTitle, currentEpisodeIndex, currentOffset);
+                showToast(`弹幕偏移: ${currentOffset}s`, 'info');
+            };
+            
+            const minusBtn = $control.querySelector('#danmuOffsetMinus');
+            const plusBtn = $control.querySelector('#danmuOffsetPlus');
+            
+            if (minusBtn) minusBtn.addEventListener('click', () => updateOffset(-0.5));
+            if (plusBtn) plusBtn.addEventListener('click', () => updateOffset(0.5));
+        }
+    });
 }
