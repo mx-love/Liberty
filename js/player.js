@@ -8,7 +8,7 @@ async function getDanmakuData() {
         const episodeIndex = currentEpisodeIndex;
         
         // 第一步：搜索动漫
-        const searchResponse = await fetch(`https://danmu.manxue.eu.org/api/v2/search/anime?keyword=${encodeURIComponent(videoTitle)}`);
+        const searchResponse = await fetch(`https://danmu.manxue.eu.org/87654321/api/v2/search/anime?keyword=${encodeURIComponent(videoTitle)}`);
         const searchData = await searchResponse.json();
         
         if (!searchData.animes || searchData.animes.length === 0) {
