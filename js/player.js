@@ -190,24 +190,18 @@ function generateDanmuCacheKey(cleanTitle, episodeIndex) {
 }
 
 // 网络请求重试机制
-async function fetchWithRetry(url, options = {}, maxRetries = 2) { 
-    const baseDelay = 500; 
+async function fetchWithRetry(url, options = {}, maxRetries = 3) {
+    const baseDelay = 1000;
 
     for (let i = 0; i < maxRetries; i++) {
         try {
             const response = await fetch(url, {
                 ...options,
-                signal: AbortSignal.timeout(3000) 
+                signal: AbortSignal.timeout(5000)
             });
 
             if (response.ok) {
                 return response;
-            }
-
-            // ✅ 【新增】如果是404，立即失败，不重试
-            if (response.status === 404) {
-                console.warn(`⚠️ 404错误，不重试: ${url}`);
-                throw new Error('404 Not Found');
             }
 
             if (i < maxRetries - 1) {
@@ -215,11 +209,6 @@ async function fetchWithRetry(url, options = {}, maxRetries = 2) {
                 await new Promise(r => setTimeout(r, delay));
             }
         } catch (error) {
-            // ✅ 【新增】404错误直接抛出
-            if (error.message === '404 Not Found') {
-                throw error;
-            }
-            
             if (i === maxRetries - 1) throw error;
 
             if (i < maxRetries - 1) {
@@ -2242,8 +2231,7 @@ function playEpisode(index) {
 				console.log('✅ 已清理 episodes 缓存，下次将重新获取最新集数列表');
 			}
         
-			// ✅ 【关键修复】同时清空 currentDanmuAnimeId，强制重新搜索
-			// 避免使用已失效的弹幕源ID
+			// ✅ 【关键修复】同时清空 currentDanmuAnimeId
 			currentDanmuAnimeId = null;
 			console.log('🔄 已清空弹幕源ID，下次将重新搜索');
         
