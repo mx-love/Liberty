@@ -2167,17 +2167,13 @@ function playEpisode(index) {
         <div>正在加载视频...</div>
     `;
 
-    // 获取 sourceCode
-    const urlParams2 = new URLSearchParams(window.location.search);
-    const sourceCode = urlParams2.get('source_code');
-
     // 准备切换剧集的URL
     const url = currentEpisodes[index];
 
     // 更新当前剧集索引
     currentEpisodeIndex = index;
     currentVideoUrl = url;
-    videoHasEnded = false; // 重置视频结束标志
+    videoHasEnded = false;
 
     clearVideoProgress();
 
@@ -2189,18 +2185,27 @@ function playEpisode(index) {
     window.history.replaceState({}, '', currentUrl.toString());
 
     // 【修复】保留弹幕源ID，避免重新搜索
-	const preservedDanmuId = currentDanmuAnimeId;
+    const preservedDanmuId = currentDanmuAnimeId;
 
-	if (isWebkit) {
-		initPlayer(url);
-	} else {
-		art.switch = url;
-	}
+    // 【新增】清理当前集数的弹幕缓存（避免加载错误的弹幕）
+    try {
+        const cleanTitle = sanitizeTitle(currentVideoTitle);
+        const oldCacheKey = generateDanmuCacheKey(cleanTitle, currentEpisodeIndex);
+        if (danmuCache[oldCacheKey]) {
+            delete danmuCache[oldCacheKey];
+            console.log('✅ 已清理旧集数弹幕缓存');
+        }
+    } catch (e) {
+        console.warn('清理弹幕缓存失败:', e);
+    }
 
-	// 【修复】恢复弹幕源ID
-	if (preservedDanmuId) {
-		currentDanmuAnimeId = preservedDanmuId;
-	}
+    // 【修复】统一使用 initPlayer，避免兼容性问题
+    initPlayer(url);
+
+    // 【修复】恢复弹幕源ID
+    if (preservedDanmuId) {
+        currentDanmuAnimeId = preservedDanmuId;
+    }
 
     // 更新UI
     updateEpisodeInfo();
@@ -2208,7 +2213,29 @@ function playEpisode(index) {
     renderEpisodes();
 
     // 重置用户点击位置记录
-    userClickedPosition = null;
+    if (typeof userClickedPosition !== 'undefined') {
+        userClickedPosition = null;
+    }
+
+    // 【新增】超时保护：如果10秒后仍在加载，尝试重新初始化播放器
+    setTimeout(() => {
+        const loadingElement = document.getElementById('player-loading');
+        if (loadingElement && loadingElement.style.display !== 'none') {
+            console.warn('⚠️ 视频加载超时，尝试重新初始化播放器');
+            
+            // 强制重新初始化播放器
+            if (art) {
+                try {
+                    art.destroy();
+                } catch (e) {
+                    console.error('销毁播放器失败:', e);
+                }
+                art = null;
+            }
+            
+            initPlayer(url);
+        }
+    }, 10000);
 
     // 三秒后保存到历史记录
     setTimeout(() => saveToHistory(), 3000);
