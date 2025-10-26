@@ -698,46 +698,50 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
     }
     
     // 【新增】检测歧义情况
-if (scored.length > 1) {
-    const scoreDiff = scored[0].score - scored[1].score;
-    if (scoreDiff < 20) {
-        console.warn('⚠️ 前两名分数接近，可能存在歧义:', {
-            first: scored[0].anime.animeTitle,
-            second: scored[1].anime.animeTitle,
-            diff: scoreDiff
-        });
-        
-        // 【修复】目标无季度时，优先第一季
-        if (!targetInfo.season) {
-            // 查找前3名中是否有第一季或无季度标识的
-            const firstSeasonMatch = scored.slice(0, 3).find(s => {
-                const animeInfo = advancedCleanTitle(s.anime.animeTitle);
-                return animeInfo.season === 1 || !animeInfo.season;
+    if (scored.length > 1) {
+        const scoreDiff = scored[0].score - scored[1].score;
+        if (scoreDiff < 20) {
+            console.warn('⚠️ 前两名分数接近，可能存在歧义:', {
+                first: scored[0].anime.animeTitle,
+                second: scored[1].anime.animeTitle,
+                diff: scoreDiff
             });
             
-            if (firstSeasonMatch) {
-                console.log('🎯 目标无季度，自动选择第一季或无季度标识版本');
-                return firstSeasonMatch.anime;
+            // 【修复】目标无季度时，优先第一季
+            if (!targetInfo.season) {
+                // 查找前3名中是否有第一季或无季度标识的
+                const firstSeasonMatch = scored.slice(0, 3).find(s => {
+                    const animeInfo = advancedCleanTitle(s.anime.animeTitle);
+                    return animeInfo.season === 1 || !animeInfo.season;
+                });
+                
+                if (firstSeasonMatch) {
+                    console.log('🎯 目标无季度，自动选择第一季或无季度标识版本');
+                    return firstSeasonMatch.anime;
+                }
             }
-        }
-        
-        // 根据集数自动选择
-        if (currentEpisodeCount === 1) {
-            const movieMatch = scored.find(s => 
-                s.anime.episodeCount === 1 || /电影|剧场版/.test(s.anime.typeDescription || '')
-            );
-            if (movieMatch && scored.indexOf(movieMatch) <= 2) {
-                console.log('🎬 根据集数判断，自动选择电影版');
-                return movieMatch.anime;
-            }
-        } else if (currentEpisodeCount > 1) {
-            const seriesMatch = scored.find(s => s.anime.episodeCount > 1);
-            if (seriesMatch && scored.indexOf(seriesMatch) <= 2) {
-                console.log('📺 根据集数判断，自动选择连续剧版');
-                return seriesMatch.anime;
+            
+            // 根据集数自动选择
+            if (currentEpisodeCount === 1) {
+                const movieMatch = scored.find(s => 
+                    s.anime.episodeCount === 1 || /电影|剧场版/.test(s.anime.typeDescription || '')
+                );
+                if (movieMatch && scored.indexOf(movieMatch) <= 2) {
+                    console.log('🎬 根据集数判断，自动选择电影版');
+                    return movieMatch.anime;
+                }
+            } else if (currentEpisodeCount > 1) {
+                const seriesMatch = scored.find(s => s.anime.episodeCount > 1);
+                if (seriesMatch && scored.indexOf(seriesMatch) <= 2) {
+                    console.log('📺 根据集数判断，自动选择连续剧版');
+                    return seriesMatch.anime;
+                }
             }
         }
     }
+    
+    // ✅ 【关键】返回最高分匹配结果
+    return topMatch.anime;
 }
 
 // ✅ 【新增】计算字符串相似度
@@ -2170,6 +2174,21 @@ function playEpisode(index) {
     // 准备切换剧集的URL
     const url = currentEpisodes[index];
 
+    // 【修复】先保留弹幕源ID和清理缓存，再更新索引
+    const preservedDanmuId = currentDanmuAnimeId;
+
+    // 【修复】清理旧集数的弹幕缓存（使用旧的 currentEpisodeIndex）
+    try {
+        const cleanTitle = sanitizeTitle(currentVideoTitle);
+        const oldCacheKey = generateDanmuCacheKey(cleanTitle, currentEpisodeIndex);
+        if (danmuCache[oldCacheKey]) {
+            delete danmuCache[oldCacheKey];
+            console.log('✅ 已清理旧集数弹幕缓存');
+        }
+    } catch (e) {
+        console.warn('清理弹幕缓存失败:', e);
+    }
+
     // 更新当前剧集索引
     currentEpisodeIndex = index;
     currentVideoUrl = url;
@@ -2183,21 +2202,6 @@ function playEpisode(index) {
     currentUrl.searchParams.set('url', url);
     currentUrl.searchParams.delete('position');
     window.history.replaceState({}, '', currentUrl.toString());
-
-    // 【修复】保留弹幕源ID，避免重新搜索
-    const preservedDanmuId = currentDanmuAnimeId;
-
-    // 【新增】清理当前集数的弹幕缓存（避免加载错误的弹幕）
-    try {
-        const cleanTitle = sanitizeTitle(currentVideoTitle);
-        const oldCacheKey = generateDanmuCacheKey(cleanTitle, currentEpisodeIndex);
-        if (danmuCache[oldCacheKey]) {
-            delete danmuCache[oldCacheKey];
-            console.log('✅ 已清理旧集数弹幕缓存');
-        }
-    } catch (e) {
-        console.warn('清理弹幕缓存失败:', e);
-    }
 
     // 【修复】统一使用 initPlayer，避免兼容性问题
     initPlayer(url);
