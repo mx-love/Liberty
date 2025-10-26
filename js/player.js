@@ -2230,11 +2230,6 @@ function playEpisode(index) {
 				delete animeDetailCache[detailCacheKey];
 				console.log('✅ 已清理 episodes 缓存，下次将重新获取最新集数列表');
 			}
-        
-			// ✅ 【关键修复】同时清空 currentDanmuAnimeId
-			currentDanmuAnimeId = null;
-			console.log('🔄 已清空弹幕源ID，下次将重新搜索');
-        
 		} catch (e) {
 			console.warn('清理 episodes 缓存失败:', e);
 		}
