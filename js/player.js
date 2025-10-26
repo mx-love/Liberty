@@ -1876,7 +1876,7 @@ function initPlayer(videoUrl) {
         }
     }
 
-    // ✅ 自动加载弹幕 - 增加延迟并确保播放器完全就绪
+    // ✅ 自动加载弹幕 - 增强版，完全重置弹幕插件
     if (DANMU_CONFIG.enabled && art.plugins.artplayerPluginDanmuku) {
         // 等待播放器完全就绪后再加载弹幕
         const loadDanmaku = async () => {
@@ -1887,6 +1887,27 @@ function initPlayer(videoUrl) {
                     return;
                 }
 
+                console.log(`🔄 [弹幕] 开始加载第${currentEpisodeIndex + 1}集弹幕...`);
+
+                // ✅ 【新增】完全重置弹幕插件状态
+                const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+                
+                // 1. 强制清空所有弹幕
+                if (typeof danmukuPlugin.clear === 'function') {
+                    danmukuPlugin.clear();
+                    console.log('🧹 [弹幕] 已清空旧弹幕');
+                }
+
+                // 2. 重置配置（清空弹幕数组）
+                danmukuPlugin.config({
+                    danmuku: [],
+                    synchronousPlayback: true
+                });
+
+                // 3. 等待清理完成
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                // 4. 获取新弹幕
                 const danmuku = await getDanmukuForVideo(
                     currentVideoTitle, 
                     currentEpisodeIndex,
@@ -1894,49 +1915,36 @@ function initPlayer(videoUrl) {
                 );
 
                 if (danmuku && danmuku.length > 0) {
-                    // 先清空旧弹幕
-                    if (typeof art.plugins.artplayerPluginDanmuku.clear === 'function') {
-                        art.plugins.artplayerPluginDanmuku.clear();
-                    }
+                    console.log(`📦 [弹幕] 获取到 ${danmuku.length} 条弹幕`);
 
-                    art.plugins.artplayerPluginDanmuku.config({
+                    // 5. 加载新弹幕
+                    danmukuPlugin.config({
                         danmuku: danmuku,
                         synchronousPlayback: true
                     });
-                    art.plugins.artplayerPluginDanmuku.load();
+                    danmukuPlugin.load();
 
-                    if (restoredPosition > 0) {
-                        setTimeout(() => {
-                            if (typeof art.plugins.artplayerPluginDanmuku.seek === 'function') {
-                                art.plugins.artplayerPluginDanmuku.seek(restoredPosition);
-                            }
-                        }, 500);
+                    // 6. 等待加载完成
+                    await new Promise(resolve => setTimeout(resolve, 200));
+
+                    // 7. 同步播放位置
+                    if (restoredPosition > 0 && typeof danmukuPlugin.seek === 'function') {
+                        danmukuPlugin.seek(restoredPosition);
+                        console.log(`🎯 [弹幕] 已同步到 ${restoredPosition.toFixed(2)}s`);
                     }
 
-                    console.log(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
-                    // ✅ 加载弹幕后立即同步时间
-					if (restoredPosition > 0) {
-						setTimeout(() => {
-							if (typeof art.plugins.artplayerPluginDanmuku.seek === 'function') {
-								console.log(`🎯 弹幕加载完成，同步到: ${restoredPosition.toFixed(2)}s`);
-								art.plugins.artplayerPluginDanmuku.seek(restoredPosition);
-							}
-						}, 300);
-					}
+                    console.log(`✅ [弹幕] 第${currentEpisodeIndex + 1}集弹幕加载完成`);
                 } else {
-                    console.warn('⚠ 未找到弹幕，继续播放视频');
+                    console.warn('⚠ [弹幕] 未找到弹幕，继续播放视频');
                 }
             } catch (e) {
-                console.error('❌ 弹幕加载失败:', e);
+                console.error('❌ [弹幕] 加载失败:', e);
             }
         };
 
         // 延迟加载，确保播放器完全准备好
         setTimeout(loadDanmaku, 800);
     }
-
-    startProgressSaveInterval();
-})
 
     // 错误处理
     art.on('video:error', function (error) {
