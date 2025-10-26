@@ -697,51 +697,65 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
         return null;
     }
     
-    // 【新增】检测歧义情况
-    if (scored.length > 1) {
-        const scoreDiff = scored[0].score - scored[1].score;
-        if (scoreDiff < 20) {
-            console.warn('⚠️ 前两名分数接近，可能存在歧义:', {
-                first: scored[0].anime.animeTitle,
-                second: scored[1].anime.animeTitle,
-                diff: scoreDiff
-            });
-            
-            // 【修复】目标无季度时，优先第一季
-            if (!targetInfo.season) {
-                // 查找前3名中是否有第一季或无季度标识的
-                const firstSeasonMatch = scored.slice(0, 3).find(s => {
-                    const animeInfo = advancedCleanTitle(s.anime.animeTitle);
-                    return animeInfo.season === 1 || !animeInfo.season;
-                });
-                
-                if (firstSeasonMatch) {
-                    console.log('🎯 目标无季度，自动选择第一季或无季度标识版本');
-                    return firstSeasonMatch.anime;
-                }
-            }
-            
-            // 根据集数自动选择
-            if (currentEpisodeCount === 1) {
-                const movieMatch = scored.find(s => 
-                    s.anime.episodeCount === 1 || /电影|剧场版/.test(s.anime.typeDescription || '')
-                );
-                if (movieMatch && scored.indexOf(movieMatch) <= 2) {
-                    console.log('🎬 根据集数判断，自动选择电影版');
-                    return movieMatch.anime;
-                }
-            } else if (currentEpisodeCount > 1) {
-                const seriesMatch = scored.find(s => s.anime.episodeCount > 1);
-                if (seriesMatch && scored.indexOf(seriesMatch) <= 2) {
-                    console.log('📺 根据集数判断，自动选择连续剧版');
-                    return seriesMatch.anime;
-                }
-            }
-        }
-    }
+    // 【新增】检测歧义情况 - 优先处理无季度的情况
+	if (!targetInfo.season && scored.length > 1) {
+		console.log('🎯 目标无季度，优先查找第一季或无季度版本');
     
-    // ✅ 【关键】返回最高分匹配结果
-    return topMatch.anime;
+		// 在前5名中查找第一季或无季度的版本
+		const candidates = scored.slice(0, 5);
+    
+		// 【修复】优先查找第一季
+		let firstSeasonMatch = candidates.find(s => {
+			const animeInfo = advancedCleanTitle(s.anime.animeTitle);
+			return animeInfo.season === 1;
+		});
+    
+		// 【修复】如果没有第一季，才找无季度标识的
+		if (!firstSeasonMatch) {
+			firstSeasonMatch = candidates.find(s => {
+				const animeInfo = advancedCleanTitle(s.anime.animeTitle);
+				return !animeInfo.season;
+			});
+		}
+    
+		if (firstSeasonMatch) {
+			const animeInfo = advancedCleanTitle(firstSeasonMatch.anime.animeTitle);
+			console.log(`✅ 自动选择: ${firstSeasonMatch.anime.animeTitle} (季度: ${animeInfo.season || '无'})`);
+			return firstSeasonMatch.anime;
+		}
+	}
+
+	// 处理分数接近的歧义情况
+	if (scored.length > 1) {
+		const scoreDiff = scored[0].score - scored[1].score;
+		if (scoreDiff < 20) {
+			console.warn('⚠️ 前两名分数接近，可能存在歧义:', {
+				first: scored[0].anime.animeTitle,
+				second: scored[1].anime.animeTitle,
+				diff: scoreDiff
+			});
+        
+			// 根据集数自动选择
+			if (currentEpisodeCount === 1) {
+				const movieMatch = scored.slice(0, 3).find(s => 
+					s.anime.episodeCount === 1 || /电影|剧场版/.test(s.anime.typeDescription || '')
+				);
+				if (movieMatch) {
+					console.log('🎬 根据集数判断，自动选择电影版');
+					return movieMatch.anime;
+				}
+			} else if (currentEpisodeCount > 1) {
+				const seriesMatch = scored.slice(0, 3).find(s => s.anime.episodeCount > 1);
+				if (seriesMatch) {
+					console.log('📺 根据集数判断，自动选择连续剧版');
+					return seriesMatch.anime;
+				}
+			}
+		}
+	}
+
+	// ✅ 【关键】返回最高分匹配结果
+	return topMatch.anime;
 }
 
 // ✅ 【新增】计算字符串相似度
