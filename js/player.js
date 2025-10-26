@@ -1162,17 +1162,36 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
             }
 
             const episodeId = matchedEpisode.episodeId;
-            const result = await fetchDanmaku(episodeId, cacheKey);
-            
-            if (result !== null) {
-                console.log(`✅ [弹幕] 成功加载第${episodeIndex + 1}集弹幕 (${result.length}条)`);
-                return result;
-            }
+			const result = await fetchDanmaku(episodeId, cacheKey);
 
-            // 如果是404错误，说明该弹幕源不完整，清除缓存重试
-            console.warn(`⚠️ 该弹幕源第${episodeIndex + 1}集无数据，尝试重新匹配...`);
-            animeId = null;
-            currentDanmuAnimeId = null;
+			if (result !== null) {
+				console.log(`✅ [弹幕] 成功加载第${episodeIndex + 1}集弹幕 (${result.length}条)`);
+				return result;
+			}
+
+			// ✅ 【关键修复】404 时先刷新缓存重试
+			console.warn(`⚠️ episodeId ${episodeId} 不存在 (404)`);
+
+			// ✅ 清理缓存并重新获取一次
+			const detailCacheKey = `anime_${animeId}`;
+			delete animeDetailCache[detailCacheKey];
+
+			const freshEpisodes = await getAnimeEpisodes(animeId, cleanTitle);
+			if (freshEpisodes) {
+				const newMatch = findBestEpisodeMatch(freshEpisodes, episodeIndex, title);
+				if (newMatch && newMatch.episodeId !== episodeId) {
+					console.log(`🔄 使用刷新后的 episodeId: ${newMatch.episodeId}`);
+					const retryResult = await fetchDanmaku(newMatch.episodeId, cacheKey);
+					if (retryResult !== null) {
+						return retryResult;
+					}
+				}
+			}
+
+			// 刷新后还是404，才放弃这个 animeId
+			console.error(`❌ 刷新后仍然404，尝试重新匹配弹幕源`);
+			animeId = null;
+			currentDanmuAnimeId = null;
         }
 
         console.error('❌ 多次尝试后仍无法加载弹幕');
@@ -2202,6 +2221,19 @@ function playEpisode(index) {
     } catch (e) {
         console.warn('清理弹幕缓存失败:', e);
     }
+    
+    // ✅ 【新增】清理 episodes 详情缓存，强制下次重新获取
+	if (preservedDanmuId) {
+		try {
+			const detailCacheKey = `anime_${preservedDanmuId}`;
+			if (animeDetailCache[detailCacheKey]) {
+				delete animeDetailCache[detailCacheKey];
+				console.log('✅ 已清理 episodes 缓存，下次将重新获取最新集数列表');
+			}
+		} catch (e) {
+			console.warn('清理 episodes 缓存失败:', e);
+		}
+	}
 
     // 更新当前剧集索引
     currentEpisodeIndex = index;
