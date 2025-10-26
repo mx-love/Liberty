@@ -981,8 +981,8 @@ async function fetchDanmaku(episodeId, cacheKey) {
     const commentResponse = await fetch(commentUrl);
 
     if (!commentResponse.ok) {
-        console.warn('获取弹幕失败');
-        return [];
+        console.warn(`⚠️ 获取弹幕失败 (episodeId: ${episodeId}, status: ${commentResponse.status})`);
+        return null;  // ← 改成 null（不是空数组）
     }
 
     const commentData = await commentResponse.json();
@@ -1069,50 +1069,85 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
         }
 
         let animeId = forceAnimeId || currentDanmuAnimeId;
-        if (!animeId) {
-            animeId = await findOrSearchAnimeId(cleanTitle);
-            
-            // 【在这里添加新代码】
-            // 如果失败，尝试更简化的标题
+        let episodes = null;
+        let attemptCount = 0;
+        const MAX_ATTEMPTS = 2; // 最多尝试2次
+
+        while (attemptCount < MAX_ATTEMPTS) {
+            attemptCount++;
+
             if (!animeId) {
-                console.warn('⚠️ 首次搜索失败，尝试简化标题...');
-                const simplifiedTitle = title
-                    .replace(/[（(].*?[）)]/g, '')
-                    .replace(/【.*?】/g, '')
-                    .replace(/\[.*?\]/g, '')
-                    .trim();
+                console.log(`🔍 尝试搜索弹幕源 (第${attemptCount}次)`);
+                animeId = await findOrSearchAnimeId(cleanTitle);
                 
-                if (simplifiedTitle !== title) {
-                    animeId = await findOrSearchAnimeId(simplifiedTitle);
+                // 如果失败，尝试更简化的标题
+                if (!animeId) {
+                    console.warn('⚠️ 首次搜索失败，尝试简化标题...');
+                    const simplifiedTitle = title
+                        .replace(/[（(].*?[）)]/g, '')
+                        .replace(/【.*?】/g, '')
+                        .replace(/\[.*?\]/g, '')
+                        .trim();
+                    
+                    if (simplifiedTitle !== title) {
+                        animeId = await findOrSearchAnimeId(simplifiedTitle);
+                    }
                 }
+                
+                if (!animeId) {
+                    console.warn('⚠ 未找到弹幕源:', title);
+                    return [];
+                }
+                currentDanmuAnimeId = animeId;
             }
+
+            episodes = await getAnimeEpisodes(animeId, cleanTitle);
+            if (!episodes?.length) {
+                console.warn(`⚠ 未找到集数信息 (animeId: ${animeId})`);
+                // 清除无效的缓存，准备重试
+                animeId = null;
+                currentDanmuAnimeId = null;
+                continue;
+            }
+
+            if (isMovieContent(episodes[0])) {
+                const episodeId = episodes[0].episodeId;
+                const result = await fetchDanmaku(episodeId, cacheKey);
+                if (result !== null) {
+                    return result;
+                }
+                // 如果404，清除缓存重试
+                console.warn(`⚠️ 弹幕获取失败，清除缓存重试 (animeId: ${animeId})`);
+                animeId = null;
+                currentDanmuAnimeId = null;
+                continue;
+            }
+
+            const matchedEpisode = findBestEpisodeMatch(episodes, episodeIndex, title);
+            if (!matchedEpisode) {
+                console.warn(`⚠ [弹幕] 无法为第${episodeIndex + 1}集匹配集数`);
+                // 尝试重新搜索
+                animeId = null;
+                currentDanmuAnimeId = null;
+                continue;
+            }
+
+            const episodeId = matchedEpisode.episodeId;
+            const result = await fetchDanmaku(episodeId, cacheKey);
             
-            if (!animeId) {
-                console.warn('⚠ 未找到弹幕源:', title);
-                return [];
+            if (result !== null) {
+                console.log(`✅ [弹幕] 成功加载第${episodeIndex + 1}集弹幕 (${result.length}条)`);
+                return result;
             }
-            currentDanmuAnimeId = animeId;
+
+            // 如果是404错误，说明该弹幕源不完整，清除缓存重试
+            console.warn(`⚠️ 该弹幕源第${episodeIndex + 1}集无数据，尝试重新匹配...`);
+            animeId = null;
+            currentDanmuAnimeId = null;
         }
 
-        const episodes = await getAnimeEpisodes(animeId, cleanTitle);
-        if (!episodes?.length) {
-            console.warn('⚠ 未找到集数信息');
-            return [];
-        }
-
-        if (isMovieContent(episodes[0])) {
-            const episodeId = episodes[0].episodeId;
-            return await fetchDanmaku(episodeId, cacheKey);
-        }
-
-        const matchedEpisode = findBestEpisodeMatch(episodes, episodeIndex, title);
-        if (!matchedEpisode) {
-            console.warn(`⚠ [弹幕] 无法为第${episodeIndex + 1}集加载弹幕`);
-            return [];
-        }
-
-        const episodeId = matchedEpisode.episodeId;
-        return await fetchDanmaku(episodeId, cacheKey);
+        console.error('❌ 多次尝试后仍无法加载弹幕');
+        return [];
 
     } catch (error) {
         reportError('弹幕加载', '获取弹幕失败', { title, episodeIndex, error: error.message });
