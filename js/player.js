@@ -61,21 +61,35 @@ function advancedCleanTitle(title) {
     ];
     
     // 提取季度信息
-    for (const pattern of seasonPatterns) {
-        const match = title.match(pattern);
-        if (match) {
-            const seasonNum = match[1];
-            if (/^\d+$/.test(seasonNum)) {
-                season = parseInt(seasonNum);
-            } else if (/^[IVX]+$/.test(seasonNum)) {
-                season = romanToInt(seasonNum);
-            } else {
-                const cnMap = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10};
-                season = cnMap[seasonNum] || null;
-            }
-            break;
-        }
-    }
+	for (const pattern of seasonPatterns) {
+		const match = title.match(pattern);
+		if (match) {
+			const seasonNum = match[1];
+			if (/^\d+$/.test(seasonNum)) {
+				season = parseInt(seasonNum);
+			} else if (/^[IVX]+$/.test(seasonNum)) {
+				season = romanToInt(seasonNum);
+			} else {
+				const cnMap = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10};
+				season = cnMap[seasonNum] || null;
+			}
+			break; 
+		}
+	}  
+
+	if (!season) {
+		const titleNumPattern = /^(.+?)(\d)(?:\s*[\(（]|$)/;
+		const numMatch = title.match(titleNumPattern);
+    
+		if (numMatch) {
+			const num = parseInt(numMatch[2]);
+			const mainTitle = numMatch[1].trim();
+        
+			if (num >= 2 && num <= 9 && mainTitle.length >= 2) {
+				season = num;
+			}
+		}
+	}
     
     // 【修改】提取所有年份
     const yearMatches = title.match(/\b(19|20)\d{2}\b/g);
