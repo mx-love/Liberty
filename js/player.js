@@ -2221,19 +2221,6 @@ function playEpisode(index) {
     } catch (e) {
         console.warn('清理弹幕缓存失败:', e);
     }
-    
-    // ✅ 【新增】清理 episodes 详情缓存，强制下次重新获取
-	if (preservedDanmuId) {
-		try {
-			const detailCacheKey = `anime_${preservedDanmuId}`;
-			if (animeDetailCache[detailCacheKey]) {
-				delete animeDetailCache[detailCacheKey];
-				console.log('✅ 已清理 episodes 缓存，下次将重新获取最新集数列表');
-			}
-		} catch (e) {
-			console.warn('清理 episodes 缓存失败:', e);
-		}
-	}
 
     // 更新当前剧集索引
     currentEpisodeIndex = index;
