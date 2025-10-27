@@ -1186,15 +1186,6 @@ async function getDanmukuForVideo(title, episodeIndex, forceAnimeId = null) {
 						return retryResult;
 					}
 				}
-			} else {
-				// 【新增】animeId 404时，清除本地弹幕源缓存
-				console.error('❌ animeId 已失效，清除本地弹幕源缓存');
-				try {
-					const titleHash = simpleHash(cleanTitle);
-					localStorage.removeItem(`danmuSource_${titleHash}`);
-				} catch (e) {
-					console.warn('清除失效弹幕源失败:', e);
-				}
 			}
 
 			// 刷新后还是404，才放弃这个 animeId
@@ -1552,19 +1543,9 @@ function initPlayer(videoUrl) {
 			const savedData = localStorage.getItem(`danmuSource_${titleHash}`);
 			if (savedData) {
 				const parsed = JSON.parse(savedData);
-            
-				// 【新增】检查缓存时间，超过7天则重新搜索
-				const cacheAge = Date.now() - (parsed.timestamp || 0);
-				const MAX_CACHE_AGE = 7 * 24 * 60 * 60 * 1000; // 7天
-            
-				if (cacheAge < MAX_CACHE_AGE) {
-					if (parsed.title === cleanTitle || calculateSimilarity(parsed.title, cleanTitle) > 0.8) {
-						currentDanmuAnimeId = parsed.animeId;
-						console.log('✅ 已恢复上次使用的弹幕源ID:', parsed.animeId);
-					}
-				} else {
-					console.warn('⚠️ 弹幕源缓存已过期（>7天），将重新搜索');
-					localStorage.removeItem(`danmuSource_${titleHash}`);
+				if (parsed.title === cleanTitle || calculateSimilarity(parsed.title, cleanTitle) > 0.8) {
+					currentDanmuAnimeId = parsed.animeId;
+					console.log('✅ 已恢复上次使用的弹幕源ID:', parsed.animeId);
 				}
 			}
 		} catch (e) {
