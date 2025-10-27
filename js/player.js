@@ -2255,8 +2255,12 @@ function playEpisode(index) {
     currentUrl.searchParams.delete('position');
     window.history.replaceState({}, '', currentUrl.toString());
 
-    // 【修复】统一使用 initPlayer，避免兼容性问题
-    initPlayer(url);
+    // 【关键修改】检测是否为 webkit 浏览器（Safari）
+    if (isWebkit) {
+        initPlayer(url);  // Safari 必须重新初始化
+    } else {
+        art.switch = url;  // 其他浏览器使用无缝切换
+    }
 
     // 【修复】恢复弹幕源ID
     if (preservedDanmuId) {
