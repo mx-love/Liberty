@@ -1836,6 +1836,63 @@ function initPlayer(videoUrl) {
 
     art.on('ready', () => {
 		hideControls();
+		
+		// ===== 【新增】防止移动端息屏 =====
+		let wakeLock = null;
+    
+		// 请求保持屏幕唤醒
+		async function requestWakeLock() {
+			try {
+				if ('wakeLock' in navigator) {
+					wakeLock = await navigator.wakeLock.request('screen');
+					console.log('✅ 已启用屏幕常亮');
+                
+					wakeLock.addEventListener('release', () => {
+						console.log('🔓 屏幕常亮已释放');
+					});
+				}
+			} catch (err) {
+				console.warn('⚠️ 无法启用屏幕常亮:', err);
+			}
+		}
+    
+		// 释放屏幕唤醒锁
+		function releaseWakeLock() {
+			if (wakeLock !== null) {
+				wakeLock.release()
+					.then(() => {
+						wakeLock = null;
+					})
+					.catch(err => console.warn('释放屏幕锁失败:', err));
+			}	
+		}
+    
+		// 视频播放时请求屏幕常亮
+		art.on('video:play', () => {
+			requestWakeLock();
+		});
+    
+		// 视频暂停或结束时释放屏幕常亮
+		art.on('video:pause', () => {
+			releaseWakeLock();
+		});
+    
+		art.on('video:ended', () => {
+			releaseWakeLock();
+		});
+    
+		// 页面隐藏时重新请求（切回应用时恢复）
+		document.addEventListener('visibilitychange', () => {
+			if (document.visibilityState === 'visible' && art.video && !art.video.paused) {
+				requestWakeLock();
+			}
+		});
+    
+		// 页面卸载时清理
+		window.addEventListener('beforeunload', () => {
+			releaseWakeLock();
+		});
+		// ===== 【结束】防止移动端息屏 =====
 
 		// ✅ 优化弹幕时间同步
 		let seekDebounceTimer = null;
