@@ -2,8 +2,16 @@
 <html lang="zh">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="referrer" content="same-origin">
+    <!-- ✅ iOS Web App 优化 -->
+	<meta name="apple-mobile-web-app-capable" content="yes">
+	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+	<meta name="format-detection" content="telephone=no">
+
+	<!-- ✅ Android Chrome 优化 -->
+	<meta name="mobile-web-app-capable" content="yes">
+	<meta name="theme-color" content="#000000">
     <title>LibreTV 播放器</title>
 
     <!-- Favicon -->
@@ -19,7 +27,85 @@
     <meta http-equiv="Cache-Control" content="no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-</head>
+    
+    <!-- ✅ 添加移动端优化样式 -->
+    <style>
+    /* 移动端安全区域适配 */
+	@supports (padding: max(0px)) {
+		body {
+			padding-left: max(0px, env(safe-area-inset-left));
+			padding-right: max(0px, env(safe-area-inset-right));
+		}
+		
+		.player-header-fixed {
+			padding-left: max(1rem, env(safe-area-inset-left));
+			padding-right: max(1rem, env(safe-area-inset-right));
+			padding-top: max(0.75rem, env(safe-area-inset-top));
+		}
+	}
+
+	/* 防止iOS Safari底部工具栏遮挡 */
+	@media screen and (max-width: 768px) {
+		body {
+			padding-bottom: env(safe-area-inset-bottom, 0);
+		}
+		
+		.footer {
+			padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0));
+		}
+		
+		/* 播放器全宽显示 */
+		#player {
+			width: 100vw !important;
+			max-width: 100vw !important;
+			position: relative;
+			left: 50%;
+			right: 50%;
+			margin-left: -50vw !important;
+			margin-right: -50vw !important;
+		}
+		
+		/* 播放器容器无圆角 */
+		.player-container {
+			border-radius: 0 !important;
+		}
+		
+		/* 移动端头部优化 */
+		.player-header-fixed {
+			position: sticky;
+			top: 0;
+			z-index: 50;
+		}
+	}
+
+	/* 禁止文本选择（避免长按误触） */
+	.art-video-player * {
+		-webkit-user-select: none;
+		user-select: none;
+		-webkit-touch-callout: none;
+	}
+
+	/* 禁止双击缩放 */
+	* {
+		touch-action: manipulation;
+	}
+
+	/* iOS 滚动优化 */
+	.overflow-auto,
+	.episode-grid {
+		-webkit-overflow-scrolling: touch;
+		scroll-behavior: smooth;
+	}
+
+	/* 移动端按钮触摸反馈 */
+	@media (max-width: 768px) {
+		button:active {
+			transform: scale(0.95);
+			transition: transform 0.1s;
+		}
+	}
+	</style>
+	</head>
 <body>
     <header class="player-header-fixed p-4 flex items-center border-b border-[#333] gap-2">
         <div class="flex items-center min-w-0">
@@ -154,15 +240,13 @@
             </div>
         </div>
 
-        <!-- 集数网格 -->
-        <div class="player-container">
-            <div class="episode-grid" id="episodesGrid">
-                <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2" id="episodesList">
-                    <!-- 集数将在这里动态加载 -->
-                    <div class="col-span-full text-center text-gray-400 py-8">加载中...</div>
-                </div>
-            </div>
-        </div>
+       <!-- 集数网格 -->
+		<div class="player-container">
+			<div class="episode-grid" id="episodesGrid">
+				<!-- 集数将在这里动态加载 -->
+				<div class="text-center text-gray-400 py-8">加载中...</div>
+			</div>
+		</div>
     </main>
 
     <!-- 添加快捷键提示元素 -->
