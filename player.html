@@ -2,16 +2,8 @@
 <html lang="zh">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="referrer" content="same-origin">
-    <!-- ✅ iOS Web App 优化 -->
-	<meta name="apple-mobile-web-app-capable" content="yes">
-	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-	<meta name="format-detection" content="telephone=no">
-
-	<!-- ✅ Android Chrome 优化 -->
-	<meta name="mobile-web-app-capable" content="yes">
-	<meta name="theme-color" content="#000000">
     <title>LibreTV 播放器</title>
 
     <!-- Favicon -->
@@ -23,89 +15,11 @@
     <script src="js/version-check.js"></script>
     <link rel="stylesheet" href="css/styles.css">
     <link rel="stylesheet" href="css/player.css">
-    
+
     <meta http-equiv="Cache-Control" content="no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    
-    <!-- ✅ 添加移动端优化样式 -->
-    <style>
-    /* 移动端安全区域适配 */
-	@supports (padding: max(0px)) {
-		body {
-			padding-left: max(0px, env(safe-area-inset-left));
-			padding-right: max(0px, env(safe-area-inset-right));
-		}
-		
-		.player-header-fixed {
-			padding-left: max(1rem, env(safe-area-inset-left));
-			padding-right: max(1rem, env(safe-area-inset-right));
-			padding-top: max(0.75rem, env(safe-area-inset-top));
-		}
-	}
-
-	/* 防止iOS Safari底部工具栏遮挡 */
-	@media screen and (max-width: 768px) {
-		body {
-			padding-bottom: env(safe-area-inset-bottom, 0);
-		}
-		
-		.footer {
-			padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0));
-		}
-		
-		/* 播放器全宽显示 */
-		#player {
-			width: 100vw !important;
-			max-width: 100vw !important;
-			position: relative;
-			left: 50%;
-			right: 50%;
-			margin-left: -50vw !important;
-			margin-right: -50vw !important;
-		}
-		
-		/* 播放器容器无圆角 */
-		.player-container {
-			border-radius: 0 !important;
-		}
-		
-		/* 移动端头部优化 */
-		.player-header-fixed {
-			position: sticky;
-			top: 0;
-			z-index: 50;
-		}
-	}
-
-	/* 禁止文本选择（避免长按误触） */
-	.art-video-player * {
-		-webkit-user-select: none;
-		user-select: none;
-		-webkit-touch-callout: none;
-	}
-
-	/* 禁止双击缩放 */
-	* {
-		touch-action: manipulation;
-	}
-
-	/* iOS 滚动优化 */
-	.overflow-auto,
-	.episode-grid {
-		-webkit-overflow-scrolling: touch;
-		scroll-behavior: smooth;
-	}
-
-	/* 移动端按钮触摸反馈 */
-	@media (max-width: 768px) {
-		button:active {
-			transform: scale(0.95);
-			transition: transform 0.1s;
-		}
-	}
-	</style>
-	</head>
+</head>
 <body>
     <header class="player-header-fixed p-4 flex items-center border-b border-[#333] gap-2">
         <div class="flex items-center min-w-0">
@@ -201,7 +115,7 @@
                         <span class="slider"></span>
                     </label>
                 </div>
-                
+
                 <!-- 把各种功能按钮放在右侧 - 在小屏幕上各自占一行 -->
                 <div class="flex flex-wrap justify-end gap-2">
                     <!-- 倒序排列按钮 -->
@@ -211,7 +125,7 @@
                         </svg>
                         <span id="orderText">倒序排列</span>
                     </button>
-                    
+
                 <!-- 切换弹幕源按钮 -->
 				<button onclick="showDanmuSourceModal()" title="切换弹幕源" class="px-3 py-1 bg-[#222] hover:bg-[#333] border border-[#333] rounded-lg transition-colors flex items-center space-x-1 flex-shrink-0">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -226,7 +140,7 @@
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 012-2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
                         </svg>
                     </button>
-                    
+
                     <!-- 锁定控制按钮 - 始终显示在最右侧 -->
                     <button id="lockToggle" onclick="toggleControlsLock()" title="锁定控制" 
                             class="px-2 py-1 bg-[#222] hover:bg-[#333] border border-[#333] text-white rounded-lg transition flex-shrink-0">
@@ -240,13 +154,15 @@
             </div>
         </div>
 
-       <!-- 集数网格 -->
-		<div class="player-container">
-			<div class="episode-grid" id="episodesGrid">
-				<!-- 集数将在这里动态加载 -->
-				<div class="text-center text-gray-400 py-8">加载中...</div>
-			</div>
-		</div>
+        <!-- 集数网格 -->
+        <div class="player-container">
+            <div class="episode-grid" id="episodesGrid">
+                <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2" id="episodesList">
+                    <!-- 集数将在这里动态加载 -->
+                    <div class="col-span-full text-center text-gray-400 py-8">加载中...</div>
+                </div>
+            </div>
+        </div>
     </main>
 
     <!-- 添加快捷键提示元素 -->
@@ -270,7 +186,7 @@
                     </div>
                     <p class="text-gray-500 text-sm mt-2 text-center md:text-left">© 2025 LibreTV - 自由观影，畅享精彩</p>
                 </div>
-                
+
                 <div class="text-center md:text-right">
                     <p class="text-gray-500 text-sm max-w-md">
                         免责声明：本站仅为视频搜索工具，不存储、上传或分发任何视频内容。
@@ -328,7 +244,7 @@
         // 保存原始 js‑sha256 实现，避免被 password.js 覆盖
         window._jsSha256 = window.sha256;
     </script>
-    
+
     <script src="libs/hls.min.js" crossorigin="anonymous"></script>
     <script src="libs/artplayer.min.js" crossorigin="anonymous"></script>
     <!-- ⭐ 添加弹幕插件 - 在 artplayer.min.js 之后 -->
@@ -346,7 +262,7 @@
     <script>
         // 创建全局环境变量对象
         window.__ENV__ = window.__ENV__ || {};
-        
+
         // 注入服务器端环境变量 (将由服务器端替换)
         // PASSWORD 变量将在这里被服务器端注入
         window.__ENV__.PASSWORD = "{{PASSWORD}}";
