@@ -1835,64 +1835,94 @@ function initPlayer(videoUrl) {
     }
 
     art.on('ready', () => {
-		hideControls();
-		
-		// ===== 【新增】防止移动端息屏 =====
-		let wakeLock = null;
+    hideControls();
     
-		// 请求保持屏幕唤醒
-		async function requestWakeLock() {
-			try {
-				if ('wakeLock' in navigator) {
-					wakeLock = await navigator.wakeLock.request('screen');
-					console.log('✅ 已启用屏幕常亮');
-                
-					wakeLock.addEventListener('release', () => {
-						console.log('🔓 屏幕常亮已释放');
-					});
-				}
-			} catch (err) {
-				console.warn('⚠️ 无法启用屏幕常亮:', err);
-			}
-		}
+    // ===== 【修复】防止移动端息屏 =====
+    let wakeLock = null;
+    let isWakeLockSupported = 'wakeLock' in navigator;
     
-		// 释放屏幕唤醒锁
-		function releaseWakeLock() {
-			if (wakeLock !== null) {
-				wakeLock.release()
-					.then(() => {
-						wakeLock = null;
-					})
-					.catch(err => console.warn('释放屏幕锁失败:', err));
-			}	
-		}
+    // 请求保持屏幕唤醒
+    async function requestWakeLock() {
+        // 如果不支持或已经有锁，跳过
+        if (!isWakeLockSupported || wakeLock !== null) {
+            return;
+        }
+        
+        try {
+            wakeLock = await navigator.wakeLock.request('screen');
+            console.log('✅ 已启用屏幕常亮');
+            
+            wakeLock.addEventListener('release', () => {
+                console.log('🔓 屏幕常亮已释放');
+                wakeLock = null; // 释放后重置为null
+            });
+        } catch (err) {
+            // 常见错误：用户拒绝、不支持、已有其他锁等
+            console.warn('⚠️ 无法启用屏幕常亮:', err.name, err.message);
+            wakeLock = null;
+        }
+    }
     
-		// 视频播放时请求屏幕常亮
-		art.on('video:play', () => {
-			requestWakeLock();
-		});
+    // 释放屏幕唤醒锁
+    function releaseWakeLock() {
+        if (wakeLock !== null) {
+            wakeLock.release()
+                .then(() => {
+                    console.log('✅ 已释放屏幕常亮');
+                    wakeLock = null;
+                })
+                .catch(err => {
+                    console.warn('⚠️ 释放屏幕锁失败:', err);
+                    wakeLock = null; // 即使失败也重置
+                });
+        }
+    }
     
-		// 视频暂停或结束时释放屏幕常亮
-		art.on('video:pause', () => {
-			releaseWakeLock();
-		});
+    // 视频播放时请求屏幕常亮
+    art.on('video:play', () => {
+        requestWakeLock();
+    });
     
-		art.on('video:ended', () => {
-			releaseWakeLock();
-		});
+    // 视频暂停时释放（但不是结束时）
+    art.on('video:pause', () => {
+        // 只在真正暂停时释放，不在seeking时释放
+        if (art.video && !art.video.seeking) {
+            releaseWakeLock();
+        }
+    });
     
-		// 页面隐藏时重新请求（切回应用时恢复）
-		document.addEventListener('visibilitychange', () => {
-			if (document.visibilityState === 'visible' && art.video && !art.video.paused) {
-				requestWakeLock();
-			}
-		});
+    // 视频结束时释放
+    art.on('video:ended', () => {
+        releaseWakeLock();
+    });
     
-		// 页面卸载时清理
-		window.addEventListener('beforeunload', () => {
-			releaseWakeLock();
-		});
-		// ===== 【结束】防止移动端息屏 =====
+    // 页面可见性变化处理
+    const handleVisibilityChange = () => {
+        if (document.visibilityState === 'visible') {
+            // 页面重新可见时，如果视频正在播放，重新请求锁
+            if (art.video && !art.video.paused) {
+                requestWakeLock();
+            }
+        } else {
+            // 页面隐藏时不主动释放，让系统自动处理
+            // 这样切回来时wakeLock可能还在
+        }
+    };
+    
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    
+    // 页面卸载时清理
+    const cleanup = () => {
+        releaseWakeLock();
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+    
+    window.addEventListener('beforeunload', cleanup);
+    window.addEventListener('pagehide', cleanup);
+    
+    // 播放器销毁时也清理
+    art.on('destroy', cleanup);
+    // ===== 【结束】防止移动端息屏 =====
 
 		// ✅ 优化弹幕时间同步
 		let seekDebounceTimer = null;
