@@ -374,18 +374,42 @@ input:checked + .slider:before {
 
 /* 新增：移动端响应式样式 */
 @media (max-width: 640px) {
+    /* 播放器容器优化 */
+    .player-container {
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+        padding-left: 0.5rem !important;
+        padding-right: 0.5rem !important;
+    }
+    
     .episode-grid {
-        max-height: 40vh; /* 移动端增加集数列表高度 */
+        max-height: 50vh; /* 移动端增加集数列表高度 */
     }
 
     /* 改进移动端按钮显示 */
     button {
         white-space: nowrap;
+        touch-action: manipulation; /* 防止双击缩放 */
     }
 
     /* 控制栏在小屏幕上可能需要换行 */
     .player-container .flex-wrap {
-        margin-bottom: 4px;
+        margin-bottom: 0.5rem;
+    }
+    
+    /* 模态框移动端优化 */
+    #modal > div,
+    #passwordModal > div,
+    #danmuSourceModal > div {
+        max-width: 95vw !important;
+        max-height: 90vh !important;
+        padding: 1rem !important;
+    }
+    
+    /* 集数按钮网格优化 */
+    .episode-grid > div {
+        grid-template-columns: repeat(auto-fill, minmax(4rem, 1fr)) !important;
+        gap: 0.5rem !important;
     }
 }
 
@@ -599,5 +623,158 @@ input:checked + .slider:before {
     #danmuSourceModal > div {
         max-width: 95vw;
         max-height: 85vh;
+    }
+}
+
+/* 移动端响应式优化 - 基础布局 */
+@media (max-width: 768px) {
+    /* 头部优化 */
+    .player-header-fixed {
+        padding: 0.75rem !important;
+        gap: 0.5rem !important;
+    }
+    
+    .player-header-fixed h1 {
+        font-size: 1.125rem !important;
+    }
+    
+    .player-header-fixed h2 {
+        font-size: 0.875rem !important;
+    }
+    
+    .player-header-fixed svg {
+        width: 1.5rem !important;
+        height: 1.5rem !important;
+    }
+    
+    .player-header-fixed .home-btn {
+        padding: 0.5rem 0.75rem !important;
+        font-size: 0.875rem !important;
+    }
+    
+    /* 上一集/下一集按钮优化 */
+    #prevButton, #nextButton {
+        padding: 0.5rem 0.75rem !important;
+        font-size: 0.875rem !important;
+    }
+    
+    #prevButton svg, #nextButton svg {
+        width: 1rem !important;
+        height: 1rem !important;
+    }
+    
+    #episodeInfo {
+        font-size: 0.875rem !important;
+    }
+    
+    /* 功能按钮容器 - 改为垂直堆叠 */
+    .player-container > .flex.flex-wrap {
+        flex-direction: column !important;
+        gap: 0.75rem !important;
+    }
+    
+    /* 自动连播开关 - 独立一行 */
+    .player-container > .flex.flex-wrap > .flex.items-center.gap-1 {
+        width: 100% !important;
+        justify-content: space-between !important;
+        margin-right: 0 !important;
+        padding: 0.5rem !important;
+        background: rgba(255, 255, 255, 0.05) !important;
+        border-radius: 0.5rem !important;
+    }
+    
+    /* 功能按钮组 - 4列网格布局 */
+    .player-container > .flex.flex-wrap > .flex.flex-wrap.justify-end {
+        width: 100% !important;
+        display: grid !important;
+        grid-template-columns: repeat(4, 1fr) !important;
+        gap: 0.5rem !important;
+    }
+    
+    /* 所有功能按钮统一样式 */
+    .player-container > .flex.flex-wrap button {
+        width: 100% !important;
+        justify-content: center !important;
+        padding: 0.5rem 0.25rem !important;
+        font-size: 0.75rem !important;
+        min-height: 2.25rem !important;
+        gap: 0.25rem !important;
+    }
+    
+    /* 按钮图标尺寸 */
+    .player-container > .flex.flex-wrap button svg {
+        width: 0.875rem !important;
+        height: 0.875rem !important;
+    }
+    
+    /* 集数网格优化 */
+    .episode-grid {
+        padding: 0.5rem !important;
+        max-height: 50vh !important;
+    }
+    
+    /* 集数按钮优化 */
+    .episode-btn {
+        padding: 0.625rem !important;
+        font-size: 0.875rem !important;
+        min-height: 2.5rem !important;
+    }
+    
+    /* 资源信息栏优化 */
+    #resourceInfoBarContainer {
+        padding: 0.75rem !important;
+        flex-direction: column !important;
+        gap: 0.5rem !important;
+        align-items: flex-start !important;
+    }
+    
+    .resource-info-bar-left {
+        font-size: 1rem !important;
+        width: 100% !important;
+    }
+    
+    .resource-info-bar-videos {
+        font-size: 0.875rem !important;
+    }
+    
+    .resource-switch-btn {
+        width: 100% !important;
+        justify-content: center !important;
+        padding: 0.625rem !important;
+    }
+}
+
+/* 小屏幕优化（超小手机） */
+@media (max-width: 375px) {
+    .player-header-fixed {
+        padding: 0.5rem !important;
+    }
+    
+    .player-header-fixed h1 {
+        font-size: 1rem !important;
+    }
+    
+    .player-header-fixed h2 {
+        font-size: 0.75rem !important;
+    }
+    
+    .player-header-fixed .home-btn-text {
+        display: none !important;
+    }
+    
+    #prevButton span, #nextButton span {
+        display: none !important;
+    }
+    
+    /* 功能按钮文字更小 */
+    .player-container > .flex.flex-wrap button {
+        font-size: 0.625rem !important;
+        padding: 0.375rem 0.125rem !important;
+        min-height: 2rem !important;
+    }
+    
+    .player-container > .flex.flex-wrap button svg {
+        width: 0.75rem !important;
+        height: 0.75rem !important;
     }
 }
