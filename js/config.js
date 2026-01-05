@@ -34,6 +34,10 @@ const API_SITES = {
         api: 'https://bfzyapi.com',
         name: '暴风资源',
     },
+    guangsu: {
+        api: 'https://api.guangsuapi.com/api.php/provide/vod',
+        name: '光速',
+    },
     tyyszy: {
         api: 'https://tyyszy.com',
         name: '天涯资源',
