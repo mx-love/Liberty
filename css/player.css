@@ -624,6 +624,28 @@ textarea:focus {
 }
 
 /* ============================================
+   移动端全屏优化：只保留原生全屏
+   ============================================ */
+@media (max-width: 1024px) {
+    /* 隐藏网页全屏按钮 */
+    .art-control-fullscreenWeb,
+    button[class*="fullscreen-web"],
+    [class*="fullscreen-web-btn"] {
+        display: none !important;
+    }
+    
+    /* 保留原生全屏按钮，并优化样式 */
+    .art-control-fullscreen {
+        display: flex !important;
+        align-items: center;
+        justify-content: center;
+        min-width: 44px !important;
+        min-height: 44px !important;
+        -webkit-tap-highlight-color: transparent;
+    }
+}
+
+/* ============================================
    竖屏模式：完全隐藏弹幕功能
    ============================================ */
 @media (orientation: portrait) {
@@ -637,6 +659,38 @@ textarea:focus {
     
     .art-controls-center {
         flex: 1 !important;
+    }
+    
+    /* 竖屏时优化播放器高度 */
+    #player {
+        height: 40vh !important;
+        max-height: 40vh !important;
+    }
+}
+
+/* ============================================
+   横屏全屏模式优化
+   ============================================ */
+@media (orientation: landscape) and (max-width: 1024px) {
+    /* 横屏时播放器占满屏幕 */
+    .player-container:-webkit-full-screen,
+    .player-container:fullscreen {
+        padding: 0 !important;
+    }
+    
+    .player-container:-webkit-full-screen #player,
+    .player-container:fullscreen #player {
+        width: 100vw !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+    }
+    
+    /* 全屏时优化控制栏 */
+    .player-container:-webkit-full-screen .art-controls,
+    .player-container:fullscreen .art-controls {
+        padding: 0 max(12px, env(safe-area-inset-left)) 
+                 max(12px, env(safe-area-inset-bottom)) 
+                 max(12px, env(safe-area-inset-right)) !important;
     }
 }
 
@@ -864,5 +918,26 @@ textarea:focus {
     #danmuSourceModal > div {
         max-width: 95vw;
         max-height: 85vh;
+    }
+}
+
+/* ============================================
+   修复移动端按钮对齐问题
+   ============================================ */
+@media (max-width: 1024px) {
+    /* 强制所有按钮垂直居中对齐 */
+    .art-controls {
+        align-items: center !important;
+    }
+    
+    .art-controls-left,
+    .art-controls-center,
+    .art-controls-right {
+        align-items: center !important;
+    }
+    
+    /* 统一所有按钮的垂直对齐方式 */
+    .art-control {
+        vertical-align: middle !important;
     }
 }
