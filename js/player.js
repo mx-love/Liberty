@@ -339,6 +339,57 @@ let progressSaveInterval = null; // 定期保存进度的计时器
 let currentVideoUrl = ''; // 记录当前实际的视频URL
 const isWebkit = (typeof window.webkitConvertPointFromNodeToPage === 'function')
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
+// ===== 【新增】移动端设备检测 =====
+const isMobileDevice = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+const isIOSDevice = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+const isAndroidDevice = /Android/i.test(navigator.userAgent);
+let wakeLock = null;
+
+// 请求保持屏幕唤醒（全局函数）
+async function requestWakeLock() {
+    try {
+        if ('wakeLock' in navigator) {
+            if (wakeLock !== null) {
+                await wakeLock.release();
+            }
+            wakeLock = await navigator.wakeLock.request('screen');
+            console.log('✅ 已启用屏幕常亮');
+            wakeLock.addEventListener('release', () => {
+                console.log('🔓 屏幕常亮已释放');
+                wakeLock = null;
+            });
+        }
+    } catch (err) {
+        console.warn('⚠️ 无法启用屏幕常亮:', err.message);
+    }
+}
+
+// 释放屏幕唤醒锁
+async function releaseWakeLock() {
+    if (wakeLock !== null) {
+        try {
+            await wakeLock.release();
+            wakeLock = null;
+        } catch (err) {
+            console.warn('⚠️ 释放屏幕锁失败:', err);
+        }
+    }
+}
+
+// 页面可见性变化时重新请求
+document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible') {
+        if (art && art.video && !art.video.paused) {
+            await requestWakeLock();
+        }
+    }
+});
+
+// 页面卸载时清理
+window.addEventListener('beforeunload', async () => {
+    await releaseWakeLock();
+});
+// ===== 【结束】移动端设备检测 =====
 
 let saveProgressTimer = null; // 用于防抖保存进度
 
@@ -1638,7 +1689,7 @@ function initPlayer(videoUrl) {
         playbackRate: true,
         aspectRatio: false,
         fullscreen: true,
-        fullscreenWeb: true,
+        fullscreenWeb: !isMobileDevice, // ✅ 移动端禁用网页全屏，桌面端启用
         subtitleOffset: false,
         miniProgressBar: true,
         mutex: true,
@@ -1657,11 +1708,11 @@ function initPlayer(videoUrl) {
 				danmuku: [],  // ✅ 改为空数组,不自动加载
 				speed: 5,
 				opacity: 1,
-				fontSize: isMobile ? 20 : 25,
+				fontSize: isMobileDevice ? (window.innerWidth < 375 ? 18 : 20) : 25, // ✅ 移动端自适应字号
 				color: '#FFFFFF',
 			mode: 0,
 				modes: [0, 1, 2],
-				margin: [10, '75%'],
+				margin: isMobileDevice ? [5, '80%'] : [10, '75%'], // ✅ 移动端优化弹幕区域
 				antiOverlap: true,
 				useWorker: true,
 				synchronousPlayback: true,
@@ -1817,19 +1868,25 @@ function initPlayer(videoUrl) {
     function handleFullScreen(isFullScreen, isWeb) {
         if (isFullScreen) {
             document.addEventListener('mouseout', handleMouseOut);
+            
+            // ✅ 移动端横屏锁定（只在原生全屏时）
+            if (isMobileDevice && !isWeb && window.screen?.orientation) {
+                window.screen.orientation.lock('landscape')
+                    .then(() => console.log('✅ 已锁定横屏'))
+                    .catch((error) => console.warn('⚠️ 横屏锁定失败:', error));
+            }
         } else {
             document.removeEventListener('mouseout', handleMouseOut);
-            // 退出全屏时清理计时器
             clearTimeout(hideTimer);
-        }
-
-        if (!isWeb) {
-            if (window.screen.orientation && window.screen.orientation.lock) {
-                window.screen.orientation.lock('landscape')
-                    .then(() => {
-                    })
-                    .catch((error) => {
-                    });
+            
+            // ✅ 退出全屏时解锁方向
+            if (isMobileDevice && window.screen?.orientation) {
+                try {
+                    window.screen.orientation.unlock();
+                    console.log('✅ 已解锁屏幕方向');
+                } catch (e) {
+                    console.warn('⚠️ 解锁屏幕方向失败:', e);
+                }
             }
         }
     }
@@ -1970,6 +2027,32 @@ function initPlayer(videoUrl) {
 				}
 			}
 		});
+		
+		// ============================================
+        // 📱 移动端横屏自动全屏
+        // ============================================
+        if (isMobileDevice) {
+            const handleOrientationChange = () => {
+                // 检测横屏
+                if (window.matchMedia("(orientation: landscape)").matches) {
+                    // 如果视频正在播放且未全屏，自动进入全屏
+                    if (art.playing && !art.fullscreen) {
+                        setTimeout(() => {
+                            art.fullscreen = true;
+                        }, 300);
+                    }
+                }
+            };
+            
+            // 监听屏幕方向变化
+            if (window.screen?.orientation) {
+                window.screen.orientation.addEventListener('change', handleOrientationChange);
+            } else {
+                // 兼容旧版浏览器
+                window.addEventListener('orientationchange', handleOrientationChange);
+            }
+        }
+		
 	});
 
     // 全屏 Web 模式处理
@@ -2045,64 +2128,64 @@ function initPlayer(videoUrl) {
     }
 
     // ✅ 优化弹幕加载 - 不阻塞播放器
-if (DANMU_CONFIG.enabled && art.plugins.artplayerPluginDanmuku) {
-    const loadDanmaku = async () => {
-        try {
-            // 【修复】不等待视频完全加载，后台异步获取弹幕
-            console.log('🎬 开始后台加载弹幕...');
-            
-            const danmuku = await getDanmukuForVideo(
-                currentVideoTitle, 
-                currentEpisodeIndex,
-                currentDanmuAnimeId
-            );
+	if (DANMU_CONFIG.enabled && art.plugins.artplayerPluginDanmuku) {
+		const loadDanmaku = async () => {
+			try {
+				// 【修复】不等待视频完全加载，后台异步获取弹幕
+				console.log('🎬 开始后台加载弹幕...');
+				
+				const danmuku = await getDanmukuForVideo(
+					currentVideoTitle, 
+					currentEpisodeIndex,
+					currentDanmuAnimeId
+				);
 
-            if (danmuku && danmuku.length > 0) {
-                // 【修复】等待视频开始播放后再加载弹幕
-                const waitForPlaying = () => {
-                    if (!art.video || art.video.paused || art.video.readyState < 2) {
-                        setTimeout(waitForPlaying, 100);
-                        return;
-                    }
-                    
-                    // 先清空旧弹幕
-                    if (typeof art.plugins.artplayerPluginDanmuku.clear === 'function') {
-                        art.plugins.artplayerPluginDanmuku.clear();
-                    }
+				if (danmuku && danmuku.length > 0) {
+					// 【修复】等待视频开始播放后再加载弹幕
+					const waitForPlaying = () => {
+						if (!art.video || art.video.paused || art.video.readyState < 2) {
+							setTimeout(waitForPlaying, 100);
+							return;
+						}
+						
+						// 先清空旧弹幕
+						if (typeof art.plugins.artplayerPluginDanmuku.clear === 'function') {
+							art.plugins.artplayerPluginDanmuku.clear();
+						}
 
-                    art.plugins.artplayerPluginDanmuku.config({
-                        danmuku: danmuku,
-                        synchronousPlayback: true
-                    });
-                    art.plugins.artplayerPluginDanmuku.load();
+						art.plugins.artplayerPluginDanmuku.config({
+							danmuku: danmuku,
+							synchronousPlayback: true
+						});
+						art.plugins.artplayerPluginDanmuku.load();
 
-                    if (restoredPosition > 0) {
-                        setTimeout(() => {
-                            if (typeof art.plugins.artplayerPluginDanmuku.seek === 'function') {
-                                console.log(`🎯 弹幕同步到: ${restoredPosition.toFixed(2)}s`);
-                                art.plugins.artplayerPluginDanmuku.seek(restoredPosition);
-                            }
-                        }, 300);
-                    }
+						if (restoredPosition > 0) {
+							setTimeout(() => {
+								if (typeof art.plugins.artplayerPluginDanmuku.seek === 'function') {
+									console.log(`🎯 弹幕同步到: ${restoredPosition.toFixed(2)}s`);
+									art.plugins.artplayerPluginDanmuku.seek(restoredPosition);
+								}
+							}, 300);
+						}
 
-                    console.log(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
-                };
-                
-                waitForPlaying();
-            } else {
-                console.warn('⚠ 未找到弹幕，继续播放视频');
-            }
-        } catch (e) {
-            console.error('❌ 弹幕加载失败:', e);
-        }
-    };
+						console.log(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
+					};
+					
+					waitForPlaying();
+				} else {
+					console.warn('⚠ 未找到弹幕，继续播放视频');
+				}
+			} catch (e) {
+				console.error('❌ 弹幕加载失败:', e);
+			}
+		};
 
-    // 【修复】立即开始加载弹幕，不延迟
-    loadDanmaku();
-}
+		// 【修复】立即开始加载弹幕，不延迟
+		loadDanmaku();
+	}
 
-    startProgressSaveInterval();
-})
+		startProgressSaveInterval();
+	})
 
     // 错误处理
     art.on('video:error', function (error) {
@@ -2152,6 +2235,31 @@ if (DANMU_CONFIG.enabled && art.plugins.artplayerPluginDanmuku) {
             });
         }
     });
+    
+    // ============================================
+    // 📱 移动端控制栏自动隐藏
+    // ============================================
+    if (isMobileDevice && art) {
+        let mobileControlsTimer;
+        
+        const hideMobileControls = () => {
+            if (art.fullscreen && art.playing) {
+                art.controls = false;
+            }
+        };
+        
+        const showMobileControls = () => {
+            art.controls = true;
+            clearTimeout(mobileControlsTimer);
+            mobileControlsTimer = setTimeout(hideMobileControls, 3000);
+        };
+        
+        // 监听触摸事件
+        const playerElement = document.getElementById('player');
+        if (playerElement) {
+            playerElement.addEventListener('touchstart', showMobileControls);
+        }
+    }
 
     // 10秒后如果仍在加载，但不立即显示错误
     setTimeout(function () {
