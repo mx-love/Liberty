@@ -19,14 +19,18 @@ let defaultTvTags = [
 let movieTags = [];
 let tvTags = [];
 
-// 加载用户标签（不使用 localStorage）
+// 加载用户标签（纯动态获取）
 function loadUserTags() {
     try {
-        // 直接使用默认标签，不从 localStorage 读取
-        movieTags = [...defaultMovieTags];
-        tvTags = [...defaultTvTags];
+        // 初始化为空数组，等待从豆瓣获取
+        movieTags = [];
+        tvTags = [];
+        
+        // 从豆瓣 API 获取最新标签
+        fetchDoubanTags();
     } catch (e) {
         console.error('加载标签失败：', e);
+        // 失败时使用默认标签作为兜底
         movieTags = [...defaultMovieTags];
         tvTags = [...defaultTvTags];
     }
@@ -345,6 +349,56 @@ function renderDoubanTags(tags) {
         
         tagContainer.appendChild(btn);
     });
+}
+
+// 从豆瓣 API 动态获取最新标签
+function fetchDoubanTags() {
+    // 获取电影标签
+    const movieTagsTarget = `https://movie.douban.com/j/search_tags?type=movie`;
+    fetchDoubanData(movieTagsTarget)
+        .then(data => {
+            if (data && data.tags && Array.isArray(data.tags)) {
+                console.log('✅ 成功获取豆瓣电影标签:', data.tags);
+                movieTags = data.tags;
+                
+                // 如果当前正在显示电影，重新渲染标签
+                if (doubanMovieTvCurrentSwitch === 'movie') {
+                    renderDoubanTags();
+                }
+            }
+        })
+        .catch(error => {
+            console.error('❌ 获取豆瓣电影标签失败：', error);
+            // 失败时使用默认标签
+            movieTags = [...defaultMovieTags];
+            if (doubanMovieTvCurrentSwitch === 'movie') {
+                renderDoubanTags();
+            }
+        });
+    
+    // 获取电视剧标签
+    const tvTagsTarget = `https://movie.douban.com/j/search_tags?type=tv`;
+    fetchDoubanData(tvTagsTarget)
+        .then(data => {
+            if (data && data.tags && Array.isArray(data.tags)) {
+                console.log('✅ 成功获取豆瓣电视剧标签:', data.tags);
+                tvTags = data.tags;
+                
+                // 如果当前正在显示电视剧，重新渲染标签
+                if (doubanMovieTvCurrentSwitch === 'tv') {
+                    renderDoubanTags();
+                }
+            }
+        })
+        .catch(error => {
+            console.error('❌ 获取豆瓣电视剧标签失败：', error);
+            // 失败时使用默认标签
+            tvTags = [...defaultTvTags];
+            if (doubanMovieTvCurrentSwitch === 'tv') {
+                renderDoubanTags();
+            }
+        });
+}
 }
 
 // 设置换一批按钮事件
