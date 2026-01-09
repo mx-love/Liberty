@@ -1,4 +1,8 @@
-// 豆瓣热门电影电视剧推荐功能 - 优化版
+// 豆瓣热门电影电视剧推荐功能 - 完整版（使用 Cloudflare Worker 图片代理）
+
+// ====== 配置区域 ======
+// 你的 Cloudflare Worker 图片代理地址
+const CF_IMAGE_PROXY = 'https://dou.manxue.eu.org';
 
 // 豆瓣标签列表 - 优化电视剧标签，添加更多最新内容分类
 let defaultMovieTags = ['热门', '最新', '经典', '豆瓣高分', '冷门佳片', '华语', '欧美', '韩国', '日本', '动作', '喜剧', '日综', '爱情', '科幻', '悬疑', '恐怖', '治愈'];
@@ -15,44 +19,23 @@ let defaultTvTags = [
 let movieTags = [];
 let tvTags = [];
 
-// 加载用户标签
+// 加载用户标签（不使用 localStorage）
 function loadUserTags() {
     try {
-        // 尝试从本地存储加载用户保存的标签
-        const savedMovieTags = localStorage.getItem('userMovieTags');
-        const savedTvTags = localStorage.getItem('userTvTags');
-        
-        // 如果本地存储中有标签数据，则使用它
-        if (savedMovieTags) {
-            movieTags = JSON.parse(savedMovieTags);
-        } else {
-            // 否则使用默认标签
-            movieTags = [...defaultMovieTags];
-        }
-        
-        if (savedTvTags) {
-            tvTags = JSON.parse(savedTvTags);
-        } else {
-            // 否则使用默认标签
-            tvTags = [...defaultTvTags];
-        }
+        // 直接使用默认标签，不从 localStorage 读取
+        movieTags = [...defaultMovieTags];
+        tvTags = [...defaultTvTags];
     } catch (e) {
         console.error('加载标签失败：', e);
-        // 初始化为默认值，防止错误
         movieTags = [...defaultMovieTags];
         tvTags = [...defaultTvTags];
     }
 }
 
-// 保存用户标签
+// 保存用户标签（空函数，因为不使用 localStorage）
 function saveUserTags() {
-    try {
-        localStorage.setItem('userMovieTags', JSON.stringify(movieTags));
-        localStorage.setItem('userTvTags', JSON.stringify(tvTags));
-    } catch (e) {
-        console.error('保存标签失败：', e);
-        showToast('保存标签失败', 'error');
-    }
+    // 不使用 localStorage，此函数留空
+    console.log('标签已更新（内存中）');
 }
 
 let doubanMovieTvCurrentSwitch = 'movie';
@@ -65,7 +48,8 @@ function initDouban() {
     // 设置豆瓣开关的初始状态
     const doubanToggle = document.getElementById('doubanToggle');
     if (doubanToggle) {
-        const isEnabled = localStorage.getItem('doubanEnabled') === 'true';
+        // 默认启用，不从 localStorage 读取
+        const isEnabled = true;
         doubanToggle.checked = isEnabled;
         
         // 设置开关外观
@@ -79,7 +63,6 @@ function initDouban() {
         // 添加事件监听
         doubanToggle.addEventListener('change', function(e) {
             const isChecked = e.target.checked;
-            localStorage.setItem('doubanEnabled', isChecked);
             
             // 更新开关外观
             if (isChecked) {
@@ -91,11 +74,11 @@ function initDouban() {
             }
             
             // 更新显示状态
-            updateDoubanVisibility();
+            updateDoubanVisibility(isChecked);
         });
         
         // 初始更新显示状态
-        updateDoubanVisibility();
+        updateDoubanVisibility(isEnabled);
 
         // 滚动到页面顶部
         window.scrollTo(0, 0);
@@ -114,17 +97,14 @@ function initDouban() {
     setupDoubanRefreshBtn();
     
     // 初始加载热门内容
-    if (localStorage.getItem('doubanEnabled') === 'true') {
-        renderRecommend(doubanCurrentTag, doubanPageSize, doubanPageStart);
-    }
+    renderRecommend(doubanCurrentTag, doubanPageSize, doubanPageStart);
 }
 
 // 根据设置更新豆瓣区域的显示状态
-function updateDoubanVisibility() {
+function updateDoubanVisibility(isEnabled) {
     const doubanArea = document.getElementById('doubanArea');
     if (!doubanArea) return;
     
-    const isEnabled = localStorage.getItem('doubanEnabled') === 'true';
     const isSearching = document.getElementById('resultsArea') && 
         !document.getElementById('resultsArea').classList.contains('hidden');
     
@@ -218,7 +198,6 @@ async function fillAndSearchWithDouban(title) {
             } else {
                 // 如果函数不可用，则手动添加到selectedAPIs
                 selectedAPIs.push('dbzy');
-                localStorage.setItem('selectedAPIs', JSON.stringify(selectedAPIs));
                 
                 // 更新选中API计数（如果有这个元素）
                 const countEl = document.getElementById('selectedAPICount');
@@ -268,7 +247,7 @@ function renderDoubanMovieTvSwitch() {
     const movieToggle = document.getElementById('douban-movie-toggle');
     const tvToggle = document.getElementById('douban-tv-toggle');
 
-    if (!movieToggle ||!tvToggle) return;
+    if (!movieToggle || !tvToggle) return;
 
     movieToggle.addEventListener('click', function() {
         if (doubanMovieTvCurrentSwitch !== 'movie') {
@@ -289,9 +268,7 @@ function renderDoubanMovieTvSwitch() {
             setupDoubanRefreshBtn();
             
             // 初始加载热门内容
-            if (localStorage.getItem('doubanEnabled') === 'true') {
-                renderRecommend(doubanCurrentTag, doubanPageSize, doubanPageStart);
-            }
+            renderRecommend(doubanCurrentTag, doubanPageSize, doubanPageStart);
         }
     });
     
@@ -315,9 +292,7 @@ function renderDoubanMovieTvSwitch() {
             setupDoubanRefreshBtn();
             
             // 初始加载热门内容
-            if (localStorage.getItem('doubanEnabled') === 'true') {
-                renderRecommend(doubanCurrentTag, doubanPageSize, doubanPageStart);
-            }
+            renderRecommend(doubanCurrentTag, doubanPageSize, doubanPageStart);
         }
     });
 }
@@ -374,7 +349,6 @@ function renderDoubanTags(tags) {
 
 // 设置换一批按钮事件
 function setupDoubanRefreshBtn() {
-    // 修复ID，使用正确的ID douban-refresh 而不是 douban-refresh-btn
     const btn = document.getElementById('douban-refresh');
     if (!btn) return;
     
@@ -386,31 +360,6 @@ function setupDoubanRefreshBtn() {
         
         renderRecommend(doubanCurrentTag, doubanPageSize, doubanPageStart);
     };
-}
-
-function fetchDoubanTags() {
-    const movieTagsTarget = `https://movie.douban.com/j/search_tags?type=movie`
-    fetchDoubanData(movieTagsTarget)
-        .then(data => {
-            movieTags = data.tags;
-            if (doubanMovieTvCurrentSwitch === 'movie') {
-                renderDoubanTags(movieTags);
-            }
-        })
-        .catch(error => {
-            console.error("获取豆瓣热门电影标签失败：", error);
-        });
-    const tvTagsTarget = `https://movie.douban.com/j/search_tags?type=tv`
-    fetchDoubanData(tvTagsTarget)
-       .then(data => {
-            tvTags = data.tags;
-            if (doubanMovieTvCurrentSwitch === 'tv') {
-                renderDoubanTags(tvTags);
-            }
-        })
-       .catch(error => {
-            console.error("获取豆瓣热门电视剧标签失败：", error);
-        });
 }
 
 // 优化渲染热门推荐内容函数 - 针对不同标签使用不同的排序和筛选策略
@@ -463,7 +412,7 @@ function renderRecommend(tag, pageLimit, pageStart) {
             container.innerHTML = `
                 <div class="col-span-full text-center py-8">
                     <div class="text-red-400">❌ 获取豆瓣数据失败，请稍后重试</div>
-                    <div class="text-gray-500 text-sm mt-2">提示：使用VPN可能有助于解决此问题</div>
+                    <div class="text-gray-500 text-sm mt-2">提示：检查网络连接或稍后重试</div>
                 </div>
             `;
         });
@@ -535,12 +484,20 @@ async function fetchDoubanData(url) {
     };
 
     try {
-        // 添加鉴权参数到代理URL
-        const proxiedUrl = await window.ProxyAuth?.addAuthToProxyUrl ? 
-            await window.ProxyAuth.addAuthToProxyUrl(PROXY_URL + encodeURIComponent(url)) :
-            PROXY_URL + encodeURIComponent(url);
+        // 使用你配置的代理URL（如果存在 PROXY_URL）
+        let proxiedUrl = url;
+        
+        // 检查是否有全局的 PROXY_URL 配置
+        if (typeof PROXY_URL !== 'undefined' && PROXY_URL) {
+            // 如果有 ProxyAuth，添加鉴权
+            if (window.ProxyAuth?.addAuthToProxyUrl) {
+                proxiedUrl = await window.ProxyAuth.addAuthToProxyUrl(PROXY_URL + encodeURIComponent(url));
+            } else {
+                proxiedUrl = PROXY_URL + encodeURIComponent(url);
+            }
+        }
             
-        // 尝试直接访问（豆瓣API可能允许部分CORS请求）
+        // 尝试请求
         const response = await fetch(proxiedUrl, fetchOptions);
         clearTimeout(timeoutId);
         
@@ -550,30 +507,8 @@ async function fetchDoubanData(url) {
         
         return await response.json();
     } catch (err) {
-        console.error("豆瓣 API 请求失败（直接代理）：", err);
-        
-        // 失败后尝试备用方法：作为备选
-        const fallbackUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-        
-        try {
-            const fallbackResponse = await fetch(fallbackUrl);
-            
-            if (!fallbackResponse.ok) {
-                throw new Error(`备用API请求失败! 状态: ${fallbackResponse.status}`);
-            }
-            
-            const data = await fallbackResponse.json();
-            
-            // 解析原始内容
-            if (data && data.contents) {
-                return JSON.parse(data.contents);
-            } else {
-                throw new Error("无法获取有效数据");
-            }
-        } catch (fallbackErr) {
-            console.error("豆瓣 API 备用请求也失败：", fallbackErr);
-            throw fallbackErr; // 向上抛出错误，让调用者处理
-        }
+        console.error("豆瓣 API 请求失败：", err);
+        throw err; // 向上抛出错误，让调用者处理
     }
 }
 
@@ -606,23 +541,20 @@ function renderDoubanCards(data, container) {
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;');
             
-            // 显示年份信息（新增）
+            // 显示年份信息
             const yearInfo = item.year ? `<span class="text-xs text-gray-400 ml-1">(${item.year})</span>` : '';
             
-            // 处理图片URL
-            // 1. 直接使用豆瓣图片URL (添加no-referrer属性)
-            const originalCoverUrl = item.cover;
-            
-            // 2. 也准备代理URL作为备选
-            const proxiedCoverUrl = PROXY_URL + encodeURIComponent(originalCoverUrl);
+            // 使用 Cloudflare Worker 代理图片
+            const proxyImageUrl = `${CF_IMAGE_PROXY}?url=${encodeURIComponent(item.cover)}`;
             
             // 为不同设备优化卡片布局
             card.innerHTML = `
-                <div class="relative w-full aspect-[2/3] overflow-hidden cursor-pointer" onclick="fillAndSearchWithDouban('${safeTitle}')">
-                    <img src="${originalCoverUrl}" alt="${safeTitle}" 
+                <div class="relative w-full aspect-[2/3] overflow-hidden cursor-pointer bg-gray-900" onclick="fillAndSearchWithDouban('${safeTitle}')">
+                    <img src="${proxyImageUrl}" 
+                        alt="${safeTitle}" 
                         class="w-full h-full object-cover transition-transform duration-500 hover:scale-110"
-                        onerror="this.onerror=null; this.src='${proxiedCoverUrl}'; this.classList.add('object-contain');"
-                        loading="lazy" referrerpolicy="no-referrer">
+                        loading="lazy"
+                        onerror="this.parentElement.innerHTML='<div class=\\'flex flex-col items-center justify-center h-full bg-gray-800 text-gray-400 p-4\\'><svg class=\\'w-12 h-12 mb-2\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z\\'></path></svg><span class=\\'text-xs\\'>封面加载失败</span></div>'">
                     <div class="absolute inset-0 bg-gradient-to-t from-black to-transparent opacity-60"></div>
                     <div class="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-2 py-1 rounded-sm">
                         <span class="text-yellow-400">★</span> ${safeRate}
@@ -654,7 +586,7 @@ function renderDoubanCards(data, container) {
 // 重置到首页
 function resetToHome() {
     resetSearchArea();
-    updateDoubanVisibility();
+    updateDoubanVisibility(true);
 }
 
 // 加载豆瓣首页内容
@@ -805,7 +737,7 @@ function addTag(tag) {
         tvTags.push(safeTag);
     }
     
-    // 保存到本地存储
+    // 保存到本地（内存中）
     saveUserTags();
     
     // 重新渲染标签
@@ -833,7 +765,7 @@ function deleteTag(tag) {
     if (index !== -1) {
         currentTags.splice(index, 1);
         
-        // 保存到本地存储
+        // 保存到本地（内存中）
         saveUserTags();
         
         // 如果当前选中的是被删除的标签，则重置为"热门"
@@ -866,7 +798,7 @@ function resetTagsToDefault() {
     doubanCurrentTag = '热门';
     doubanPageStart = 0;
     
-    // 保存到本地存储
+    // 保存到本地（内存中）
     saveUserTags();
     
     // 重新渲染标签和内容
