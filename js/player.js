@@ -1327,7 +1327,7 @@ function initializePageContent() {
     document.getElementById('autoplayToggle').checked = autoplayEnabled;
 
     // 获取广告过滤设置
-    adFilteringEnabled = localStorage.getItem(PLAYER_CONFIG.adFilteringStorage) !== 'false'; // 默认为true
+    adFilteringEnabled = localStorage.getItem('adFilteringEnabled') !== 'false'; // 默认为true
 
     // 监听自动连播开关变化
     document.getElementById('autoplayToggle').addEventListener('change', function (e) {
@@ -1628,7 +1628,7 @@ function initPlayer(videoUrl) {
         container: '#player',
         url: videoUrl,
         type: 'm3u8',
-        title: videoTitle,
+        title: currentVideoTitle,
         volume: 0.8,
         isLive: false,
         muted: false,
@@ -2013,6 +2013,15 @@ function initPlayer(videoUrl) {
     // 全屏 Web 模式处理
     art.on('fullscreenWeb', function (isFullScreen) {
         handleFullScreen(isFullScreen, true);
+        
+        // 进入网页全屏时，确保焦点在播放器上，使快捷键生效
+        if (isFullScreen) {
+            const playerContainer = document.getElementById('player');
+            if (playerContainer) {
+                playerContainer.setAttribute('tabindex', '0');
+                playerContainer.focus();
+            }
+        }
     });
 
     // 全屏模式处理
@@ -2180,10 +2189,10 @@ function initPlayer(videoUrl) {
         }
     });
 
-    // 添加双击全屏支持
+    // 添加双击全屏支持（仅移动端）
     art.on('video:playing', () => {
-        // 绑定双击事件到视频容器
-        if (art.video) {
+        // 只在移动端绑定双击事件
+        if (isMobileDevice && art.video) {
             art.video.addEventListener('dblclick', () => {
                 art.fullscreen = !art.fullscreen;
                 art.play();
@@ -3277,23 +3286,6 @@ async function switchToResource(sourceKey, vodId) {
 			}));
 		} catch (e) {
 			console.error('保存临时进度失败:', e);
-		}
-
-		// ✅ 保存弹幕源ID到 localStorage (使用纯标题作为key)
-		if (currentDanmuAnimeId) {
-			try {
-				const cleanTitle = sanitizeTitle(currentVideoTitle);
-				const titleHash = simpleHash(cleanTitle);
-				const sourceData = JSON.stringify({
-					animeId: currentDanmuAnimeId,
-					title: cleanTitle,
-					timestamp: Date.now()
-				});
-				localStorage.setItem(`danmuSource_${titleHash}`, sourceData);
-				console.log('✅ 已保存弹幕源ID到 localStorage');
-			} catch (e) {
-				console.warn('保存弹幕源ID失败:', e);
-			}
 		}
 
 		// 构建播放页面URL，带上播放位置
