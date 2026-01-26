@@ -301,6 +301,51 @@ function goBack(event) {
     window.history.back();
 }
 
+// ===== 【新增】页面卸载时的完整清理 =====
+function cleanupResources() {
+    console.log('🧹 开始清理资源...');
+    
+    // 1. 清理播放器
+    if (art) {
+        try {
+            art.destroy();
+        } catch (e) {
+            console.error('播放器销毁失败:', e);
+        }
+        art = null;
+    }
+    
+    // 2. 清理 HLS
+    if (currentHls) {
+        try {
+            currentHls.stopLoad();
+            currentHls.detachMedia();
+            currentHls.destroy();
+        } catch (e) {}
+        currentHls = null;
+    }
+    
+    // 3. 清理所有定时器
+    clearAllTimers();
+    if (progressSaveInterval) {
+        clearInterval(progressSaveInterval);
+        progressSaveInterval = null;
+    }
+    
+    // 4. 清理弹幕缓存（只保留最近10个）
+    const keys = Object.keys(danmuCache);
+    if (keys.length > 10) {
+        keys.slice(0, keys.length - 10).forEach(key => delete danmuCache[key]);
+    }
+    
+    console.log('✅ 资源清理完成');
+}
+
+// 页面卸载时清理
+window.addEventListener('beforeunload', cleanupResources);
+window.addEventListener('pagehide', cleanupResources);
+// ===== 【结束】页面卸载清理 =====
+
 // 页面加载时保存当前URL到localStorage，作为返回目标
 window.addEventListener('load', function () {
     // 保存前一页面URL
@@ -347,6 +392,25 @@ const isAndroidDevice = /Android/i.test(navigator.userAgent);
 
 let saveProgressTimer = null; // 用于防抖保存进度
 
+// ===== 【新增】统一的定时器管理 =====
+const timers = {
+    progressSave: null,
+    shortcutHint: null,
+    saveProgress: null,
+    autoCleanup: null
+};
+
+function clearAllTimers() {
+    Object.keys(timers).forEach(key => {
+        if (timers[key]) {
+            clearTimeout(timers[key]);
+            clearInterval(timers[key]);
+            timers[key] = null;
+        }
+    });
+}
+// ===== 【结束】统一的定时器管理 =====
+
 // 弹幕配置
 const DANMU_CONFIG = {
     baseUrl: 'https://danmu.manxue.eu.org/87654321', // 你的弹幕服务地址
@@ -355,8 +419,10 @@ const DANMU_CONFIG = {
 
 // 弹幕缓存
 const danmuCache = {};
-let currentDanmuAnimeId = null; // 当前选中的动漫ID
-let availableDanmuSources = []; // 可用的弹幕源列表
+const danmuCacheKeys = []; // 【新增】追踪缓存顺序
+const MAX_DANMU_CACHE_SIZE = 30; // 【新增】最多缓存30集弹幕
+let currentDanmuAnimeId = null;
+let availableDanmuSources = [];
 
 // 简单的字符串哈希函数，用于生成短标识
 function simpleHash(str) {
@@ -385,9 +451,23 @@ function loadCache() {
 // 保存缓存（写入 localStorage）
 function saveCache(cache) {
     try {
+        const serialized = JSON.stringify(cache);
+        // 【新增】检查大小，超过3MB则清理一半
+        if (serialized.length > 3 * 1024 * 1024) {
+            console.warn('⚠️ 缓存过大，清理旧数据');
+            const keys = Object.keys(cache);
+            const half = Math.floor(keys.length / 2);
+            keys.slice(0, half).forEach(key => delete cache[key]);
+        }
         localStorage.setItem('animeDetailCache', JSON.stringify(cache));
     } catch (e) {
-        console.warn("缓存保存失败:", e);
+        if (e.name === 'QuotaExceededError') {
+            console.error('❌ localStorage已满，清空缓存');
+            localStorage.removeItem('animeDetailCache');
+            localStorage.setItem('animeDetailCache', '{}');
+        } else {
+            console.warn("缓存保存失败:", e);
+        }
     }
 }
 
@@ -1058,7 +1138,17 @@ async function fetchDanmaku(episodeId, cacheKey) {
         });
     }
 
+    // 【修改】添加缓存大小控制
     danmuCache[cacheKey] = danmakuList;
+    danmuCacheKeys.push(cacheKey);
+    
+    // 超过限制时删除最旧的缓存
+    if (danmuCacheKeys.length > MAX_DANMU_CACHE_SIZE) {
+        const oldestKey = danmuCacheKeys.shift();
+        delete danmuCache[oldestKey];
+        console.log('🧹 清理旧弹幕缓存:', oldestKey);
+    }
+    
     return danmakuList;
 }
 
@@ -1270,6 +1360,38 @@ document.addEventListener('passwordVerified', () => {
 
 // 初始化页面内容
 function initializePageContent() {
+    
+    // ===== 【新增】启动定期自动清理（每30分钟） =====
+    if (!timers.autoCleanup) {
+        timers.autoCleanup = setInterval(() => {
+            console.log('🔄 执行定期清理...');
+            
+            // 清理超过1小时的弹幕源缓存
+            cleanCacheByType('danmuSource', 60 * 60 * 1000, 20);
+            
+            // 清理弹幕内存缓存
+            const cacheKeys = Object.keys(danmuCache);
+            if (cacheKeys.length > 20) {
+                const toRemove = cacheKeys.slice(0, 10);
+                toRemove.forEach(key => delete danmuCache[key]);
+                console.log(`🧹 已清理 ${toRemove.length} 个弹幕缓存`);
+            }
+            
+            // 清理动漫详情缓存
+            const detailKeys = Object.keys(animeDetailCache);
+            if (detailKeys.length > 50) {
+                const sorted = detailKeys
+                    .map(key => ({ key, time: animeDetailCache[key]?.timestamp || 0 }))
+                    .sort((a, b) => a.time - b.time);
+                sorted.slice(0, 25).forEach(item => delete animeDetailCache[item.key]);
+                saveCache(animeDetailCache);
+                console.log('🧹 已清理旧的动漫详情缓存');
+            }
+            
+        }, 30 * 60 * 1000); // 每30分钟
+        console.log('✅ 已启动定期清理任务');
+    }
+    // ===== 【结束】定期自动清理 =====
 
     // 解析URL参数
     const urlParams = new URLSearchParams(window.location.search);
@@ -1677,14 +1799,23 @@ function initPlayer(videoUrl) {
 			}),
 		],
         customType: {
-            m3u8: function (video, url) {
-                // 清理之前的HLS实例
-                if (currentHls && currentHls.destroy) {
-                    try {
-                        currentHls.destroy();
-                    } catch (e) {
-                    }
-                }
+			m3u8: function (video, url) {
+				// 清理之前的HLS实例
+				if (currentHls) {
+					try {
+						currentHls.off(Hls.Events.ERROR);
+						currentHls.off(Hls.Events.MANIFEST_PARSED);
+						currentHls.off(Hls.Events.FRAG_LOADED);
+						currentHls.off(Hls.Events.LEVEL_LOADED);
+						currentHls.stopLoad();
+						currentHls.detachMedia();
+						currentHls.destroy();
+					} catch (e) {
+						console.error('HLS销毁失败:', e);
+					} finally {
+						currentHls = null;
+					}
+				}
 
                 // 创建新的HLS实例
                 const hls = new Hls(hlsConfig);
@@ -2667,17 +2798,36 @@ function startProgressSaveInterval() {
     // 清除可能存在的旧计时器
     if (progressSaveInterval) {
         clearInterval(progressSaveInterval);
+        progressSaveInterval = null;
+    }
+    if (timers.progressSave) {
+        clearInterval(timers.progressSave);
+        timers.progressSave = null;
     }
 
-    // 每60秒保存一次播放进度（改为60秒，减少频率）
-    progressSaveInterval = setInterval(saveCurrentProgress, 60000);
+    // 每60秒保存一次播放进度
+    timers.progressSave = setInterval(saveCurrentProgress, 60000);
+    progressSaveInterval = timers.progressSave; // 保持兼容性
 }
 
 // 保存当前播放进度
 function saveCurrentProgress() {
-    clearTimeout(saveProgressTimer);
+    // 清除旧的防抖定时器
+    if (saveProgressTimer) {
+        clearTimeout(saveProgressTimer);
+        saveProgressTimer = null;
+    }
+    if (timers.saveProgress) {
+        clearTimeout(timers.saveProgress);
+        timers.saveProgress = null;
+    }
 
-    saveProgressTimer = setTimeout(() => {
+    // 设置新的防抖定时器
+    timers.saveProgress = setTimeout(() => {
+        saveProgressTimer = null;
+        timers.saveProgress = null;
+        
+        // 实际保存逻辑
         if (!art || !art.video) return;
         const currentTime = art.video.currentTime;
         const duration = art.video.duration;
@@ -2698,7 +2848,6 @@ function saveCurrentProgress() {
         }
     }, 500);
 }
-
 // 设置移动端长按三倍速播放功能
 function setupLongPressSpeedControl() {
     if (!art || !art.video) return;
