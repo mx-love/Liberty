@@ -2585,6 +2585,28 @@ function playEpisode(index) {
     // 切换前清理旧资源
     console.log('🔄 准备切换集数，清理旧资源...');
     
+     if (art && art.plugins && art.plugins.artplayerPluginDanmuku) {
+        try {
+            const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+            
+            console.log('🧹 清空播放器旧弹幕...');
+            
+            // 清空弹幕列表
+            if (typeof danmukuPlugin.clear === 'function') {
+                danmukuPlugin.clear();
+            }
+            
+            // 重置配置为空
+            danmukuPlugin.config({
+                danmuku: [],
+                synchronousPlayback: false
+            });
+            
+            console.log('✅ 旧弹幕已清空');
+        } catch (e) {
+            console.error('❌ 清空弹幕失败:', e);
+        }
+    
     // 清理弹幕缓存
     currentDanmuCache = {
         episodeIndex: -1,
