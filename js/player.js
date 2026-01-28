@@ -2585,7 +2585,10 @@ function playEpisode(index) {
     // 切换前清理旧资源
     console.log('🔄 准备切换集数，清理旧资源...');
     
-     if (art && art.plugins && art.plugins.artplayerPluginDanmuku) {
+    // ============================================
+    // 🔥 优先清空播放器中的旧弹幕对象 ✅ 已添加
+    // ============================================
+    if (art && art.plugins && art.plugins.artplayerPluginDanmuku) {
         try {
             const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
             
@@ -2606,6 +2609,7 @@ function playEpisode(index) {
         } catch (e) {
             console.error('❌ 清空弹幕失败:', e);
         }
+    }
     
     // 清理弹幕缓存
     currentDanmuCache = {
