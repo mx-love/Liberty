@@ -361,6 +361,126 @@ window.addEventListener('load', function () {
     }
 });
 
+// ===== 【新增】内存监控和自动清理 =====
+let memoryCheckInterval = null;
+let danmakuDensityReduced = false;
+
+function startMemoryMonitor() {
+    // 检查浏览器是否支持内存监控
+    if (!performance.memory) {
+        console.log('⚠️ 浏览器不支持内存监控');
+        return;
+    }
+    
+    // 清除旧的监控定时器
+    if (memoryCheckInterval) {
+        clearInterval(memoryCheckInterval);
+    }
+    
+    memoryCheckInterval = setInterval(() => {
+        try {
+            const usedMemory = performance.memory.usedJSHeapSize / 1024 / 1024;
+            const totalMemory = performance.memory.totalJSHeapSize / 1024 / 1024;
+            const usagePercent = (usedMemory / totalMemory) * 100;
+            
+            console.log(`💾 内存占用: ${usedMemory.toFixed(0)} MB (${usagePercent.toFixed(1)}%)`);
+            
+            // 策略1: 内存使用超过 60% 时，减少弹幕数量
+            if (usagePercent > 60 && !danmakuDensityReduced) {
+                console.warn('⚠️ 内存使用较高，减少弹幕密度');
+                reduceDanmakuDensity();
+                danmakuDensityReduced = true;
+            }
+            
+            // 策略2: 内存使用超过 80% 时，强制清理
+            if (usagePercent > 80) {
+                console.error('🚨 内存严重不足，执行紧急清理');
+                emergencyMemoryCleanup();
+            }
+            
+            // 策略3: 内存降下来后恢复标志
+            if (usagePercent < 50 && danmakuDensityReduced) {
+                danmakuDensityReduced = false;
+            }
+            
+        } catch (e) {
+            console.error('内存监控出错:', e);
+        }
+    }, 30000); // 每30秒检查一次
+    
+    console.log('✅ 内存监控已启动');
+}
+
+// 减少弹幕密度
+function reduceDanmakuDensity() {
+    if (!art || !art.plugins.artplayerPluginDanmuku) return;
+    
+    const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+    const currentDanmu = currentDanmuCache.danmuList || [];
+    
+    if (currentDanmu.length === 0) return;
+    
+    // 只保留50%的弹幕
+    const reducedDanmu = currentDanmu.filter((_, index) => index % 2 === 0);
+    
+    danmukuPlugin.clear();
+    danmukuPlugin.config({ danmuku: reducedDanmu });
+    danmukuPlugin.load();
+    
+    showToast('内存优化：已减少弹幕密度', 'info');
+}
+
+// 紧急内存清理
+function emergencyMemoryCleanup() {
+    console.warn('🚨 执行紧急内存清理...');
+    
+    // 1. 清空所有弹幕
+    if (art && art.plugins.artplayerPluginDanmuku) {
+        art.plugins.artplayerPluginDanmuku.clear();
+    }
+    
+    // 2. 清空弹幕缓存
+    currentDanmuCache = {
+        episodeIndex: -1,
+        danmuList: null,
+        timestamp: 0
+    };
+    
+    // 3. 清理 localStorage 中的大对象
+    try {
+        const keys = Object.keys(localStorage);
+        let cleanedCount = 0;
+        
+        keys.forEach(key => {
+            if (key.startsWith('anime_') || key.startsWith('danmu_') || key.startsWith('title_')) {
+                try {
+                    localStorage.removeItem(key);
+                    cleanedCount++;
+                } catch (e) {}
+            }
+        });
+        
+        console.log(`🧹 已清理 ${cleanedCount} 个缓存项`);
+    } catch (e) {
+        console.error('清理缓存失败:', e);
+    }
+    
+    // 4. 清理动漫详情缓存
+    animeDetailCache = {};
+    saveCache(animeDetailCache);
+    
+    showToast('已执行内存清理，如仍卡顿请刷新页面', 'warning');
+}
+
+// 页面卸载时停止监控
+window.addEventListener('beforeunload', () => {
+    if (memoryCheckInterval) {
+        clearInterval(memoryCheckInterval);
+        memoryCheckInterval = null;
+    }
+});
+// ===== 【结束】内存监控 =====
+
 
 // =================================
 // ============== PLAYER ==========
@@ -1575,7 +1695,13 @@ function initializePageContent() {
         console.log('[历史记录] 尝试保存初始历史记录');
         saveToHistory();
     }, 2000);
-}
+    
+    // ===== 【新增】启动内存监控 =====
+    if (typeof startMemoryMonitor === 'function') {
+        startMemoryMonitor();
+    }
+    // ===== 【结束】启动监控 =====
+} 
 
 // 处理键盘快捷键
 function handleKeyboardShortcuts(e) {
@@ -1746,14 +1872,14 @@ function initPlayer(videoUrl) {
 
     // 配置HLS.js选项
     const hlsConfig = {
-        debug: false,
-        loader: adFilteringEnabled ? CustomHlsJsLoader : Hls.DefaultConfig.loader,
-        enableWorker: true,
-        lowLatencyMode: false,
-        backBufferLength: 90,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
-        maxBufferSize: 30 * 1000 * 1000,
+		debug: false,
+		loader: adFilteringEnabled ? CustomHlsJsLoader : Hls.DefaultConfig.loader,
+		enableWorker: true,
+		lowLatencyMode: false,
+		backBufferLength: 60,        // ✅ 从 90 改为 60
+		maxBufferLength: 20,         // ✅ 从 30 改为 20
+		maxMaxBufferLength: 40,      // ✅ 从 60 改为 40
+		maxBufferSize: 20 * 1000 * 1000,  // ✅ 从 30MB 改为 20MB
         maxBufferHole: 0.5,
         fragLoadingMaxRetry: 6,
         fragLoadingMaxRetryTimeout: 64000,
@@ -1876,7 +2002,7 @@ function initPlayer(videoUrl) {
                 hls.loadSource(url);
                 hls.attachMedia(video);
                 
-                // ✅ 智能缓冲区管理（适合长视频）
+                // ✅ 优化后的智能缓冲区管理
                 let lastBufferCheck = 0;
                 let lastCleanupTime = 0;
 
@@ -1894,51 +2020,38 @@ function initPlayer(videoUrl) {
                     const bufferAhead = buffered - current;
                     
                     try {
-                        // ============================================
                         // 策略 1: 播放中温和清理（只清理很久之前的）
-                        // ============================================
-                        if (!hls.media.paused && bufferAhead > 300) {
-                            // 只清理 5 分钟前的内容
-                            const cleanEnd = Math.max(0, current - 300);
+                        if (!hls.media.paused && bufferAhead > 180) {
+                            // 只清理 3 分钟前的内容
+                            const cleanEnd = Math.max(0, current - 180);
                             
-                            if (cleanEnd > 0 && now - lastCleanupTime > 120000) { // 至少间隔2分钟
+                            if (cleanEnd > 0 && now - lastCleanupTime > 120000) {
                                 console.log(`🧹 温和清理：删除 0-${cleanEnd.toFixed(0)}s 的缓冲（当前 ${current.toFixed(0)}s）`);
                                 
-                                hls.trigger(Hls.Events.BUFFER_FLUSHING, {
-                                    startOffset: 0,
-                                    endOffset: cleanEnd,
-                                    type: 'video'
-                                });
+                                // 使用 requestIdleCallback 在空闲时清理
+                                if (typeof requestIdleCallback !== 'undefined') {
+                                    requestIdleCallback(() => {
+                                        hls.trigger(Hls.Events.BUFFER_FLUSHING, {
+                                            startOffset: 0,
+                                            endOffset: cleanEnd,
+                                            type: 'video'
+                                        });
+                                    });
+                                } else {
+                                    hls.trigger(Hls.Events.BUFFER_FLUSHING, {
+                                        startOffset: 0,
+                                        endOffset: cleanEnd,
+                                        type: 'video'
+                                    });
+                                }
                                 
                                 lastCleanupTime = now;
                             }
                         }
                         
-                        // ============================================
-                        // 策略 2: 暂停时深度清理（清理更多）
-                        // ============================================
-                        else if (hls.media.paused && bufferAhead > 600) {
-                            // 清理 10 分钟前的内容
-                            const cleanEnd = Math.max(0, current - 600);
-                            
-                            if (cleanEnd > 0) {
-                                console.log(`🧹 深度清理（暂停）：删除 0-${cleanEnd.toFixed(0)}s 的缓冲`);
-                                
-                                hls.trigger(Hls.Events.BUFFER_FLUSHING, {
-                                    startOffset: 0,
-                                    endOffset: cleanEnd,
-                                    type: 'video'
-                                });
-                                
-                                lastCleanupTime = now;
-                            }
-                        }
-                        
-                        // ============================================
-                        // 策略 3: 极端情况强制清理（防止崩溃）
-                        // ============================================
-                        else if (bufferAhead > 1800) { // 缓冲超过 30 分钟
-                            const cleanEnd = Math.max(0, current - 180); // 清理 3 分钟前
+                        // 策略 2: 紧急情况强制清理（防止崩溃）
+                        else if (bufferAhead > 600) {
+                            const cleanEnd = Math.max(0, current - 60);
                             
                             if (cleanEnd > 0) {
                                 console.warn(`⚠️ 强制清理：缓冲区过大（${(bufferAhead/60).toFixed(1)}分钟）`);
@@ -2213,15 +2326,15 @@ function initPlayer(videoUrl) {
 			clearInterval(syncCheckInterval);
 		}
 
-		// 每10秒检查一次，只在必要时校准
+		// 每30秒检查一次（从10秒改为30秒，减少CPU占用）
 		syncCheckInterval = setInterval(() => {
 			if (!art || !art.video) return;
 			
 			const currentTime = art.video.currentTime;
 			const timeDiff = Math.abs(currentTime - lastSyncTime);
 			
-			// ⭐ 修改：只有时间差 > 15秒时才校准（降低频率）
-			if (timeDiff > 15) {
+			// ⭐ 修改：只有时间差 > 30秒时才校准（从15秒改为30秒）
+			if (timeDiff > 30) {
 				const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
 				if (danmukuPlugin && typeof danmukuPlugin.seek === 'function') {
 					danmukuPlugin.seek(currentTime);
@@ -2229,7 +2342,7 @@ function initPlayer(videoUrl) {
 					console.log(`🔄 弹幕定期校准: ${currentTime.toFixed(2)}s`);
 				}
 			}
-		}, 10000); // 每10秒检查
+		}, 30000); // 每30秒检查（从10000改为30000）
 
 		// ⭐ 新增：播放器销毁时清理定时器
 		art.on('destroy', () => {
@@ -2394,6 +2507,26 @@ function initPlayer(videoUrl) {
                     }
 
                     console.log(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
+                    
+                    // ✅ 智能弹幕过滤：只保留有效范围的弹幕
+					if (danmuku.length > 5000) {
+						console.warn(`⚠️ 弹幕数量过多 (${danmuku.length}条)，启用智能过滤`);
+						
+						// 按时间排序并去重
+						const uniqueDanmuku = [];
+						const timeSet = new Set();
+						
+						danmuku.sort((a, b) => a.time - b.time).forEach(d => {
+							const timeKey = Math.floor(d.time * 10); // 0.1秒精度
+							if (!timeSet.has(timeKey) || uniqueDanmuku.length < 3000) {
+								uniqueDanmuku.push(d);
+								timeSet.add(timeKey);
+							}
+						});
+						
+						console.log(`✅ 过滤后保留 ${uniqueDanmuku.length} 条弹幕`);
+						return uniqueDanmuku;
+					}
 
                 } catch (e) {
                     console.error('❌ 弹幕加载失败:', e);
