@@ -200,15 +200,20 @@ function generateDanmuCacheKey(cleanTitle, episodeIndex) {
 }
 
 // 网络请求重试机制
-async function fetchWithRetry(url, options = {}, maxRetries = 3) {
+async function fetchWithRetry(url, options = {}, maxRetries = 3, timeout = 10000) {
     const baseDelay = 1000;
 
     for (let i = 0; i < maxRetries; i++) {
         try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeout);
+            
             const response = await fetch(url, {
                 ...options,
-                signal: AbortSignal.timeout(5000)
+                signal: controller.signal
             });
+            
+            clearTimeout(timeoutId);
 
             if (response.ok) {
                 return response;
@@ -216,14 +221,18 @@ async function fetchWithRetry(url, options = {}, maxRetries = 3) {
 
             if (i < maxRetries - 1) {
                 const delay = baseDelay * Math.pow(2, i);
+                console.warn(`⚠️ HTTP ${response.status}, ${delay}ms后重试...`);
                 await new Promise(r => setTimeout(r, delay));
             }
         } catch (error) {
-            if (i === maxRetries - 1) throw error;
-
+            const isTimeout = error.name === 'AbortError';
+            console.warn(`⚠️ ${isTimeout ? '超时' : '网络错误'} (尝试 ${i + 1}/${maxRetries})`);
+            
             if (i < maxRetries - 1) {
                 const delay = baseDelay * Math.pow(2, i);
                 await new Promise(r => setTimeout(r, delay));
+            } else {
+                throw error;
             }
         }
     }
@@ -983,22 +992,48 @@ async function findOrSearchAnimeId(cleanTitle) {
         console.warn('恢复弹幕源ID失败:', e);
     }
 
-    try {
-        const searchUrl = `${DANMU_CONFIG.baseUrl}/api/v2/search/anime?keyword=${encodeURIComponent(cleanTitle)}`;
-        const response = await fetchWithRetry(searchUrl);
-        const data = await response.json();
+    // 🔥 增加重试机制
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const searchUrl = `${DANMU_CONFIG.baseUrl}/api/v2/search/anime?keyword=${encodeURIComponent(cleanTitle)}`;
+            console.log(`🔍 弹幕搜索尝试 ${attempt}/2: ${cleanTitle}`);
+            
+            const response = await fetchWithRetry(searchUrl, {}, 3, 12000); // 12秒超时
+            const data = await response.json();
 
-        if (!data.animes || data.animes.length === 0) {
-            return null;
+            if (!data.animes || data.animes.length === 0) {
+                console.warn(`⚠️ 第${attempt}次搜索未找到结果`);
+                if (attempt < 2) {
+                    await new Promise(r => setTimeout(r, 2000)); // 等待2秒后重试
+                    continue;
+                }
+                return null;
+            }
+
+            const bestMatch = findBestAnimeMatch(data.animes, cleanTitle, currentEpisodes.length);
+            if (!bestMatch) {
+                console.warn(`⚠️ 第${attempt}次未找到最佳匹配`);
+                if (attempt < 2) {
+                    await new Promise(r => setTimeout(r, 2000));
+                    continue;
+                }
+                return null;
+            }
+
+            console.log(`✅ 第${attempt}次搜索成功: ${bestMatch.animeId}`);
+            return bestMatch.animeId;
+            
+        } catch (error) {
+            console.error(`❌ 第${attempt}次搜索失败:`, error.message);
+            
+            if (attempt < 2) {
+                console.log(`🔄 2秒后重试...`);
+                await new Promise(r => setTimeout(r, 2000));
+            } else {
+                reportError('弹幕搜索', '搜索 animeId 失败', { cleanTitle, error: error.message });
+                return null;
+            }
         }
-
-        const bestMatch = findBestAnimeMatch(data.animes, cleanTitle, currentEpisodes.length);
-        if (!bestMatch) return null;
-
-        return bestMatch.animeId;
-    } catch (error) {
-        reportError('弹幕搜索', '搜索 animeId 失败', { cleanTitle, error: error.message });
-        return null;
     }
 }
 
