@@ -1385,8 +1385,8 @@ function initializePageContent() {
                 const limitMB = (performance.memory.jsHeapSizeLimit / 1024 / 1024).toFixed(2);
                 console.log(`📊 内存使用: ${usedMB}MB / ${limitMB}MB`);
                 
-                // 如果内存使用超过80%，强制清理
-                if (performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit > 0.8) {
+                // 如果内存使用超过75%，强制清理
+                if (performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit > 0.75) {
                     console.warn('⚠️ 内存使用过高，执行强制清理');
                     tempDetailCache.clear();
                     currentDanmuCache = {
@@ -1397,8 +1397,8 @@ function initializePageContent() {
                 }
             }
             
-        }, 10 * 60 * 1000); // 每10分钟
-        console.log('✅ 已启动智能内存清理（10分钟，跳过播放时）');
+        }, 5 * 60 * 1000); // 改为5分钟
+        console.log('✅ 已启动智能内存清理（5分钟，跳过播放时）');
     }
 
     // 解析URL参数
@@ -2191,6 +2191,62 @@ function initPlayer(videoUrl) {
 			}
 		});
 		
+		(function setupAutoSaveHistory() {
+			console.log('🔄 启动自动保存播放历史...');
+			
+			// 1️⃣ 每30秒自动保存
+			const autoSaveInterval = setInterval(() => {
+				if (art && art.video && !art.video.paused) {
+					saveToHistory(); // 使用防抖版本
+				}
+			}, 30000);
+			
+			// 2️⃣ 播放进度更新时保存（限流）
+			let lastSaveTime = 0;
+			art.on('video:timeupdate', () => {
+				const now = Date.now();
+				if (now - lastSaveTime > 10000) { // 每10秒
+					lastSaveTime = now;
+					saveToHistory(); // 使用防抖版本
+				}
+			});
+			
+			// 3️⃣ 暂停时立即保存
+			art.on('video:pause', () => {
+				if (art.video && !art.video.seeking) {
+					saveToHistory(true); // 强制立即保存
+				}
+			});
+			
+			// 4️⃣ 结束时立即保存
+			art.on('video:ended', () => {
+				saveToHistory(true);
+			});
+			
+			// 5️⃣ 页面隐藏时立即保存
+			const visibilityHandler = () => {
+				if (document.hidden) {
+					saveToHistory(true);
+				}
+			};
+			document.addEventListener('visibilitychange', visibilityHandler);
+			
+			// 6️⃣ 页面卸载时立即保存
+			const beforeUnloadHandler = () => {
+				saveToHistory(true);
+			};
+			window.addEventListener('beforeunload', beforeUnloadHandler);
+			
+			// 清理
+			art.on('destroy', () => {
+				clearInterval(autoSaveInterval);
+				document.removeEventListener('visibilitychange', visibilityHandler);
+				window.removeEventListener('beforeunload', beforeUnloadHandler);
+			});
+			
+			console.log('✅ 自动保存已启动');
+		})();
+		
 		// ============================================
         // 📱 移动端横屏自动全屏
         // ============================================
@@ -2767,95 +2823,106 @@ function updateOrderButton() {
 }
 
 // 在播放器初始化后添加视频到历史记录
-function saveToHistory() {
-    console.log('[历史记录] 开始保存历史记录...');
+let saveHistoryTimer = null;
 
-    if (!currentEpisodes || currentEpisodes.length === 0) {
-        console.warn('[历史记录] ❌ 保存失败：没有集数信息');
-        return false;
+function saveToHistory(forceImmediate = false) {
+    console.log('[历史记录] 触发保存...');
+
+    // 清除旧的定时器
+    if (saveHistoryTimer && !forceImmediate) {
+        clearTimeout(saveHistoryTimer);
     }
 
-    if (!currentVideoUrl) {
-        console.warn('[历史记录] ❌ 保存失败：没有视频URL');
-        return false;
-    }
-
-    if (typeof(Storage) === "undefined") {
-        reportError('历史记录', '浏览器不支持 localStorage');
-        return false;
-    }
-
-    try {
-        const urlParams = new URLSearchParams(window.location.search);
-        const sourceName = urlParams.get('source') || '';
-        const sourceCode = urlParams.get('source') || '';
-        const id_from_params = urlParams.get('id');
-
-        let currentPosition = 0;
-        let videoDuration = 0;
-
-        if (art && art.video) {
-            currentPosition = art.video.currentTime;
-            videoDuration = art.video.duration;
+    const doSave = () => {
+        if (!currentEpisodes || currentEpisodes.length === 0) {
+            console.warn('[历史记录] ❌ 没有集数信息');
+            return false;
         }
 
-        const videoInfo = {
-            title: currentVideoTitle,
-            directVideoUrl: currentVideoUrl,
-            url: `player.html?url=${encodeURIComponent(currentVideoUrl)}&title=${encodeURIComponent(currentVideoTitle)}&source=${encodeURIComponent(sourceName)}&source_code=${encodeURIComponent(sourceCode)}&id=${encodeURIComponent(id_from_params || '')}&index=${currentEpisodeIndex}&position=${Math.floor(currentPosition || 0)}`,
-            episodeIndex: currentEpisodeIndex,
-            sourceName: sourceName,
-            vod_id: id_from_params || '',
-            sourceCode: sourceCode,
-            timestamp: Date.now(),
-            playbackPosition: currentPosition,
-            duration: videoDuration,
-            episodes: currentEpisodes && currentEpisodes.length > 0 ? [...currentEpisodes] : []
-        };
+        if (!currentVideoUrl) {
+            console.warn('[历史记录] ❌ 没有视频URL');
+            return false;
+        }
 
-        const history = JSON.parse(localStorage.getItem('viewingHistory') || '[]');
+        if (typeof(Storage) === "undefined") {
+            return false;
+        }
 
-        // ✅ 修改：只按标题查找，不管视频源
-        const existingIndex = history.findIndex(item =>
-            item.title === videoInfo.title
-        );
+        try {
+            const urlParams = new URLSearchParams(window.location.search);
+            const sourceName = urlParams.get('source') || '';
+            const sourceCode = urlParams.get('source') || '';
+            const id_from_params = urlParams.get('id');
 
-        if (existingIndex !== -1) {
-            // ✅ 更新现有记录（覆盖视频源信息）
-            const existingItem = history[existingIndex];
-            existingItem.episodeIndex = videoInfo.episodeIndex;
-            existingItem.timestamp = videoInfo.timestamp;
-            existingItem.sourceName = videoInfo.sourceName;
-            existingItem.sourceCode = videoInfo.sourceCode;
-            existingItem.vod_id = videoInfo.vod_id;
-            existingItem.directVideoUrl = videoInfo.directVideoUrl;
-            existingItem.url = videoInfo.url;
-            existingItem.playbackPosition = videoInfo.playbackPosition > 10 ? videoInfo.playbackPosition : (existingItem.playbackPosition || 0);
-            existingItem.duration = videoInfo.duration || existingItem.duration;
+            // ✅ 获取当前播放位置
+            let currentPosition = 0;
+            let videoDuration = 0;
 
-            if (videoInfo.episodes && videoInfo.episodes.length > 0) {
-                existingItem.episodes = [...videoInfo.episodes];
+            if (art && art.video) {
+                currentPosition = Math.max(0, art.video.currentTime || 0);
+                videoDuration = art.video.duration || 0;
+                console.log(`[历史记录] 位置: ${currentPosition.toFixed(2)}s / ${videoDuration.toFixed(2)}s`);
             }
 
-            // ✅ 移到最前面
-            const updatedItem = history.splice(existingIndex, 1)[0];
-            history.unshift(updatedItem);
-            console.log('[历史记录] ✅ 更新记录:', videoInfo.title, '第', videoInfo.episodeIndex + 1, '集', `[源: ${sourceName}]`);
-        } else {
-            // ✅ 新增记录
-            history.unshift(videoInfo);
-            console.log('[历史记录] ✅ 新增记录:', videoInfo.title, '第', videoInfo.episodeIndex + 1, '集', `[源: ${sourceName}]`);
+            const videoInfo = {
+                title: currentVideoTitle,
+                directVideoUrl: currentVideoUrl,
+                url: `player.html?url=${encodeURIComponent(currentVideoUrl)}&title=${encodeURIComponent(currentVideoTitle)}&source=${encodeURIComponent(sourceName)}&source_code=${encodeURIComponent(sourceCode)}&id=${encodeURIComponent(id_from_params || '')}&index=${currentEpisodeIndex}&position=${Math.floor(currentPosition)}`,
+                episodeIndex: currentEpisodeIndex,
+                sourceName: sourceName,
+                vod_id: id_from_params || '',
+                sourceCode: sourceCode,
+                timestamp: Date.now(),
+                playbackPosition: currentPosition,
+                duration: videoDuration,
+                episodes: currentEpisodes && currentEpisodes.length > 0 ? [...currentEpisodes] : []
+            };
+
+            const history = JSON.parse(localStorage.getItem('viewingHistory') || '[]');
+            const existingIndex = history.findIndex(item => item.title === videoInfo.title);
+
+            if (existingIndex !== -1) {
+                // 更新现有记录
+                const existingItem = history[existingIndex];
+                existingItem.episodeIndex = videoInfo.episodeIndex;
+                existingItem.timestamp = videoInfo.timestamp;
+                existingItem.sourceName = videoInfo.sourceName;
+                existingItem.sourceCode = videoInfo.sourceCode;
+                existingItem.vod_id = videoInfo.vod_id;
+                existingItem.directVideoUrl = videoInfo.directVideoUrl;
+                existingItem.url = videoInfo.url;
+                existingItem.playbackPosition = currentPosition; // ✅ 直接更新
+                existingItem.duration = videoDuration || existingItem.duration;
+
+                if (videoInfo.episodes && videoInfo.episodes.length > 0) {
+                    existingItem.episodes = [...videoInfo.episodes];
+                }
+
+                const updatedItem = history.splice(existingIndex, 1)[0];
+                history.unshift(updatedItem);
+                console.log(`[历史记录] ✅ 更新 第${videoInfo.episodeIndex + 1}集 ${currentPosition.toFixed(0)}s`);
+            } else {
+                history.unshift(videoInfo);
+                console.log(`[历史记录] ✅ 新增 第${videoInfo.episodeIndex + 1}集`);
+            }
+
+            if (history.length > 50) history.splice(50);
+
+            localStorage.setItem('viewingHistory', JSON.stringify(history));
+            return true;
+
+        } catch (e) {
+            console.error('[历史记录] 保存失败:', e);
+            return false;
         }
+    };
 
-        if (history.length > 50) history.splice(50);
-
-        localStorage.setItem('viewingHistory', JSON.stringify(history));
-        return true;
-
-    } catch (e) {
-        reportError('历史记录', '保存历史记录失败', { error: e.message });
-        return false;
+    // ✅ 防抖处理
+    if (forceImmediate) {
+        return doSave(); // 立即保存
     }
+
+    saveHistoryTimer = setTimeout(doSave, 2000); // 2秒后保存
 }
 
 // 显示恢复位置提示
