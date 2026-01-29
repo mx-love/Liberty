@@ -2191,39 +2191,28 @@ function initPlayer(videoUrl) {
 			}
 		});
 		
+		// ===== 【新增】自动保存播放历史 =====
 		(function setupAutoSaveHistory() {
-			console.log('🔄 启动自动保存播放历史...');
-			
-			// 1️⃣ 每30秒自动保存
+			// 1️⃣ 每60秒自动保存（低频，无感知）
 			const autoSaveInterval = setInterval(() => {
 				if (art && art.video && !art.video.paused) {
-					saveToHistory(); // 使用防抖版本
+					saveToHistory(); // 静默保存
 				}
-			}, 30000);
+			}, 60000);
 			
-			// 2️⃣ 播放进度更新时保存（限流）
-			let lastSaveTime = 0;
-			art.on('video:timeupdate', () => {
-				const now = Date.now();
-				if (now - lastSaveTime > 10000) { // 每10秒
-					lastSaveTime = now;
-					saveToHistory(); // 使用防抖版本
-				}
-			});
-			
-			// 3️⃣ 暂停时立即保存
+			// 2️⃣ 暂停时立即保存
 			art.on('video:pause', () => {
 				if (art.video && !art.video.seeking) {
-					saveToHistory(true); // 强制立即保存
+					saveToHistory(true);
 				}
 			});
 			
-			// 4️⃣ 结束时立即保存
+			// 3️⃣ 结束时立即保存
 			art.on('video:ended', () => {
 				saveToHistory(true);
 			});
 			
-			// 5️⃣ 页面隐藏时立即保存
+			// 4️⃣ 页面隐藏时立即保存
 			const visibilityHandler = () => {
 				if (document.hidden) {
 					saveToHistory(true);
@@ -2231,7 +2220,7 @@ function initPlayer(videoUrl) {
 			};
 			document.addEventListener('visibilitychange', visibilityHandler);
 			
-			// 6️⃣ 页面卸载时立即保存
+			// 5️⃣ 页面卸载时立即保存
 			const beforeUnloadHandler = () => {
 				saveToHistory(true);
 			};
@@ -2243,9 +2232,8 @@ function initPlayer(videoUrl) {
 				document.removeEventListener('visibilitychange', visibilityHandler);
 				window.removeEventListener('beforeunload', beforeUnloadHandler);
 			});
-			
-			console.log('✅ 自动保存已启动');
 		})();
+		// ===== 【结束】自动保存播放历史 =====
 		
 		// ============================================
         // 📱 移动端横屏自动全屏
