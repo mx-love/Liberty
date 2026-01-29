@@ -2191,19 +2191,19 @@ function initPlayer(videoUrl) {
 			}
 		});
 		
-		// ===== 【新增】自动保存播放历史 =====
+		// ===== 【优化】自动保存播放历史 =====
 		(function setupAutoSaveHistory() {
-			// 1️⃣ 每60秒自动保存（低频，无感知）
+			// 1️⃣ 每120秒自动保存（从60秒改为120秒，减少频率）
 			const autoSaveInterval = setInterval(() => {
 				if (art && art.video && !art.video.paused) {
 					saveToHistory(); // 静默保存
 				}
-			}, 60000);
+			}, 120000); // 改为 120 秒（2分钟）
 			
 			// 2️⃣ 暂停时立即保存
 			art.on('video:pause', () => {
 				if (art.video && !art.video.seeking) {
-					saveToHistory(true);
+					saveToHistory(true); // 强制立即保存
 				}
 			});
 			
@@ -2810,11 +2810,14 @@ function updateOrderButton() {
     }
 }
 
-// 在播放器初始化后添加视频到历史记录
+// ===== 【优化】历史记录保存机制 =====
 let saveHistoryTimer = null;
+let lastHistorySaveTime = 0; // 记录上次保存时间
+let lastSavedPosition = 0; // 记录上次保存的位置
 
 function saveToHistory(forceImmediate = false) {
-    console.log('[历史记录] 触发保存...');
+    // 静默模式：只在强制保存时才输出日志
+    const DEBUG_HISTORY = false; // 设置为 true 可以看到调试日志
 
     // 清除旧的定时器
     if (saveHistoryTimer && !forceImmediate) {
@@ -2823,12 +2826,12 @@ function saveToHistory(forceImmediate = false) {
 
     const doSave = () => {
         if (!currentEpisodes || currentEpisodes.length === 0) {
-            console.warn('[历史记录] ❌ 没有集数信息');
+            if (DEBUG_HISTORY) console.warn('[历史记录] ❌ 没有集数信息');
             return false;
         }
 
         if (!currentVideoUrl) {
-            console.warn('[历史记录] ❌ 没有视频URL');
+            if (DEBUG_HISTORY) console.warn('[历史记录] ❌ 没有视频URL');
             return false;
         }
 
@@ -2849,7 +2852,17 @@ function saveToHistory(forceImmediate = false) {
             if (art && art.video) {
                 currentPosition = Math.max(0, art.video.currentTime || 0);
                 videoDuration = art.video.duration || 0;
-                console.log(`[历史记录] 位置: ${currentPosition.toFixed(2)}s / ${videoDuration.toFixed(2)}s`);
+                
+                // ✅ 智能防抖：如果位置变化小于30秒且距离上次保存不到60秒，跳过
+                const timeSinceLastSave = Date.now() - lastHistorySaveTime;
+                const positionChange = Math.abs(currentPosition - lastSavedPosition);
+                
+                if (!forceImmediate && timeSinceLastSave < 60000 && positionChange < 30) {
+                    if (DEBUG_HISTORY) console.log('[历史记录] ⏭️ 跳过保存（变化不大）');
+                    return false;
+                }
+                
+                if (DEBUG_HISTORY) console.log(`[历史记录] 位置: ${currentPosition.toFixed(0)}s / ${videoDuration.toFixed(0)}s`);
             }
 
             const videoInfo = {
@@ -2879,7 +2892,7 @@ function saveToHistory(forceImmediate = false) {
                 existingItem.vod_id = videoInfo.vod_id;
                 existingItem.directVideoUrl = videoInfo.directVideoUrl;
                 existingItem.url = videoInfo.url;
-                existingItem.playbackPosition = currentPosition; // ✅ 直接更新
+                existingItem.playbackPosition = currentPosition;
                 existingItem.duration = videoDuration || existingItem.duration;
 
                 if (videoInfo.episodes && videoInfo.episodes.length > 0) {
@@ -2888,15 +2901,26 @@ function saveToHistory(forceImmediate = false) {
 
                 const updatedItem = history.splice(existingIndex, 1)[0];
                 history.unshift(updatedItem);
-                console.log(`[历史记录] ✅ 更新 第${videoInfo.episodeIndex + 1}集 ${currentPosition.toFixed(0)}s`);
+                
+                // 只在强制保存或DEBUG模式时输出日志
+                if (DEBUG_HISTORY || forceImmediate) {
+                    console.log(`[历史记录] ✅ 更新 第${videoInfo.episodeIndex + 1}集 ${currentPosition.toFixed(0)}s`);
+                }
             } else {
                 history.unshift(videoInfo);
-                console.log(`[历史记录] ✅ 新增 第${videoInfo.episodeIndex + 1}集`);
+                if (DEBUG_HISTORY || forceImmediate) {
+                    console.log(`[历史记录] ✅ 新增 第${videoInfo.episodeIndex + 1}集`);
+                }
             }
 
             if (history.length > 50) history.splice(50);
 
             localStorage.setItem('viewingHistory', JSON.stringify(history));
+            
+            // 更新保存时间和位置
+            lastHistorySaveTime = Date.now();
+            lastSavedPosition = currentPosition;
+            
             return true;
 
         } catch (e) {
@@ -2910,8 +2934,9 @@ function saveToHistory(forceImmediate = false) {
         return doSave(); // 立即保存
     }
 
-    saveHistoryTimer = setTimeout(doSave, 2000); // 2秒后保存
+    saveHistoryTimer = setTimeout(doSave, 3000); // 3秒后保存（从2秒改为3秒）
 }
+// ===== 【结束】优化历史记录保存 =====
 
 // 显示恢复位置提示
 function showPositionRestoreHint(position) {
