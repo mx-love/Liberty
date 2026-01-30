@@ -2436,7 +2436,6 @@ function initPlayer(videoUrl) {
         showError('视频播放失败: ' + (error.message || '未知错误'));
     });
 
-    // 添加移动端长按三倍速播放功能
     setupLongPressSpeedControl();
 
     // 视频播放结束事件
@@ -3059,175 +3058,70 @@ function saveCurrentProgress() {
 function setupLongPressSpeedControl() {
     if (!art || !art.video) return;
 
-    const playerElement = document.getElementById('player');
-    let longPressTimer = null;
-    let originalPlaybackRate = 1.0;
-    let isLongPress = false;
-    let touchStartX = 0;
-    let touchStartY = 0;
-    let touchMoved = false;
-    let isSettingOpen = false; // ✅ 新增：跟踪设置面板状态
+    const player = document.getElementById('player');
 
-    function showSpeedHint(speed) {
-        showShortcutHint(`${speed}倍速`, 'right');
+    let pressTimer = null;
+    let startX = 0;
+    let startY = 0;
+    let isMoved = false;
+    let originRate = 1;
+    let isSpeeding = false;
+
+    const PRESS_DELAY = 600;   // B站体感：偏稳
+    const MOVE_LIMIT = 8;      // 允许的“手抖”范围
+
+    function reset() {
+        if (pressTimer) {
+            clearTimeout(pressTimer);
+            pressTimer = null;
+        }
+
+        if (isSpeeding) {
+            art.video.playbackRate = originRate;
+            isSpeeding = false;
+            showShortcutHint(`${originRate}倍速`, 'right');
+        }
+
+        isMoved = false;
     }
 
-    // ✅ 监听设置面板状态
-    art.on('setting', (open) => {
-        isSettingOpen = open;
-        console.log('🎛️ 设置面板状态:', open ? '打开' : '关闭');
-        
-        // 如果设置面板打开时正在长按，立即取消
-        if (open && isLongPress) {
-            art.video.playbackRate = originalPlaybackRate;
-            isLongPress = false;
-            if (longPressTimer) {
-                clearTimeout(longPressTimer);
-                longPressTimer = null;
-            }
-        }
-    });
+    player.addEventListener('touchstart', (e) => {
+        if (art.video.paused) return;
 
-    // ✅ 改进的阻止检测
-    function shouldBlockSpeedControl(event) {
-        // 1. 检查设置面板是否打开
-        if (isSettingOpen) {
-            return true;
-        }
+        const touch = e.touches[0];
+        startX = touch.clientX;
+        startY = touch.clientY;
+        isMoved = false;
+        originRate = art.video.playbackRate;
 
-        // 2. 检查触摸位置（底部25%区域）
-        const touchY = event.touches[0].clientY;
-        const playerHeight = playerElement.offsetHeight;
-        if (touchY > playerHeight * 0.75) {
-            return true;
-        }
+        pressTimer = setTimeout(() => {
+            if (isMoved || art.video.paused) return;
 
-        // 3. 检查控制栏是否显示
-        if (art.controls && art.controls.show) {
-            return true;
-        }
-
-        return false;
-    }
-
-    // 禁用右键
-    playerElement.oncontextmenu = () => {
-        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-        if (isMobile) {
-            const dplayerMenu = document.querySelector(".dplayer-menu");
-            const dplayerMask = document.querySelector(".dplayer-mask");
-            if (dplayerMenu) dplayerMenu.style.display = "none";
-            if (dplayerMask) dplayerMask.style.display = "none";
-            return false;
-        }
-        return true;
-    };
-
-    // 触摸开始事件
-    playerElement.addEventListener('touchstart', function (e) {
-        touchStartX = e.touches[0].clientX;
-        touchStartY = e.touches[0].clientY;
-        touchMoved = false;
-
-        // B站风格：检查是否应该阻止
-        if (art.video.paused || shouldBlockSpeedControl(e)) {
-            return;
-        }
-
-        originalPlaybackRate = art.video.playbackRate;
-
-        longPressTimer = setTimeout(() => {
-            // ✅ 再次检查（双重保险）
-            if (art.video.paused || touchMoved || isSettingOpen) {
-                clearTimeout(longPressTimer);
-                longPressTimer = null;
-                return;
-            }
-
-            art.video.playbackRate = 2.0;
-            isLongPress = true;
-            showSpeedHint(2.0);
-            
-            if (navigator.vibrate) {
-                navigator.vibrate(30);
-            }
-        }, 500);
+            art.video.playbackRate = 2;
+            isSpeeding = true;
+            showShortcutHint('2倍速', 'right');
+            navigator.vibrate?.(30);
+        }, PRESS_DELAY);
     }, { passive: true });
 
-    // 触摸移动事件
-    playerElement.addEventListener('touchmove', function (e) {
-        if (!longPressTimer && !isLongPress) return;
+    player.addEventListener('touchmove', (e) => {
+        if (!pressTimer && !isSpeeding) return;
 
-        const moveX = Math.abs(e.touches[0].clientX - touchStartX);
-        const moveY = Math.abs(e.touches[0].clientY - touchStartY);
-        
-        if (moveX > 10 || moveY > 10) {
-            touchMoved = true;
-            
-            if (longPressTimer) {
-                clearTimeout(longPressTimer);
-                longPressTimer = null;
-            }
-            
-            if (isLongPress) {
-                art.video.playbackRate = originalPlaybackRate;
-                isLongPress = false;
-                showSpeedHint(originalPlaybackRate);
-            }
+        const touch = e.touches[0];
+        const dx = Math.abs(touch.clientX - startX);
+        const dy = Math.abs(touch.clientY - startY);
+
+        if (dx > MOVE_LIMIT || dy > MOVE_LIMIT) {
+            isMoved = true;
+            reset();
         }
     }, { passive: true });
 
-    // 触摸结束事件
-    playerElement.addEventListener('touchend', function (e) {
-        if (longPressTimer) {
-            clearTimeout(longPressTimer);
-            longPressTimer = null;
-        }
+    player.addEventListener('touchend', reset, { passive: true });
+    player.addEventListener('touchcancel', reset, { passive: true });
 
-        if (isLongPress) {
-            art.video.playbackRate = originalPlaybackRate;
-            isLongPress = false;
-            showSpeedHint(originalPlaybackRate);
-        }
-        
-        touchMoved = false;
-    }, { passive: true });
-
-    // 触摸取消事件
-    playerElement.addEventListener('touchcancel', function () {
-        if (longPressTimer) {
-            clearTimeout(longPressTimer);
-            longPressTimer = null;
-        }
-
-        if (isLongPress) {
-            art.video.playbackRate = originalPlaybackRate;
-            isLongPress = false;
-        }
-        
-        touchMoved = false;
-    }, { passive: true });
-
-    // 视频暂停时取消长按状态
-    art.video.addEventListener('pause', function () {
-        if (isLongPress) {
-            art.video.playbackRate = originalPlaybackRate;
-            isLongPress = false;
-        }
-
-        if (longPressTimer) {
-            clearTimeout(longPressTimer);
-            longPressTimer = null;
-        }
-    });
-
-    // 播放器销毁时清理
-    art.on('destroy', () => {
-        if (longPressTimer) {
-            clearTimeout(longPressTimer);
-            longPressTimer = null;
-        }
-    });
+    art.video.addEventListener('pause', reset);
+    art.on('destroy', reset);
 }
 
 // 清除视频进度记录
