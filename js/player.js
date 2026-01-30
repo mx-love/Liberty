@@ -2436,6 +2436,7 @@ function initPlayer(videoUrl) {
         showError('视频播放失败: ' + (error.message || '未知错误'));
     });
 
+    // 添加移动端长按三倍速播放功能
     setupLongPressSpeedControl();
 
     // 视频播放结束事件
@@ -3054,74 +3055,119 @@ function saveCurrentProgress() {
         }
     }, 500);
 }
-// 设置移动端长按2倍速播放功能（B站风格）
+// 设置移动端长按三倍速播放功能
 function setupLongPressSpeedControl() {
     if (!art || !art.video) return;
 
-    const player = document.getElementById('player');
+    const playerElement = document.getElementById('player');
+    let longPressTimer = null;
+    let originalPlaybackRate = 1.0;
+    let isLongPress = false;
 
-    let pressTimer = null;
-    let startX = 0;
-    let startY = 0;
-    let isMoved = false;
-    let originRate = 1;
-    let isSpeeding = false;
-
-    const PRESS_DELAY = 600;   // B站体感：偏稳
-    const MOVE_LIMIT = 8;      // 允许的“手抖”范围
-
-    function reset() {
-        if (pressTimer) {
-            clearTimeout(pressTimer);
-            pressTimer = null;
-        }
-
-        if (isSpeeding) {
-            art.video.playbackRate = originRate;
-            isSpeeding = false;
-            showShortcutHint(`${originRate}倍速`, 'right');
-        }
-
-        isMoved = false;
+    // 显示快速提示
+    function showSpeedHint(speed) {
+        showShortcutHint(`${speed}倍速`, 'right');
     }
 
-    player.addEventListener('touchstart', (e) => {
-        if (art.video.paused) return;
+    // 禁用右键
+    playerElement.oncontextmenu = () => {
+        // 检测是否为移动设备
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
-        const touch = e.touches[0];
-        startX = touch.clientX;
-        startY = touch.clientY;
-        isMoved = false;
-        originRate = art.video.playbackRate;
-
-        pressTimer = setTimeout(() => {
-            if (isMoved || art.video.paused) return;
-
-            art.video.playbackRate = 2;
-            isSpeeding = true;
-            showShortcutHint('2倍速', 'right');
-            navigator.vibrate?.(30);
-        }, PRESS_DELAY);
-    }, { passive: true });
-
-    player.addEventListener('touchmove', (e) => {
-        if (!pressTimer && !isSpeeding) return;
-
-        const touch = e.touches[0];
-        const dx = Math.abs(touch.clientX - startX);
-        const dy = Math.abs(touch.clientY - startY);
-
-        if (dx > MOVE_LIMIT || dy > MOVE_LIMIT) {
-            isMoved = true;
-            reset();
+        // 只在移动设备上禁用右键
+        if (isMobile) {
+            const dplayerMenu = document.querySelector(".dplayer-menu");
+            const dplayerMask = document.querySelector(".dplayer-mask");
+            if (dplayerMenu) dplayerMenu.style.display = "none";
+            if (dplayerMask) dplayerMask.style.display = "none";
+            return false;
         }
-    }, { passive: true });
+        return true; // 在桌面设备上允许右键菜单
+    };
 
-    player.addEventListener('touchend', reset, { passive: true });
-    player.addEventListener('touchcancel', reset, { passive: true });
+    // 触摸开始事件
+    playerElement.addEventListener('touchstart', function (e) {
+        // 检查视频是否正在播放，如果没有播放则不触发长按功能
+        if (art.video.paused) {
+            return; // 视频暂停时不触发长按功能
+        }
 
-    art.video.addEventListener('pause', reset);
-    art.on('destroy', reset);
+        // 保存原始播放速度
+        originalPlaybackRate = art.video.playbackRate;
+
+        // 设置长按计时器
+        longPressTimer = setTimeout(() => {
+            // 再次检查视频是否仍在播放
+            if (art.video.paused) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+                return;
+            }
+
+            // 长按超过500ms，设置为3倍速
+            art.video.playbackRate = 3.0;
+            isLongPress = true;
+            showSpeedHint(3.0);
+
+            // 只在确认为长按时阻止默认行为
+            e.preventDefault();
+        }, 500);
+    }, { passive: false });
+
+    // 触摸结束事件
+    playerElement.addEventListener('touchend', function (e) {
+        // 清除长按计时器
+        if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+
+        // 如果是长按状态，恢复原始播放速度
+        if (isLongPress) {
+            art.video.playbackRate = originalPlaybackRate;
+            isLongPress = false;
+            showSpeedHint(originalPlaybackRate);
+
+            // 阻止长按后的点击事件
+            e.preventDefault();
+        }
+        // 如果不是长按，则允许正常的点击事件（暂停/播放）
+    });
+
+    // 触摸取消事件
+    playerElement.addEventListener('touchcancel', function () {
+        // 清除长按计时器
+        if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+
+        // 如果是长按状态，恢复原始播放速度
+        if (isLongPress) {
+            art.video.playbackRate = originalPlaybackRate;
+            isLongPress = false;
+        }
+    });
+
+    // 触摸移动事件 - 防止在长按时触发页面滚动
+    playerElement.addEventListener('touchmove', function (e) {
+        if (isLongPress) {
+            e.preventDefault();
+        }
+    }, { passive: false });
+
+    // 视频暂停时取消长按状态
+    art.video.addEventListener('pause', function () {
+        if (isLongPress) {
+            art.video.playbackRate = originalPlaybackRate;
+            isLongPress = false;
+        }
+
+        if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+    });
 }
 
 // 清除视频进度记录
