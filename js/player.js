@@ -306,49 +306,81 @@ function goBack(event) {
     window.history.back();
 }
 
-// ===== 【新增】页面卸载时的完整清理 =====
+// ===== 【增强】页面卸载时的完整清理 =====
 function cleanupResources() {
-    console.log('🧹 开始清理资源...');
+    console.log('🧹 开始彻底清理资源...');
     
-    // 1. 清理播放器
-    if (art) {
-        try {
-            art.destroy();
-        } catch (e) {
-            console.error('播放器销毁失败:', e);
-        }
-        art = null;
-    }
-    
-    // 2. 清理 HLS
-    if (currentHls) {
-        try {
-            currentHls.stopLoad();
-            currentHls.detachMedia();
-            currentHls.destroy();
-        } catch (e) {}
-        currentHls = null;
-    }
-    
-    // 3. 清理所有定时器
+    // 1. 停止所有定时器
     clearAllTimers();
     if (progressSaveInterval) {
         clearInterval(progressSaveInterval);
         progressSaveInterval = null;
     }
     
-    // 4. 清理弹幕缓存
+    // 2. 清理播放器 - 加强版
+    if (art) {
+        try {
+            // 先暂停
+            if (art.video) {
+                art.video.pause();
+                art.video.src = '';
+                art.video.load();
+            }
+            
+            // 销毁播放器
+            art.destroy();
+            console.log('✅ 播放器已销毁');
+        } catch (e) {
+            console.error('播放器销毁失败:', e);
+        } finally {
+            art = null;
+        }
+    }
+    
+    // 3. 清理 HLS 实例
+    if (currentHls) {
+        try {
+            currentHls.stopLoad();
+            currentHls.detachMedia();
+            currentHls.destroy();
+            console.log('✅ HLS 实例已销毁');
+        } catch (e) {
+            console.error('HLS 销毁失败:', e);
+        } finally {
+            currentHls = null;
+        }
+    }
+    
+    // 4. 🔥 清理所有残留的 video 元素（关键修复）
+    const allVideos = document.querySelectorAll('video');
+    allVideos.forEach((video, index) => {
+        try {
+            video.pause();
+            video.src = '';
+            video.load();
+            video.remove();
+            console.log(`✅ 清理视频元素 ${index + 1}/${allVideos.length}`);
+        } catch (e) {
+            console.error('清理视频元素失败:', e);
+        }
+    });
+    
+    // 5. 清理弹幕缓存
     currentDanmuCache = {
         episodeIndex: -1,
         danmuList: null,
         timestamp: 0
     };
     
-    // ✅ 清理临时详情缓存
+    // 6. 清理临时详情缓存
     if (typeof tempDetailCache !== 'undefined') {
         tempDetailCache.clear();
-        console.log('✅ 已清理临时详情缓存');
+        console.log('✅ 临时详情缓存已清理');
     }
+    
+    // 7. 重置全局状态
+    currentDanmuAnimeId = null;
+    currentDanmuSourceName = '';
     
     console.log('✅ 资源清理完成');
 }
@@ -356,6 +388,67 @@ function cleanupResources() {
 window.addEventListener('beforeunload', cleanupResources);
 window.addEventListener('pagehide', cleanupResources);
 // ===== 【结束】页面卸载清理 =====
+
+// ===== 【新增】页面可见性管理 - 后台优化播放 =====
+let pageWasHidden = false;
+
+document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+        pageWasHidden = true;
+        console.log('🔇 页面已隐藏，启动省电模式');
+        
+        // ✅ 暂停弹幕渲染（节省30-50% CPU）
+        if (art && art.plugins && art.plugins.artplayerPluginDanmuku) {
+            try {
+                const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+                if (typeof danmukuPlugin.hide === 'function') {
+                    danmukuPlugin.hide();
+                    console.log('✅ 已暂停弹幕渲染');
+                }
+            } catch (e) {
+                console.warn('暂停弹幕失败:', e);
+            }
+        }
+        
+        // 保存进度
+        saveCurrentProgress();
+        
+    } else if (pageWasHidden) {
+        console.log('👁️ 页面恢复可见，恢复弹幕显示');
+        
+        // ✅ 恢复弹幕显示
+        if (art && art.plugins && art.plugins.artplayerPluginDanmuku) {
+            try {
+                const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+                if (typeof danmukuPlugin.show === 'function') {
+                    danmukuPlugin.show();
+                    // 同步弹幕时间
+                    if (art.video && typeof danmukuPlugin.seek === 'function') {
+                        danmukuPlugin.seek(art.video.currentTime);
+                    }
+                    console.log('✅ 已恢复弹幕显示');
+                }
+            } catch (e) {
+                console.warn('恢复弹幕失败:', e);
+            }
+        }
+        
+        // 🔥 清理幽灵视频
+        const allVideos = document.querySelectorAll('video');
+        if (allVideos.length > 1) {
+            console.error('❌ 检测到多个视频元素！清理中...');
+            allVideos.forEach((video, index) => {
+                if (index > 0) {
+                    video.pause();
+                    video.src = '';
+                    video.load();
+                    video.remove();
+                }
+            });
+        }
+    }
+});
+// ===== 【结束】页面可见性管理 =====
 
 // 页面加载时保存当前URL到localStorage，作为返回目标
 window.addEventListener('load', function () {
@@ -441,7 +534,9 @@ let currentDanmuCache = {
     timestamp: 0
 };
 
-// ✅ 删除 currentDanmuAnimeId，每次重新搜索
+// ✅ 恢复弹幕源追踪
+let currentDanmuAnimeId = null;
+let currentDanmuSourceName = '';
 let availableDanmuSources = [];
 
 // ✅ 新增：临时详情缓存（Map自动管理大小）
@@ -985,6 +1080,9 @@ async function findOrSearchAnimeId(cleanTitle) {
             const parsed = JSON.parse(savedData);
             if (parsed.title === cleanTitle || calculateSimilarity(parsed.title, cleanTitle) > 0.8) {
                 console.log('✅ 从 localStorage 恢复弹幕源ID:', parsed.animeId);
+                // 🔥 更新全局变量
+                currentDanmuAnimeId = parsed.animeId;
+                currentDanmuSourceName = parsed.sourceName || '缓存源';
                 return parsed.animeId;
             }
         }
@@ -1020,7 +1118,25 @@ async function findOrSearchAnimeId(cleanTitle) {
                 return null;
             }
 
-            console.log(`✅ 第${attempt}次搜索成功: ${bestMatch.animeId}`);
+            console.log(`✅ 找到弹幕源: ${bestMatch.animeTitle} (ID: ${bestMatch.animeId})`);
+            
+            // 🔥 保存当前使用的弹幕源信息
+            currentDanmuAnimeId = bestMatch.animeId;
+            currentDanmuSourceName = bestMatch.animeTitle;
+            
+            // 保存到缓存
+            try {
+                const titleHash = simpleHash(cleanTitle);
+                localStorage.setItem(`danmuSource_${titleHash}`, JSON.stringify({
+                    animeId: bestMatch.animeId,
+                    sourceName: bestMatch.animeTitle,
+                    title: cleanTitle,
+                    timestamp: Date.now()
+                }));
+            } catch (e) {
+                console.warn('保存弹幕源失败:', e);
+            }
+            
             return bestMatch.animeId;
             
         } catch (error) {
@@ -1672,6 +1788,22 @@ function showShortcutHint(text, direction) {
 
 // 初始化播放器
 function initPlayer(videoUrl) {
+    // 🔥 防止短时间内重复初始化（500ms内）
+    if (typeof initPlayer.lastInitTime === 'undefined') {
+        initPlayer.lastInitTime = 0;
+        initPlayer.isInitializing = false;
+    }
+    
+    const now = Date.now();
+    if (initPlayer.isInitializing || (now - initPlayer.lastInitTime < 500)) {
+        console.warn('⚠️ 播放器正在初始化或刚初始化过，跳过');
+        return;
+    }
+    
+    initPlayer.isInitializing = true;
+    initPlayer.lastInitTime = now;
+    
+    console.log('🎬 开始初始化播放器...');
 
 	// 使用新的统一缓存清理函数
     if (!window.danmuCacheCleanedThisSession) {
@@ -1765,16 +1897,16 @@ function initPlayer(videoUrl) {
 				danmuku: [],  // ✅ 改为空数组,不自动加载
 				speed: 5,
 				opacity: 1,
-				fontSize: isMobileDevice ? (window.innerWidth < 375 ? 18 : 20) : 25, // ✅ 移动端自适应字号
+				fontSize: isMobileDevice ? (window.innerWidth < 375 ? 18 : 20) : 25, 
 				color: '#FFFFFF',
 			mode: 0,
 				modes: [0, 1, 2],
-				margin: isMobileDevice ? [5, '80%'] : [10, '75%'], // ✅ 移动端优化弹幕区域
+				margin: isMobileDevice ? [5, '80%'] : [10, '75%'], 
 				antiOverlap: true,
 				useWorker: true,
 				synchronousPlayback: true,
 				filter: (danmu) => danmu.text.length <= 50,
-				lockTime: 5,
+				lockTime: 0,
 				maxLength: 100,
 				theme: 'light',
 			}),
@@ -2040,6 +2172,60 @@ function initPlayer(videoUrl) {
 
     art.on('ready', () => {
     hideControls();
+    
+	// ===== 【修复】弹幕字号拖动性能优化 =====
+	(function optimizeDanmakuSettings() {
+		setTimeout(() => {
+			const danmakuPlugin = art.plugins.artplayerPluginDanmuku;
+			if (!danmakuPlugin) return;
+
+			const findFontSizeSlider = () => {
+				const settingPanels = document.querySelectorAll('.art-setting-item');
+				for (const panel of settingPanels) {
+					const label = panel.querySelector('.art-setting-item-left');
+					if (label && label.textContent.includes('字号')) {
+						return panel.querySelector('input[type="range"]');
+					}
+				}
+				return null;
+			};
+
+			let fontSizeSlider = findFontSizeSlider();
+
+			if (!fontSizeSlider) {
+				const observer = new MutationObserver(() => {
+					fontSizeSlider = findFontSizeSlider();
+					if (fontSizeSlider) {
+						attachSliderOptimization();
+						observer.disconnect();
+					}
+				});
+
+				observer.observe(document.body, {
+					childList: true,
+					subtree: true
+				});
+			} else {
+				attachSliderOptimization();
+			}
+
+			function attachSliderOptimization() {
+				if (!fontSizeSlider) return;
+
+				console.log('✅ 弹幕字号优化已启用（只用 change 事件）');
+
+				// 🔥 只监听 change 事件（松手时触发），不监听 input
+				fontSizeSlider.addEventListener('change', (e) => {
+					const newValue = parseInt(e.target.value);
+					
+					if (danmakuPlugin.option) {
+						danmakuPlugin.option.fontSize = newValue;
+						console.log(`✅ 弹幕字号: ${newValue}px`);
+					}
+				});
+			}
+		}, 1000);
+	})();
     
     // ===== 【修复】防止移动端息屏 =====
     let wakeLock = null;
@@ -2510,6 +2696,12 @@ function initPlayer(videoUrl) {
             `;
         }
     }, 10000);
+    
+    // 🔥 标记初始化完成
+    setTimeout(() => {
+        initPlayer.isInitializing = false;
+        console.log('✅ 播放器初始化完成');
+    }, 200);
 }
 
 // 自定义M3U8 Loader用于过滤广告
@@ -3055,7 +3247,7 @@ function saveCurrentProgress() {
         }
     }, 500);
 }
-// 设置移动端长按三倍速播放功能
+// 设置移动端长按三倍速播放功能（B站风格）
 function setupLongPressSpeedControl() {
     if (!art || !art.video) return;
 
@@ -3063,18 +3255,51 @@ function setupLongPressSpeedControl() {
     let longPressTimer = null;
     let originalPlaybackRate = 1.0;
     let isLongPress = false;
+    let speedIndicator = null; // B站风格的倍速指示器
 
-    // 显示快速提示
-    function showSpeedHint(speed) {
-        showShortcutHint(`${speed}倍速`, 'right');
+    // 🎯 创建 B 站风格的倍速指示器
+    function createSpeedIndicator() {
+        if (speedIndicator) return speedIndicator;
+
+        speedIndicator = document.createElement('div');
+        speedIndicator.style.cssText = `
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 20px 30px;
+            border-radius: 12px;
+            font-size: 28px;
+            font-weight: bold;
+            z-index: 9999;
+            pointer-events: none;
+            display: none;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        `;
+        speedIndicator.innerHTML = '3.0x';
+        document.body.appendChild(speedIndicator);
+        return speedIndicator;
     }
 
-    // 禁用右键
-    playerElement.oncontextmenu = () => {
-        // 检测是否为移动设备
-        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    // 显示倍速指示器
+    function showSpeedIndicator(speed) {
+        const indicator = createSpeedIndicator();
+        indicator.innerHTML = `${speed.toFixed(1)}x`;
+        indicator.style.display = 'block';
+    }
 
-        // 只在移动设备上禁用右键
+    // 隐藏倍速指示器
+    function hideSpeedIndicator() {
+        if (speedIndicator) {
+            speedIndicator.style.display = 'none';
+        }
+    }
+
+    // 禁用右键（仅移动端）
+    playerElement.oncontextmenu = () => {
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
         if (isMobile) {
             const dplayerMenu = document.querySelector(".dplayer-menu");
             const dplayerMask = document.querySelector(".dplayer-mask");
@@ -3082,14 +3307,49 @@ function setupLongPressSpeedControl() {
             if (dplayerMask) dplayerMask.style.display = "none";
             return false;
         }
-        return true; // 在桌面设备上允许右键菜单
+        return true;
     };
+
+    // 🔥 检查触摸是否在设置面板或控制栏上
+    function isTouchOnControls(e) {
+        const touch = e.touches[0];
+        const element = document.elementFromPoint(touch.clientX, touch.clientY);
+        
+        // 检查是否点击在设置面板、控制栏、弹幕设置等区域
+        const excludeSelectors = [
+            '.art-setting',
+            '.art-controls',
+            '.art-bottom',
+            '.art-layers',
+            '.art-contextmenus',
+            '.art-info',
+            '[class*="danmu"]',
+            '[class*="setting"]',
+            'input',
+            'button',
+            'select',
+            'textarea'
+        ];
+
+        for (const selector of excludeSelectors) {
+            if (element && element.closest(selector)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     // 触摸开始事件
     playerElement.addEventListener('touchstart', function (e) {
-        // 检查视频是否正在播放，如果没有播放则不触发长按功能
+        // 🔥 如果触摸在控制区域，不触发长按
+        if (isTouchOnControls(e)) {
+            return;
+        }
+
+        // 检查视频是否正在播放
         if (art.video.paused) {
-            return; // 视频暂停时不触发长按功能
+            return;
         }
 
         // 保存原始播放速度
@@ -3104,12 +3364,26 @@ function setupLongPressSpeedControl() {
                 return;
             }
 
+            // 🔥 再次检查是否在控制区域（防止在设置面板上拖动触发）
+            if (isTouchOnControls(e)) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+                return;
+            }
+
             // 长按超过500ms，设置为3倍速
             art.video.playbackRate = 3.0;
             isLongPress = true;
-            showSpeedHint(3.0);
+            
+            // 🎯 显示 B 站风格的倍速指示器
+            showSpeedIndicator(3.0);
 
-            // 只在确认为长按时阻止默认行为
+            // 轻微震动反馈（如果支持）
+            if (navigator.vibrate) {
+                navigator.vibrate(50);
+            }
+
+            // 阻止默认行为
             e.preventDefault();
         }, 500);
     }, { passive: false });
@@ -3126,31 +3400,54 @@ function setupLongPressSpeedControl() {
         if (isLongPress) {
             art.video.playbackRate = originalPlaybackRate;
             isLongPress = false;
-            showSpeedHint(originalPlaybackRate);
+            
+            // 🎯 隐藏倍速指示器
+            hideSpeedIndicator();
 
             // 阻止长按后的点击事件
             e.preventDefault();
         }
-        // 如果不是长按，则允许正常的点击事件（暂停/播放）
     });
 
     // 触摸取消事件
     playerElement.addEventListener('touchcancel', function () {
-        // 清除长按计时器
         if (longPressTimer) {
             clearTimeout(longPressTimer);
             longPressTimer = null;
         }
 
-        // 如果是长按状态，恢复原始播放速度
         if (isLongPress) {
             art.video.playbackRate = originalPlaybackRate;
             isLongPress = false;
+            hideSpeedIndicator();
         }
     });
 
-    // 触摸移动事件 - 防止在长按时触发页面滚动
+    // 触摸移动事件 - 移动超过10px取消长按
+    let touchStartX = 0;
+    let touchStartY = 0;
+
+    playerElement.addEventListener('touchstart', function(e) {
+        const touch = e.touches[0];
+        touchStartX = touch.clientX;
+        touchStartY = touch.clientY;
+    }, { passive: true });
+
     playerElement.addEventListener('touchmove', function (e) {
+        // 🔥 如果正在长按，检查是否移动过多
+        if (longPressTimer) {
+            const touch = e.touches[0];
+            const deltaX = Math.abs(touch.clientX - touchStartX);
+            const deltaY = Math.abs(touch.clientY - touchStartY);
+
+            // 移动超过10px，取消长按
+            if (deltaX > 10 || deltaY > 10) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+        }
+
+        // 如果已经在长按状态，阻止滚动
         if (isLongPress) {
             e.preventDefault();
         }
@@ -3161,6 +3458,7 @@ function setupLongPressSpeedControl() {
         if (isLongPress) {
             art.video.playbackRate = originalPlaybackRate;
             isLongPress = false;
+            hideSpeedIndicator();
         }
 
         if (longPressTimer) {
@@ -3168,7 +3466,15 @@ function setupLongPressSpeedControl() {
             longPressTimer = null;
         }
     });
+
+    // 🔥 页面卸载时清理
+    window.addEventListener('beforeunload', () => {
+        if (speedIndicator && speedIndicator.parentNode) {
+            speedIndicator.parentNode.removeChild(speedIndicator);
+        }
+    });
 }
+
 
 // 清除视频进度记录
 function clearVideoProgress() {
@@ -3644,7 +3950,17 @@ async function showDanmuSourceModal() {
     const modal = document.getElementById('danmuSourceModal');
     const modalContent = document.getElementById('danmuSourceList');
 
-    modalContent.innerHTML = '<div class="text-center py-8 text-gray-400">正在搜索弹幕源...</div>';
+    // 🔥 显示当前使用的弹幕源
+    let currentSourceInfo = '';
+    if (currentDanmuAnimeId && currentDanmuSourceName) {
+        currentSourceInfo = `<div class="mb-3 p-3 bg-blue-900 bg-opacity-30 rounded-lg">
+            <div class="text-sm text-blue-300">当前弹幕源</div>
+            <div class="text-white font-medium mt-1">${currentDanmuSourceName}</div>
+            <div class="text-xs text-gray-400 mt-1">ID: ${currentDanmuAnimeId}</div>
+        </div>`;
+    }
+
+    modalContent.innerHTML = currentSourceInfo + '<div class="text-center py-8 text-gray-400">正在搜索弹幕源...</div>';
     modal.classList.remove('hidden');
 
     try {
@@ -3658,7 +3974,7 @@ async function showDanmuSourceModal() {
         const searchData = await searchResponse.json();
 
         if (!searchData.animes || searchData.animes.length === 0) {
-            modalContent.innerHTML = '<div class="text-center py-8 text-gray-400">未找到匹配的弹幕源</div>';
+            modalContent.innerHTML = currentSourceInfo + '<div class="text-center py-8 text-gray-400">未找到匹配的弹幕源</div>';
             return;
         }
 
@@ -3676,8 +3992,8 @@ async function showDanmuSourceModal() {
             let score = 0;
             const title = source.animeTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim();
 
-           // ✅ 不再使用 currentDanmuAnimeId 判断当前源
-            if (false) { // 总是false，因为每次都重新搜索
+            // 🔥 正确识别当前源
+            if (currentDanmuAnimeId && source.animeId === currentDanmuAnimeId) {
                 score += 10000; // 当前使用的最优先
             }
             if (title === currentVideoTitle) {
@@ -3708,7 +4024,7 @@ async function showDanmuSourceModal() {
         `;
 
         recommended.forEach(source => {
-			const isActive = false; // ✅ 不再使用 currentDanmuAnimeId，每次都重新搜索
+			const isActive = currentDanmuAnimeId && source.animeId === currentDanmuAnimeId;
 			const typeInfo = source.typeDescription || source.type;
     
 			// 【新增】计算相似度并显示
@@ -3729,7 +4045,7 @@ async function showDanmuSourceModal() {
 					<div class="text-sm opacity-75 mt-1">
 						${typeInfo} · ${source.episodeCount} 集
 						· 相似度: ${(similarity * 100).toFixed(0)}%
-						${isActive ? ' · <span class="text-yellow-300">✓ 当前</span>' : ''}
+						${isActive ? ' · <span class="text-yellow-300">✓ 当前使用</span>' : ''}
 					</div>
 				</button>
 			`;
@@ -3773,7 +4089,7 @@ async function showDanmuSourceModal() {
 
     } catch (error) {
         console.error('加载弹幕源失败:', error);
-        modalContent.innerHTML = '<div class="text-center py-8 text-red-400">加载失败，请重试</div>';
+        modalContent.innerHTML = currentSourceInfo + '<div class="text-center py-8 text-red-400">加载失败，请重试</div>';
     }
 }
 
@@ -3816,18 +4132,43 @@ async function switchDanmuSource(animeId) {
 		// ✅ 清空当前视频相关的弹幕缓存
 		currentDanmuCache = {
 			episodeIndex: -1,
-			data: null
+			danmuList: null,
+			timestamp: 0
 		};
+
+        // 🔥 更新当前弹幕源信息
+        currentDanmuAnimeId = animeId;
+        currentDanmuSourceName = ''; // 稍后从 episodes 更新
 
         // ✅ 重新获取当前集弹幕
         // 注意：由于每次都重新搜索，这里可能不会使用指定的animeId
         // 如果需要强制使用指定ID，需要特殊处理
         
-        // 临时保存到 localStorage，让搜索函数优先使用
+        // 🔥 保存到 localStorage 和全局变量
         const cleanTitle = sanitizeTitle(currentVideoTitle);
         const titleHash = simpleHash(cleanTitle);
+        
+        // 从 episodes 获取完整信息更新 sourceName
+        const episodes = await getAnimeEpisodesWithCache(animeId, cleanTitle);
+        if (episodes && episodes.length > 0) {
+            // 尝试从详情中获取标题
+            try {
+                const detailUrl = `${DANMU_CONFIG.baseUrl}/api/v2/bangumi/${animeId}`;
+                const detailResponse = await fetch(detailUrl);
+                if (detailResponse.ok) {
+                    const detailData = await detailResponse.json();
+                    if (detailData.bangumi && detailData.bangumi.animeTitle) {
+                        currentDanmuSourceName = detailData.bangumi.animeTitle;
+                    }
+                }
+            } catch (e) {
+                console.warn('获取弹幕源名称失败:', e);
+            }
+        }
+        
         localStorage.setItem(`danmuSource_${titleHash}`, JSON.stringify({
             animeId: animeId,
+            sourceName: currentDanmuSourceName || '未知源',
             title: cleanTitle,
             timestamp: Date.now()
         }));
@@ -3872,7 +4213,8 @@ async function switchDanmuSource(animeId) {
         }
 
         // 显示成功提示
-        showToast(`已加载 ${newDanmuku.length} 条弹幕`, 'success');
+        const sourceName = currentDanmuSourceName || '未知源';
+        showToast(`已切换到: ${sourceName} (${newDanmuku.length} 条弹幕)`, 'success');
          // ✅ 保存用户选择(使用纯标题作为key)
 		try {
 			const cleanTitle = sanitizeTitle(currentVideoTitle);
@@ -3893,3 +4235,36 @@ async function switchDanmuSource(animeId) {
         showToast('切换弹幕源失败', 'error');
     }
 }
+
+// ===== 【新增】内存监控和自动清理 =====
+setInterval(() => {
+    if (performance.memory) {
+        const used = performance.memory.usedJSHeapSize / 1048576; // MB
+        const total = performance.memory.totalJSHeapSize / 1048576;
+        const percent = (used / total * 100).toFixed(1);
+        
+        // 每5分钟记录一次
+        if (Math.random() < 0.01) { // 约1%概率，即每5分钟左右
+            console.log(`💾 内存使用: ${used.toFixed(1)}MB / ${total.toFixed(1)}MB (${percent}%)`);
+        }
+        
+        // 超过 80% 时主动清理
+        if (percent > 80) {
+            console.warn('⚠️ 内存使用过高，开始清理...');
+            
+            // 清理临时缓存
+            tempDetailCache.clear();
+            
+            // 清理旧的弹幕缓存
+            if (currentDanmuCache.episodeIndex !== currentEpisodeIndex) {
+                currentDanmuCache = {
+                    episodeIndex: -1,
+                    danmuList: null,
+                    timestamp: 0
+                };
+            }
+            
+            console.log('✅ 已完成内存清理');
+        }
+    }
+}, 30000); // 每30秒检查一次
