@@ -396,28 +396,35 @@ document.addEventListener('visibilitychange', function() {
         pageWasHidden = true;
         console.log('👁️ 页面已隐藏，继续播放（关闭弹幕）');
         
-        // 保存进度
         saveCurrentProgress();
         
-        // 🔥 关键修改：只关闭弹幕，不暂停视频
+        // 只关闭弹幕，不暂停视频
         if (art && art.plugins.artplayerPluginDanmuku) {
             const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
             if (typeof danmukuPlugin.hide === 'function') {
-                danmukuPlugin.hide(); // 隐藏弹幕
+                danmukuPlugin.hide();
             }
-            // 或者清空弹幕数据
             danmukuPlugin.config({ danmuku: [] });
         }
         
     } else if (pageWasHidden) {
         console.log('👁️ 页面恢复可见，恢复弹幕');
         
-        // 🔥 检查是否有"幽灵"音频
+        // 🔥 立即重置标志，防止重复执行
+        pageWasHidden = false;
+        
+        // 🔥 修复：更安全的幽灵视频检测
         const allVideos = document.querySelectorAll('video');
         if (allVideos.length > 1) {
-            console.error('❌ 检测到多个视频元素！清理中...');
-            allVideos.forEach((video, index) => {
-                if (index > 0) {
+            console.warn('⚠️ 检测到多个视频元素，开始安全清理...');
+            
+            // 找到 ArtPlayer 正在使用的视频元素
+            const activeVideo = art?.video;
+            
+            allVideos.forEach((video) => {
+                // 只清理不是当前播放器的视频元素
+                if (video !== activeVideo) {
+                    console.log('🧹 清理幽灵视频元素');
                     video.pause();
                     video.src = '';
                     video.load();
@@ -426,30 +433,37 @@ document.addEventListener('visibilitychange', function() {
             });
         }
         
-        // 🔥 恢复弹幕
-        if (art && art.plugins.artplayerPluginDanmuku) {
-            getDanmukuForVideo(currentVideoTitle, currentEpisodeIndex)
-                .then(danmuku => {
-                    if (danmuku && danmuku.length > 0) {
-                        const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
-                        danmukuPlugin.config({ 
-                            danmuku: danmuku,
-                            synchronousPlayback: true 
-                        });
-                        danmukuPlugin.load();
-                        
-                        // 同步到当前播放位置
-                        if (art.video && typeof danmukuPlugin.seek === 'function') {
-                            danmukuPlugin.seek(art.video.currentTime);
+        // 🔥 恢复弹幕（延迟执行，避免干扰视频播放）
+        setTimeout(() => {
+            if (art && art.plugins.artplayerPluginDanmuku && art.video) {
+                getDanmukuForVideo(currentVideoTitle, currentEpisodeIndex)
+                    .then(danmuku => {
+                        if (danmuku && danmuku.length > 0) {
+                            const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+                            danmukuPlugin.config({ 
+                                danmuku: danmuku,
+                                synchronousPlayback: true 
+                            });
+                            danmukuPlugin.load();
+                            
+                            // 同步到当前播放位置
+                            if (art.video && typeof danmukuPlugin.seek === 'function') {
+                                danmukuPlugin.seek(art.video.currentTime);
+                            }
+                            
+                            // 显示弹幕
+                            if (typeof danmukuPlugin.show === 'function') {
+                                danmukuPlugin.show();
+                            }
+                            
+                            console.log('✅ 弹幕已恢复');
                         }
-                        
-                        // 显示弹幕
-                        if (typeof danmukuPlugin.show === 'function') {
-                            danmukuPlugin.show();
-                        }
-                    }
-                });
-        }
+                    })
+                    .catch(err => {
+                        console.warn('恢复弹幕失败:', err);
+                    });
+            }
+        }, 300); // 延迟 300ms，确保视频恢复稳定
     }
 });
 
