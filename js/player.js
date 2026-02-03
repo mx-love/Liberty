@@ -1661,64 +1661,64 @@ function handleKeyboardShortcuts(e) {
 
     // Alt + 左箭头 = 上一集
     if (e.altKey && e.key === 'ArrowLeft') {
+        e.preventDefault();
         if (currentEpisodeIndex > 0) {
             playPreviousEpisode();
             showShortcutHint('上一集', 'left');
-            e.preventDefault();
         }
     }
 
     // Alt + 右箭头 = 下一集
     if (e.altKey && e.key === 'ArrowRight') {
+        e.preventDefault();
         if (currentEpisodeIndex < currentEpisodes.length - 1) {
             playNextEpisode();
             showShortcutHint('下一集', 'right');
-            e.preventDefault();
         }
     }
 
     // 左箭头 = 快退
     if (!e.altKey && e.key === 'ArrowLeft') {
-        if (art && art.currentTime > 5) {
-            art.currentTime -= 5;
+        e.preventDefault();
+        if (art) {
+            art.currentTime = Math.max(0, art.currentTime - 5);
             showShortcutHint('快退', 'left');
-            e.preventDefault();
         }
     }
 
     // 右箭头 = 快进
     if (!e.altKey && e.key === 'ArrowRight') {
-        if (art && art.currentTime < art.duration - 5) {
-            art.currentTime += 5;
+        e.preventDefault();
+        if (art) {
+            art.currentTime = Math.min(art.duration, art.currentTime + 5);
             showShortcutHint('快进', 'right');
-            e.preventDefault();
         }
     }
 
     // 上箭头 = 音量+
     if (e.key === 'ArrowUp') {
-        if (art && art.volume < 1) {
-            art.volume += 0.1;
+        e.preventDefault();
+        if (art) {
+            art.volume = Math.min(1, art.volume + 0.1);
             showShortcutHint('音量+', 'up');
-            e.preventDefault();
         }
     }
 
     // 下箭头 = 音量-
     if (e.key === 'ArrowDown') {
-        if (art && art.volume > 0) {
-            art.volume -= 0.1;
+        e.preventDefault();
+        if (art) {
+            art.volume = Math.max(0, art.volume - 0.1);
             showShortcutHint('音量-', 'down');
-            e.preventDefault();
         }
     }
 
     // 空格 = 播放/暂停
     if (e.key === ' ') {
+        e.preventDefault();
         if (art) {
             art.toggle();
             showShortcutHint('播放/暂停', 'play');
-            e.preventDefault();
         }
     }
 
@@ -1751,7 +1751,7 @@ function showShortcutHint(text, direction) {
         iconElement.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>';
     } else if (direction === 'right') {
         iconElement.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>';
-    }  else if (direction === 'up') {
+    } else if (direction === 'up') {
         iconElement.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>';
     } else if (direction === 'down') {
         iconElement.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>';
@@ -1763,18 +1763,17 @@ function showShortcutHint(text, direction) {
 
     // 先移除show类（重置动画）
     hintElement.classList.remove('show');
-    
-    // 使用requestAnimationFrame确保重绘
-    requestAnimationFrame(() => {
-        // 显示提示
+
+    // 用 0ms setTimeout 代替 rAF，保证在下一个任务队列执行，不受页面滚动影响
+    setTimeout(() => {
         hintElement.classList.add('show');
 
-        // 设置新的超时
+        // 800ms 后消失
         shortcutHintTimeout = setTimeout(() => {
             hintElement.classList.remove('show');
             shortcutHintTimeout = null;
         }, 800);
-    });
+    }, 0);
 }
 
 // 初始化播放器
