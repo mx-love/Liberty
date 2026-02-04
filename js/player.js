@@ -1216,6 +1216,10 @@ async function findOrSearchAnimeId(cleanTitle) {
     }
 }
 
+// ===== 【B站方案】弹幕分片管理 =====
+const DANMU_SEGMENT_SIZE = 6000; // 每段最多6000条（B站标准）
+const DANMU_TIME_WINDOW = 360; // 6分钟窗口（秒）
+
 // ✅ 智能匹配集数（增强版）
 function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
     if (!episodes || episodes.length === 0) return null;
@@ -1344,61 +1348,119 @@ async function fetchDanmaku(episodeId, episodeIndex) {
     const commentResponse = await fetch(commentUrl);
 
     if (!commentResponse.ok) {
-        console.warn(`⚠️ 获取弹幕失败 (episodeId: ${episodeId}, status: ${commentResponse.status})`);
+        console.warn(`⚠️ 获取弹幕失败`);
         return null;
     }
 
     const commentData = await commentResponse.json();
-
-    const danmakuList = [];
+    
+    // 🔥 B站方案：弹幕对象池（避免GC）
+    const danmakuPool = [];
+    
     if (commentData.comments && Array.isArray(commentData.comments)) {
-        commentData.comments.forEach(comment => {
-            const params = comment.p ? comment.p.split(',') : [];
-            const colorValue = parseInt(params[2] || 16777215);
-
-            let mode = parseInt(params[1] || 0);
-
-            if (mode >= 4 && mode <= 5) {
-                mode = mode === 4 ? 2 : 1;
-            } else {
-                mode = 0;
+        const totalComments = commentData.comments.length;
+        
+        // 🔥 策略1：超过10000条，按时间分段抽样（模拟B站6分钟分片）
+        if (totalComments > 10000) {
+            console.log(`⚠️ 弹幕过多 (${totalComments}条)，启用分段抽样`);
+            
+            // 计算视频时长估算（假设平均分布）
+            const lastTime = parseFloat(commentData.comments[totalComments - 1].p?.split(',')[0] || 0);
+            const segments = Math.ceil(lastTime / DANMU_TIME_WINDOW);
+            const perSegmentQuota = Math.floor(DANMU_SEGMENT_SIZE / segments);
+            
+            for (let seg = 0; seg < segments; seg++) {
+                const segStart = seg * DANMU_TIME_WINDOW;
+                const segEnd = (seg + 1) * DANMU_TIME_WINDOW;
+                
+                const segmentComments = commentData.comments.filter(c => {
+                    const time = parseFloat(c.p?.split(',')[0] || 0);
+                    return time >= segStart && time < segEnd;
+                });
+                
+                // 均匀采样
+                if (segmentComments.length <= perSegmentQuota) {
+                    segmentComments.forEach(c => processDanmaku(c, danmakuPool));
+                } else {
+                    const step = segmentComments.length / perSegmentQuota;
+                    for (let i = 0; i < perSegmentQuota; i++) {
+                        const idx = Math.floor(i * step);
+                        processDanmaku(segmentComments[idx], danmakuPool);
+                    }
+                }
             }
-
-            danmakuList.push({
-                text: comment.m || '',
-                time: parseFloat(params[0] || 0),
-                mode: mode,
-                color: '#' + colorValue.toString(16).padStart(6, '0').toUpperCase(),
+        } 
+        // 🔥 策略2：中等数量（3000-10000），轻量去重
+        else if (totalComments > 3000) {
+            let lastText = '';
+            let lastTime = -999;
+            
+            commentData.comments.forEach(comment => {
+                const params = comment.p?.split(',') || [];
+                const time = parseFloat(params[0] || 0);
+                const text = (comment.m || '').trim().slice(0, 50);
+                
+                // 时间窗口去重（3秒内相同文本只保留一条）
+                if (text === lastText && Math.abs(time - lastTime) < 3) {
+                    return; // 跳过
+                }
+                
+                lastText = text;
+                lastTime = time;
+                processDanmaku(comment, danmakuPool);
             });
-        });
+        }
+        // 🔥 策略3：少量弹幕，直接加载
+        else {
+            commentData.comments.forEach(c => processDanmaku(c, danmakuPool));
+        }
     }
 
-    // 按时间排序
-	danmakuList.sort((a, b) => a.time - b.time);
+    // 排序
+    danmakuPool.sort((a, b) => a.time - b.time);
 
-	const originalCount = danmakuList.length;
+    const totalCount = danmakuPool.length;
+    const originalCount = commentData.comments?.length || 0;
+    
+    if (originalCount > totalCount) {
+        console.log(`🎯 弹幕优化: ${originalCount}条 → ${totalCount}条 (${((1 - totalCount/originalCount) * 100).toFixed(1)}% 节省)`);
+    }
 
-	// 🔥 智能去重 + 过滤低质量弹幕
-	let processedDanmaku = deduplicateDanmaku(danmakuList);
-	processedDanmaku = filterLowQualityDanmaku(processedDanmaku);
+    // 缓存
+    currentDanmuCache = {
+        episodeIndex: episodeIndex,
+        danmuList: danmakuPool,
+        timestamp: Date.now()
+    };
 
-	const totalCount = processedDanmaku.length;
-	const removedCount = originalCount - totalCount;
-	const savedPercent = ((removedCount / originalCount) * 100).toFixed(1);
-
-	console.log(`🧹 弹幕优化: ${originalCount}条 → ${totalCount}条 (节省${savedPercent}%)`);
-
-	// 缓存优化后的列表
-	currentDanmuCache = {
-		episodeIndex: episodeIndex,
-		danmuList: processedDanmaku,
-		timestamp: Date.now()
-	};
-
-	console.log(`✅ 已缓存第${episodeIndex + 1}集弹幕（${totalCount}条）`);
-	return processedDanmaku;
+    return danmakuPool;
 }
 
+// 🔥 弹幕对象处理（内联优化）
+function processDanmaku(comment, pool) {
+    const params = comment.p ? comment.p.split(',') : [];
+    let mode = parseInt(params[1] || 0);
+    
+    if (mode >= 4 && mode <= 5) {
+        mode = mode === 4 ? 2 : 1;
+    } else {
+        mode = 0;
+    }
+    
+    const text = (comment.m || '').slice(0, 100); // 限制长度
+    
+    // 过滤空白和重复字符
+    if (!text || text.length < 2 || /^(.)\1{9,}$/.test(text)) {
+        return;
+    }
+    
+    pool.push({
+        text: text,
+        time: parseFloat(params[0] || 0),
+        mode: mode,
+        color: '#' + parseInt(params[2] || 16777215).toString(16).padStart(6, '0').toUpperCase()
+    });
+}
 // ✅ 新增：带临时缓存的剧集获取函数
 async function getAnimeEpisodesWithCache(animeId, cleanTitle) {
     try {
@@ -1570,59 +1632,29 @@ document.addEventListener('passwordVerified', () => {
 function initializePageContent() {
     
     // ============================================
-	// 🎬 Netflix 风格的定期清理（激进策略）
-	// ============================================
-	if (!timers.autoCleanup) {
-		timers.autoCleanup = setInterval(() => {
-			// 播放时不清理
-			const isPlayingOrLoading = art && art.video && (
-				!art.video.paused || 
-				art.video.readyState < 2 ||
-				document.getElementById('player-loading')?.style.display !== 'none'
-			);
-			
-			if (isPlayingOrLoading) {
-				return;
-			}
-			
-			const now = Date.now();
-			
-			// 1. 清理 15 分钟前的临时详情缓存（更激进）
-			for (const [key, value] of tempDetailCache.entries()) {
-				if (now - value.timestamp > 15 * 60 * 1000) {
-					tempDetailCache.delete(key);
-				}
-			}
-			
-			// 2. 清理 20 分钟前的弹幕缓存（更激进）
-			if (currentDanmuCache.timestamp > 0) {
-				const cacheAge = now - currentDanmuCache.timestamp;
-				if (cacheAge > 20 * 60 * 1000) {
-					currentDanmuCache = {
-						episodeIndex: -1,
-						danmuList: null,
-						timestamp: 0
-					};
-				}
-			}
-			
-			// 3. 内存监控（Netflix 风格：75% 就清理）
-			if (performance.memory) {
-				const memoryUsage = performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit;
-				
-				if (memoryUsage > 0.75) {
-					// 内存超过 75% 立即清理
-					tempDetailCache.clear();
-					currentDanmuCache = {
-						episodeIndex: -1,
-						danmuList: null,
-						timestamp: 0
-					};
-				}
-			}
-			
-		}, 20 * 60 * 1000); // 20 分钟执行一次
-	}
+    // 🎬 B站方案：温和的内存监控
+    // ============================================
+    if (!timers.autoCleanup && performance.memory) {
+        timers.autoCleanup = setInterval(() => {
+            const usage = performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit;
+            
+            // 🔥 只在内存真的爆了（95%）才清理
+            if (usage > 0.95) {
+                console.warn('🚨 内存严重不足，执行紧急清理');
+                
+                // 只清理非当前视频的详情缓存
+                const currentKey = `anime_${currentDanmuAnimeId}`;
+                for (const [key] of tempDetailCache.entries()) {
+                    if (key !== currentKey) {
+                        tempDetailCache.delete(key);
+                    }
+                }
+                
+                // 提示浏览器GC
+                if (window.gc) window.gc();
+            }
+        }, 60000); // 每分钟检查一次
+    }
 
     // 解析URL参数
     const urlParams = new URLSearchParams(window.location.search);
@@ -1843,45 +1875,38 @@ function handleKeyboardShortcuts(e) {
 // 显示快捷键提示
 function showShortcutHint(text, direction) {
     const hintElement = document.getElementById('shortcutHint');
+    if (!hintElement) return;
+    
     const textElement = document.getElementById('shortcutText');
     const iconElement = document.getElementById('shortcutIcon');
 
     // 清除之前的超时
     if (shortcutHintTimeout) {
         clearTimeout(shortcutHintTimeout);
-        shortcutHintTimeout = null;
     }
 
-    // 设置文本和图标方向
+    // 设置内容
     textElement.textContent = text;
+    
+    const icons = {
+        left: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>',
+        right: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>',
+        up: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>',
+        down: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>',
+        fullscreen: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"></path>',
+        play: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3l14 9-14 9V3z"></path>'
+    };
+    iconElement.innerHTML = icons[direction] || '';
 
-    if (direction === 'left') {
-        iconElement.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>';
-    } else if (direction === 'right') {
-        iconElement.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>';
-    } else if (direction === 'up') {
-        iconElement.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>';
-    } else if (direction === 'down') {
-        iconElement.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>';
-    } else if (direction === 'fullscreen') {
-        iconElement.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"></path>';
-    } else if (direction === 'play') {
-        iconElement.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3l14 9-14 9V3z"></path>';
-    }
-
-    // 先移除show类（重置动画）
+    // 🔥 强制重排，确保动画触发
     hintElement.classList.remove('show');
+    void hintElement.offsetWidth;
+    hintElement.classList.add('show');
 
-    // 用 0ms setTimeout 代替 rAF，保证在下一个任务队列执行，不受页面滚动影响
-    setTimeout(() => {
-        hintElement.classList.add('show');
-
-        // 800ms 后消失
-        shortcutHintTimeout = setTimeout(() => {
-            hintElement.classList.remove('show');
-            shortcutHintTimeout = null;
-        }, 800);
-    }, 0);
+    // 800ms后隐藏
+    shortcutHintTimeout = setTimeout(() => {
+        hintElement.classList.remove('show');
+    }, 800);
 }
 
 // 初始化播放器
