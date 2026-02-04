@@ -48,13 +48,13 @@ function advancedCleanTitle(title) {
     let allYears = []; // 【新增】保存所有年份
     
     // 【新增】扩展的季度匹配模式
-		const seasonPatterns = [
-		/第([一二三四五六七八九十\d]+)季/,
-		/Season\s*(\d+)/i,
-		/[Ss](\d+)(?:\s|$|E)/i,  // ✅ 修复：使用半角字母
-		/\s(\d{4})\s/,
-		/Season\s*([IVX]+)/i,
-	];
+    const seasonPatterns = [
+        /第([一二三四五六七八九十\d]+)季/,
+        /Season\s*(\d+)/i,
+        /S(\d+)(?:\s|$|E)/i,
+        /\s(\d{4})\s/,
+        /Season\s*([IVX]+)/i,
+    ];
     
     // 提取季度信息
 	for (const pattern of seasonPatterns) {
@@ -317,12 +317,6 @@ function cleanupResources() {
         progressSaveInterval = null;
     }
     
-    // 🔥 新增：清理恢复弹幕定时器
-    if (typeof restoreDanmuTimer !== 'undefined' && restoreDanmuTimer) {
-        clearTimeout(restoreDanmuTimer);
-        restoreDanmuTimer = null;
-    }
-    
     // 2. 清理播放器 - 加强版
     if (art) {
         try {
@@ -396,7 +390,6 @@ window.addEventListener('pagehide', cleanupResources);
 
 // ===== 【修改】页面可见性管理 - 后台继续播放 =====
 let pageWasHidden = false;
-let restoreDanmuTimer = null; // 🔥 新增：防止定时器冲突
 
 document.addEventListener('visibilitychange', function() {
     if (document.hidden) {
@@ -449,6 +442,7 @@ document.addEventListener('visibilitychange', function() {
         }
         
         // 🔥 恢复弹幕（使用缓存优先策略）
+        let restoreDanmuTimer = null;
         if (restoreDanmuTimer) {
             clearTimeout(restoreDanmuTimer);
         }
