@@ -318,7 +318,7 @@ function cleanupResources() {
     }
     
     // 🔥 新增：清理恢复弹幕定时器
-    if (restoreDanmuTimer) {
+    if (typeof restoreDanmuTimer !== 'undefined' && restoreDanmuTimer) {
         clearTimeout(restoreDanmuTimer);
         restoreDanmuTimer = null;
     }
