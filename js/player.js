@@ -421,94 +421,49 @@ document.addEventListener('visibilitychange', function() {
             // 找到 ArtPlayer 正在使用的视频元素
             const activeVideo = art?.video;
             
-            if (!activeVideo) {
-                console.warn('⚠️ 无法获取当前视频元素，跳过清理');
-            } else {
-                allVideos.forEach((video) => {
-                    // 只清理不是当前播放器的视频元素
-                    if (video !== activeVideo) {
-                        try {
-                            console.log('🧹 清理幽灵视频元素');
-                            video.pause();
-                            video.src = '';
-                            video.load();
-                            video.remove();
-                        } catch (e) {
-                            console.error('清理视频失败:', e);
-                        }
-                    }
-                });
-            }
-        }
-        
-        // 🔥 恢复弹幕（使用缓存优先策略）
-        let restoreDanmuTimer = null;
-        if (restoreDanmuTimer) {
-            clearTimeout(restoreDanmuTimer);
-        }
-        
-        restoreDanmuTimer = setTimeout(() => {
-            restoreDanmuTimer = null;
-            
-            if (!art || !art.plugins.artplayerPluginDanmuku || !art.video) {
-                return;
-            }
-            
-            try {
-                // 优先使用缓存的弹幕
-                const cachedDanmu = currentDanmuCache.danmuList;
-                const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
-                
-                if (cachedDanmu && cachedDanmu.length > 0 && 
-                    currentDanmuCache.episodeIndex === currentEpisodeIndex) {
-                    // 使用缓存
-                    danmukuPlugin.config({ 
-                        danmuku: cachedDanmu,
-                        synchronousPlayback: true 
-                    });
-                    danmukuPlugin.load();
-                    
-                    // 同步到当前播放位置
-                    if (typeof danmukuPlugin.seek === 'function') {
-                        danmukuPlugin.seek(art.video.currentTime);
-                    }
-                    
-                    // 显示弹幕
-                    if (typeof danmukuPlugin.show === 'function') {
-                        danmukuPlugin.show();
-                    }
-                    
-                    console.log('✅ 弹幕已恢复（使用缓存）');
-                } else {
-                    // 缓存失效，重新获取
-                    getDanmukuForVideo(currentVideoTitle, currentEpisodeIndex)
-                        .then(danmuku => {
-                            if (danmuku && danmuku.length > 0) {
-                                danmukuPlugin.config({ 
-                                    danmuku: danmuku,
-                                    synchronousPlayback: true 
-                                });
-                                danmukuPlugin.load();
-                                
-                                if (typeof danmukuPlugin.seek === 'function') {
-                                    danmukuPlugin.seek(art.video.currentTime);
-                                }
-                                
-                                if (typeof danmukuPlugin.show === 'function') {
-                                    danmukuPlugin.show();
-                                }
-                                
-                                console.log('✅ 弹幕已恢复（重新加载）');
-                            }
-                        })
-                        .catch(err => {
-                            console.warn('恢复弹幕失败:', err);
-                        });
+            allVideos.forEach((video) => {
+                // 只清理不是当前播放器的视频元素
+                if (video !== activeVideo) {
+                    console.log('🧹 清理幽灵视频元素');
+                    video.pause();
+                    video.src = '';
+                    video.load();
+                    video.remove();
                 }
-            } catch (e) {
-                console.error('恢复弹幕失败:', e);
+            });
+        }
+        
+        // 🔥 恢复弹幕（延迟执行，避免干扰视频播放）
+        setTimeout(() => {
+            if (art && art.plugins.artplayerPluginDanmuku && art.video) {
+                getDanmukuForVideo(currentVideoTitle, currentEpisodeIndex)
+                    .then(danmuku => {
+                        if (danmuku && danmuku.length > 0) {
+                            const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
+                            danmukuPlugin.config({ 
+                                danmuku: danmuku,
+                                synchronousPlayback: true 
+                            });
+                            danmukuPlugin.load();
+                            
+                            // 同步到当前播放位置
+                            if (art.video && typeof danmukuPlugin.seek === 'function') {
+                                danmukuPlugin.seek(art.video.currentTime);
+                            }
+                            
+                            // 显示弹幕
+                            if (typeof danmukuPlugin.show === 'function') {
+                                danmukuPlugin.show();
+                            }
+                            
+                            console.log('✅ 弹幕已恢复');
+                        }
+                    })
+                    .catch(err => {
+                        console.warn('恢复弹幕失败:', err);
+                    });
             }
-        }, 500); // 增加到 500ms
+        }, 300); // 延迟 300ms，确保视频恢复稳定
     }
 });
 
