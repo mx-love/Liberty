@@ -48,13 +48,13 @@ function advancedCleanTitle(title) {
     let allYears = []; // 【新增】保存所有年份
     
     // 【新增】扩展的季度匹配模式
-    const seasonPatterns = [
-        /第([一二三四五六七八九十\d]+)季/,
-        /Season\s*(\d+)/i,
-        /S(\d+)(?:\s|$|E)/i,
-        /\s(\d{4})\s/,
-        /Season\s*([IVX]+)/i,
-    ];
+		const seasonPatterns = [
+		/第([一二三四五六七八九十\d]+)季/,
+		/Season\s*(\d+)/i,
+		/[Ss](\d+)(?:\s|$|E)/i,  // ✅ 修复：使用半角字母
+		/\s(\d{4})\s/,
+		/Season\s*([IVX]+)/i,
+	];
     
     // 提取季度信息
 	for (const pattern of seasonPatterns) {
