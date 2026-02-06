@@ -1342,7 +1342,7 @@ function filterLowQualityDanmaku(danmakuList) {
     });
 }
 
-// ✅ 获取弹幕的独立函数
+// ✅ 获取弹幕的独立函数 - 完善的B站6分钟分片策略
 async function fetchDanmaku(episodeId, episodeIndex) {
     const commentUrl = `${DANMU_CONFIG.baseUrl}/api/v2/comment/${episodeId}?withRelated=true&chConvert=1`;
     const commentResponse = await fetch(commentUrl);
@@ -1354,86 +1354,244 @@ async function fetchDanmaku(episodeId, episodeIndex) {
 
     const commentData = await commentResponse.json();
     
-    // 🔥 B站方案：弹幕对象池（避免GC）
+    if (!commentData.comments || !Array.isArray(commentData.comments)) {
+        return [];
+    }
+
+    const allComments = commentData.comments;
+    const totalComments = allComments.length;
+    
+    console.log(`📊 原始弹幕数量: ${totalComments}`);
+
+    // 🎯 B站精确6分钟分片策略
+    const SEGMENT_DURATION = 360; // 6分钟（秒）
+    const MAX_PER_SEGMENT = 1500; // 每段最多1500条
+    const MAX_PER_SECOND = 15; // 每秒最多15条（防止密集爆炸）
+    
+    // ============================================
+    // 第1步：按时间排序所有弹幕
+    // ============================================
+    allComments.sort((a, b) => {
+        const timeA = parseFloat(a.p?.split(',')[0] || 0);
+        const timeB = parseFloat(b.p?.split(',')[0] || 0);
+        return timeA - timeB;
+    });
+    
+    // ============================================
+    // 第2步：计算视频总时长和分段数
+    // ============================================
+    const lastTime = parseFloat(allComments[totalComments - 1]?.p?.split(',')[0] || 0);
+    const totalSegments = Math.ceil(lastTime / SEGMENT_DURATION) || 1;
+    
+    console.log(`📐 视频时长: ${Math.floor(lastTime / 60)}分${Math.floor(lastTime % 60)}秒, 分为 ${totalSegments} 段`);
+    
+    // ============================================
+    // 第3步：按6分钟分段处理弹幕
+    // ============================================
     const danmakuPool = [];
+    const segmentStats = [];
     
-    if (commentData.comments && Array.isArray(commentData.comments)) {
-        const totalComments = commentData.comments.length;
+    for (let seg = 0; seg < totalSegments; seg++) {
+        const segStart = seg * SEGMENT_DURATION;
+        const segEnd = (seg + 1) * SEGMENT_DURATION;
         
-        // 🔥 策略1：超过10000条，按时间分段抽样（模拟B站6分钟分片）
-        if (totalComments > 10000) {
-            console.log(`⚠️ 弹幕过多 (${totalComments}条)，启用分段抽样`);
-            
-            // 计算视频时长估算（假设平均分布）
-            const lastTime = parseFloat(commentData.comments[totalComments - 1].p?.split(',')[0] || 0);
-            const segments = Math.ceil(lastTime / DANMU_TIME_WINDOW);
-            const perSegmentQuota = Math.floor(DANMU_SEGMENT_SIZE / segments);
-            
-            for (let seg = 0; seg < segments; seg++) {
-                const segStart = seg * DANMU_TIME_WINDOW;
-                const segEnd = (seg + 1) * DANMU_TIME_WINDOW;
-                
-                const segmentComments = commentData.comments.filter(c => {
-                    const time = parseFloat(c.p?.split(',')[0] || 0);
-                    return time >= segStart && time < segEnd;
-                });
-                
-                // 均匀采样
-                if (segmentComments.length <= perSegmentQuota) {
-                    segmentComments.forEach(c => processDanmaku(c, danmakuPool));
-                } else {
-                    const step = segmentComments.length / perSegmentQuota;
-                    for (let i = 0; i < perSegmentQuota; i++) {
-                        const idx = Math.floor(i * step);
-                        processDanmaku(segmentComments[idx], danmakuPool);
-                    }
-                }
-            }
+        // 提取该段的所有弹幕
+        const segmentComments = allComments.filter(c => {
+            const time = parseFloat(c.p?.split(',')[0] || 0);
+            return time >= segStart && time < segEnd;
+        });
+        
+        const segmentCount = segmentComments.length;
+        segmentStats.push({ seg: seg + 1, original: segmentCount, final: 0 });
+        
+        if (segmentCount === 0) continue;
+        
+        // ============================================
+        // 第4步：段内处理策略
+        // ============================================
+        
+        // 策略A：弹幕少于1500条，直接全部采用（但仍需去重和密度控制）
+        if (segmentCount <= MAX_PER_SEGMENT) {
+            const processed = processSegmentWithDensityControl(
+                segmentComments, 
+                MAX_PER_SECOND
+            );
+            processed.forEach(c => processDanmaku(c, danmakuPool));
+            segmentStats[seg].final = processed.length;
         } 
-        // 🔥 策略2：中等数量（3000-10000），轻量去重
-        else if (totalComments > 3000) {
-            let lastText = '';
-            let lastTime = -999;
-            
-            commentData.comments.forEach(comment => {
-                const params = comment.p?.split(',') || [];
-                const time = parseFloat(params[0] || 0);
-                const text = (comment.m || '').trim().slice(0, 50);
-                
-                // 时间窗口去重（3秒内相同文本只保留一条）
-                if (text === lastText && Math.abs(time - lastTime) < 3) {
-                    return; // 跳过
-                }
-                
-                lastText = text;
-                lastTime = time;
-                processDanmaku(comment, danmakuPool);
-            });
-        }
-        // 🔥 策略3：少量弹幕，直接加载
+        // 策略B：弹幕超过1500条，需要智能采样
         else {
-            commentData.comments.forEach(c => processDanmaku(c, danmakuPool));
+            console.log(`⚠️ 第${seg + 1}段超载 (${segmentCount}条)，启动智能采样...`);
+            
+            // B1：先去重（同秒同文本只保留1条）
+            const uniqueMap = new Map();
+            segmentComments.forEach(c => {
+                const params = c.p?.split(',') || [];
+                const time = parseFloat(params[0] || 0);
+                const timeKey = Math.floor(time * 10) / 10; // 精确到0.1秒
+                const text = (c.m || '').trim().slice(0, 50);
+                const key = `${timeKey}_${text}`;
+                
+                if (!uniqueMap.has(key)) {
+                    uniqueMap.set(key, c);
+                }
+            });
+            
+            const uniqueComments = Array.from(uniqueMap.values());
+            const afterDedup = uniqueComments.length;
+            
+            console.log(`  去重: ${segmentCount} → ${afterDedup}`);
+            
+            // B2：如果去重后仍超过1500，均匀密度采样
+            if (afterDedup > MAX_PER_SEGMENT) {
+                const sampled = uniformDensitySampling(
+                    uniqueComments, 
+                    MAX_PER_SEGMENT,
+                    segStart,
+                    segEnd
+                );
+                
+                const controlled = processSegmentWithDensityControl(
+                    sampled,
+                    MAX_PER_SECOND
+                );
+                
+                controlled.forEach(c => processDanmaku(c, danmakuPool));
+                segmentStats[seg].final = controlled.length;
+                
+                console.log(`  采样: ${afterDedup} → ${sampled.length} → ${controlled.length}条`);
+            } else {
+                const controlled = processSegmentWithDensityControl(
+                    uniqueComments,
+                    MAX_PER_SECOND
+                );
+                controlled.forEach(c => processDanmaku(c, danmakuPool));
+                segmentStats[seg].final = controlled.length;
+            }
         }
     }
-
-    // 排序
-    danmakuPool.sort((a, b) => a.time - b.time);
-
-    const totalCount = danmakuPool.length;
-    const originalCount = commentData.comments?.length || 0;
     
-    if (originalCount > totalCount) {
-        console.log(`🎯 弹幕优化: ${originalCount}条 → ${totalCount}条 (${((1 - totalCount/originalCount) * 100).toFixed(1)}% 节省)`);
-    }
-
-    // 缓存
+    // ============================================
+    // 第5步：全局质量过滤
+    // ============================================
+    let filteredPool = filterLowQualityDanmaku(danmakuPool);
+    
+    // ============================================
+    // 第6步：最终全局去重（防止边界重复）
+    // ============================================
+    const finalMap = new Map();
+    filteredPool.forEach(d => {
+        const timeKey = Math.floor(d.time * 10) / 10;
+        const key = `${timeKey}_${d.text.slice(0, 30)}`;
+        if (!finalMap.has(key)) {
+            finalMap.set(key, d);
+        }
+    });
+    
+    const finalDanmaku = Array.from(finalMap.values());
+    
+    // ============================================
+    // 第7步：按时间重新排序（确保时间轴正确）
+    // ============================================
+    finalDanmaku.sort((a, b) => a.time - b.time);
+    
+    // ============================================
+	// 第8步：输出统计信息（简化版）
+	// ============================================
+	const totalReduction = ((1 - finalDanmaku.length / totalComments) * 100).toFixed(1);
+	console.log(`✅ 弹幕优化: ${totalComments} → ${finalDanmaku.length}条 (节省${totalReduction}%) | 平均${(finalDanmaku.length / (lastTime || 1)).toFixed(2)}条/秒`);
+    
+    // ============================================
+    // 第9步：缓存结果
+    // ============================================
     currentDanmuCache = {
         episodeIndex: episodeIndex,
-        danmuList: danmakuPool,
+        danmuList: finalDanmaku,
         timestamp: Date.now()
     };
 
-    return danmakuPool;
+    return finalDanmaku;
+}
+
+// 🔥 新增：段内密度控制处理（插入在 fetchDanmaku 函数后面）
+function processSegmentWithDensityControl(comments, maxPerSecond) {
+    if (!comments || comments.length === 0) return [];
+    
+    // 按秒分组
+    const bySecond = new Map();
+    comments.forEach(c => {
+        const time = parseFloat(c.p?.split(',')[0] || 0);
+        const second = Math.floor(time);
+        
+        if (!bySecond.has(second)) {
+            bySecond.set(second, []);
+        }
+        bySecond.get(second).push(c);
+    });
+    
+    // 对每秒的弹幕进行密度控制
+    const result = [];
+    for (const [second, danmus] of bySecond.entries()) {
+        if (danmus.length <= maxPerSecond) {
+            result.push(...danmus);
+        } else {
+            // 超过上限，均匀采样
+            const step = danmus.length / maxPerSecond;
+            for (let i = 0; i < maxPerSecond; i++) {
+                const idx = Math.floor(i * step);
+                result.push(danmus[idx]);
+            }
+        }
+    }
+    
+    return result;
+}
+
+// 🔥 新增：均匀密度采样算法（插入在 processSegmentWithDensityControl 函数后面）
+function uniformDensitySampling(comments, targetCount, segStart, segEnd) {
+    if (!comments || comments.length <= targetCount) return comments;
+    
+    const segDuration = segEnd - segStart;
+    const targetDensity = targetCount / segDuration; // 目标：每秒多少条
+    
+    // 将时间段分成更小的时间片（每片1秒）
+    const timeSlots = Math.ceil(segDuration);
+    const slotsMap = new Map();
+    
+    // 初始化时间片
+    for (let i = 0; i < timeSlots; i++) {
+        slotsMap.set(i, []);
+    }
+    
+    // 将弹幕分配到各时间片
+    comments.forEach(c => {
+        const time = parseFloat(c.p?.split(',')[0] || 0);
+        const slotIndex = Math.floor(time - segStart);
+        if (slotIndex >= 0 && slotIndex < timeSlots) {
+            slotsMap.get(slotIndex).push(c);
+        }
+    });
+    
+    // 从每个时间片均匀采样
+    const result = [];
+    const perSlotQuota = Math.ceil(targetCount / timeSlots);
+    
+    for (const [slot, danmus] of slotsMap.entries()) {
+        if (danmus.length === 0) continue;
+        
+        if (danmus.length <= perSlotQuota) {
+            result.push(...danmus);
+        } else {
+            // 均匀采样
+            const step = danmus.length / perSlotQuota;
+            for (let i = 0; i < perSlotQuota && result.length < targetCount; i++) {
+                const idx = Math.floor(i * step);
+                result.push(danmus[idx]);
+            }
+        }
+    }
+    
+    return result;
 }
 
 // 🔥 弹幕对象处理（内联优化）
