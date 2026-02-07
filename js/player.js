@@ -1363,10 +1363,10 @@ async function fetchDanmaku(episodeId, episodeIndex) {
     
     console.log(`📊 原始弹幕数量: ${totalComments}`);
 
-    // 🎯 B站精确6分钟分片策略
-    const SEGMENT_DURATION = 360; // 6分钟（秒）
-    const MAX_PER_SEGMENT = 1500; // 每段最多1500条
-    const MAX_PER_SECOND = 15; // 每秒最多15条（防止密集爆炸）
+    // 🎯 优化弹幕密度策略
+	const SEGMENT_DURATION = 360; // 6分钟（秒）
+	const MAX_PER_SEGMENT = 720; // 每段最多720条（每秒2条）
+	const MAX_PER_SECOND = 2; // 每秒最多2条
     
     // ============================================
     // 第1步：按时间排序所有弹幕
@@ -1419,56 +1419,49 @@ async function fetchDanmaku(episodeId, episodeIndex) {
             processed.forEach(c => processDanmaku(c, danmakuPool));
             segmentStats[seg].final = processed.length;
         } 
-        // 策略B：弹幕超过1500条，需要智能采样
-        else {
-            console.log(`⚠️ 第${seg + 1}段超载 (${segmentCount}条)，启动智能采样...`);
-            
-            // B1：先去重（同秒同文本只保留1条）
-            const uniqueMap = new Map();
-            segmentComments.forEach(c => {
-                const params = c.p?.split(',') || [];
-                const time = parseFloat(params[0] || 0);
-                const timeKey = Math.floor(time * 10) / 10; // 精确到0.1秒
-                const text = (c.m || '').trim().slice(0, 50);
-                const key = `${timeKey}_${text}`;
-                
-                if (!uniqueMap.has(key)) {
-                    uniqueMap.set(key, c);
-                }
-            });
-            
-            const uniqueComments = Array.from(uniqueMap.values());
-            const afterDedup = uniqueComments.length;
-            
-            console.log(`  去重: ${segmentCount} → ${afterDedup}`);
-            
-            // B2：如果去重后仍超过1500，均匀密度采样
-            if (afterDedup > MAX_PER_SEGMENT) {
-                const sampled = uniformDensitySampling(
-                    uniqueComments, 
-                    MAX_PER_SEGMENT,
-                    segStart,
-                    segEnd
-                );
-                
-                const controlled = processSegmentWithDensityControl(
-                    sampled,
-                    MAX_PER_SECOND
-                );
-                
-                controlled.forEach(c => processDanmaku(c, danmakuPool));
-                segmentStats[seg].final = controlled.length;
-                
-                console.log(`  采样: ${afterDedup} → ${sampled.length} → ${controlled.length}条`);
-            } else {
-                const controlled = processSegmentWithDensityControl(
-                    uniqueComments,
-                    MAX_PER_SECOND
-                );
-                controlled.forEach(c => processDanmaku(c, danmakuPool));
-                segmentStats[seg].final = controlled.length;
-            }
-        }
+        // 策略B：弹幕超过720条，需要智能采样
+		else {
+			// B1：先去重（同秒同文本只保留1条）
+			const uniqueMap = new Map();
+			segmentComments.forEach(c => {
+				const params = c.p?.split(',') || [];
+				const time = parseFloat(params[0] || 0);
+				const timeKey = Math.floor(time * 10) / 10; // 精确到0.1秒
+				const text = (c.m || '').trim().slice(0, 50);
+				const key = `${timeKey}_${text}`;
+				
+				if (!uniqueMap.has(key)) {
+					uniqueMap.set(key, c);
+				}
+			});
+			
+			const uniqueComments = Array.from(uniqueMap.values());
+			
+			// B2：如果去重后仍超过720，均匀密度采样
+			if (uniqueComments.length > MAX_PER_SEGMENT) {
+				const sampled = uniformDensitySampling(
+					uniqueComments, 
+					MAX_PER_SEGMENT,
+					segStart,
+					segEnd
+				);
+				
+				const controlled = processSegmentWithDensityControl(
+					sampled,
+					MAX_PER_SECOND
+				);
+				
+				controlled.forEach(c => processDanmaku(c, danmakuPool));
+				segmentStats[seg].final = controlled.length;
+			} else {
+				const controlled = processSegmentWithDensityControl(
+					uniqueComments,
+					MAX_PER_SECOND
+				);
+				controlled.forEach(c => processDanmaku(c, danmakuPool));
+				segmentStats[seg].final = controlled.length;
+			}
+		}
     }
     
     // ============================================
@@ -1495,11 +1488,10 @@ async function fetchDanmaku(episodeId, episodeIndex) {
     // ============================================
     finalDanmaku.sort((a, b) => a.time - b.time);
     
-    // ============================================
-	// 第8步：输出统计信息（简化版）
+    // 第8步：输出统计信息（简化版）
 	// ============================================
 	const totalReduction = ((1 - finalDanmaku.length / totalComments) * 100).toFixed(1);
-	console.log(`✅ 弹幕优化: ${totalComments} → ${finalDanmaku.length}条 (节省${totalReduction}%) | 平均${(finalDanmaku.length / (lastTime || 1)).toFixed(2)}条/秒`);
+	console.log(`✅ 弹幕优化: ${totalComments} → ${finalDanmaku.length}条 (节省${totalReduction}%)`);
     
     // ============================================
     // 第9步：缓存结果
