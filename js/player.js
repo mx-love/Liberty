@@ -1735,7 +1735,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
             userSelectedDanmuTitle = null;
             tempDetailCache.clear(); // 🔥 方案二：同时清除详情缓存，防止下次继续用过期 episodeId
             showToast('当前弹幕源部分集数不可用，已自动切换', 'warning');
-        }}
+        }
 			
         return [];
 
