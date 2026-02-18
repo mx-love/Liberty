@@ -201,12 +201,6 @@ function cleanCacheByType(type, maxAge, maxCount = null) {
     }
 }
 
-// 生成缓存键
-function generateDanmuCacheKey(cleanTitle, episodeIndex) {
-    const titleHash = simpleHash(cleanTitle);
-    return `danmu_${titleHash}_ep${episodeIndex}`;
-}
-
 // 网络请求重试机制
 async function fetchWithRetry(url, options = {}, maxRetries = 3, timeout = 15000) {
     const baseDelay = 1000;
@@ -1694,6 +1688,15 @@ async function getDanmukuForVideo(title, episodeIndex) {
         }
 
         console.warn(`⚠️ episodeId ${episodeId} 返回404`);
+        
+        // 如果是用户手动选择的源出现404，清除选择，下次自动搜索
+		if (userSelectedDanmuAnimeId === animeId) {
+			console.warn('⚠️ 用户选择的弹幕源出现404，清除手动选择');
+			userSelectedDanmuAnimeId = null;
+			userSelectedDanmuTitle = null;
+			showToast('当前弹幕源部分集数不可用，已自动切换', 'warning');
+		}
+			
         return [];
 
     } catch (error) {
@@ -1713,11 +1716,6 @@ async function getDanmukuWithTimeout(title, episodeIndex, timeout = 5000) {
         console.warn('⚠ 弹幕加载失败或超时:', error.message);
         return [];
     });
-}
-
-// 兼容旧的函数名
-function getDanmukuUrl() {
-    return getDanmukuForVideo(currentVideoTitle, currentEpisodeIndex);
 }
 
 // 页面加载
