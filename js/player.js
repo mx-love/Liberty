@@ -1348,10 +1348,29 @@ function filterLowQualityDanmaku(danmakuList) {
 // ✅ 优化后的弹幕获取函数 - 解决主线程阻塞
 async function fetchDanmaku(episodeId, episodeIndex) {
     const commentUrl = `${DANMU_CONFIG.baseUrl}/api/v2/comment/${episodeId}?withRelated=true&chConvert=1`;
-    const commentResponse = await fetch(commentUrl);
+    
+    let commentResponse = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            commentResponse = await fetch(commentUrl, {
+                headers: {
+                    'Referer': DANMU_CONFIG.baseUrl + '/',
+                    'Origin': DANMU_CONFIG.baseUrl,
+                }
+            });
+            if (commentResponse.ok) break;
+            if (attempt < 3) {
+                console.warn(`⚠️ episodeId ${episodeId} 第${attempt}次请求${commentResponse.status}，1秒后重试...`);
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        } catch (e) {
+            if (attempt === 3) return null;
+            await new Promise(r => setTimeout(r, 1000));
+        }
+    }
 
-    if (!commentResponse.ok) {
-        console.warn(`⚠️ 获取弹幕失败`);
+    if (!commentResponse?.ok) {
+        console.warn(`⚠️ 获取弹幕失败，连续3次均失败`);
         return null;
     }
 
