@@ -1687,16 +1687,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
             return result;
         }
 
-        console.warn(`⚠️ episodeId ${episodeId} 返回404`);
-        
-        // 如果是用户手动选择的源出现404，清除选择，下次自动搜索
-		if (userSelectedDanmuAnimeId === animeId) {
-			console.warn('⚠️ 用户选择的弹幕源出现404，清除手动选择');
-			userSelectedDanmuAnimeId = null;
-			userSelectedDanmuTitle = null;
-			showToast('当前弹幕源部分集数不可用，已自动切换', 'warning');
-		}
-			
+        console.warn(`⚠️ episodeId ${episodeId} 返回404，跳过该集弹幕（保留用户选择）`);
         return [];
 
     } catch (error) {
