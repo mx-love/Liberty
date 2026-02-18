@@ -1350,27 +1350,37 @@ async function fetchDanmaku(episodeId, episodeIndex) {
     const commentUrl = `${DANMU_CONFIG.baseUrl}/api/v2/comment/${episodeId}?withRelated=true&chConvert=1`;
     
     let commentResponse = null;
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
         try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            
             commentResponse = await fetch(commentUrl, {
+                signal: controller.signal,
                 headers: {
                     'Referer': DANMU_CONFIG.baseUrl + '/',
                     'Origin': DANMU_CONFIG.baseUrl,
                 }
             });
+            clearTimeout(timeoutId);
+            
             if (commentResponse.ok) break;
-            if (attempt < 3) {
-                console.warn(`⚠️ episodeId ${episodeId} 第${attempt}次请求${commentResponse.status}，1秒后重试...`);
-                await new Promise(r => setTimeout(r, 1000));
+            if (attempt < 2) {
+                console.warn(`⚠️ episodeId ${episodeId} 第1次请求${commentResponse.status}，2秒后重试...`);
+                await new Promise(r => setTimeout(r, 2000));
             }
         } catch (e) {
-            if (attempt === 3) return null;
-            await new Promise(r => setTimeout(r, 1000));
+            clearTimeout(timeoutId ?? null);
+            if (attempt === 2) {
+                console.warn(`⚠️ episodeId ${episodeId} 请求失败: ${e.name === 'AbortError' ? '超时' : e.message}`);
+                return null;
+            }
+            await new Promise(r => setTimeout(r, 2000));
         }
     }
 
     if (!commentResponse?.ok) {
-        console.warn(`⚠️ 获取弹幕失败，连续3次均失败`);
+        console.warn(`⚠️ 获取弹幕失败`);
         return null;
     }
 
