@@ -1347,10 +1347,15 @@ function filterLowQualityDanmaku(danmakuList) {
 
 // ✅ 优化后的弹幕获取函数 - 解决主线程阻塞
 async function fetchDanmaku(episodeId, episodeIndex) {
-    const commentUrl = `${DANMU_CONFIG.baseUrl}/api/v2/comment/${episodeId}?withRelated=true&chConvert=1`;
-    
-    let commentResponse = null;
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    // 第1次带 withRelated，404时第2次去掉 withRelated 重试
+	const urls = [
+		`${DANMU_CONFIG.baseUrl}/api/v2/comment/${episodeId}?withRelated=true&chConvert=1`,
+		`${DANMU_CONFIG.baseUrl}/api/v2/comment/${episodeId}?chConvert=1`,
+	];
+
+	let commentResponse = null;
+	for (let attempt = 1; attempt <= 2; attempt++) {
+		const commentUrl = urls[attempt - 1];
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -1366,7 +1371,7 @@ async function fetchDanmaku(episodeId, episodeIndex) {
             
             if (commentResponse.ok) break;
             if (attempt < 2) {
-                console.warn(`⚠️ episodeId ${episodeId} 第1次请求${commentResponse.status}，2秒后重试...`);
+                console.warn(`⚠️ episodeId ${episodeId} 第${attempt}次请求${commentResponse.status}（${attempt === 1 ? '带withRelated' : '不带withRelated'}），2秒后重试...`);
                 await new Promise(r => setTimeout(r, 2000));
             }
         } catch (e) {
@@ -1591,10 +1596,15 @@ async function getAnimeEpisodesWithCache(animeId, cleanTitle) {
         const cacheKey = `anime_${animeId}`;
         const cached = tempDetailCache.get(cacheKey);
 
-        // 会话内永久有效（浏览器关闭自动清除）
-        if (cached) {
+        // 🔥 方案一：加60秒过期，与服务端缓存周期对齐
+        const CACHE_TTL = 60 * 1000;
+        if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
             console.log('✅ 使用临时详情缓存');
             return cached.episodes;
+        }
+        if (cached) {
+            tempDetailCache.delete(cacheKey);
+            console.log('🔄 临时详情缓存已过期，重新获取最新 episodeId');
         }
 
         // 获取详情
@@ -1720,11 +1730,12 @@ async function getDanmukuForVideo(title, episodeIndex) {
         
         // 如果是用户手动选择的源出现404，清除选择，下次自动搜索
 		if (userSelectedDanmuAnimeId === animeId) {
-			console.warn('⚠️ 用户选择的弹幕源出现404，清除手动选择');
-			userSelectedDanmuAnimeId = null;
-			userSelectedDanmuTitle = null;
-			showToast('当前弹幕源部分集数不可用，已自动切换', 'warning');
-		}
+            console.warn('⚠️ 用户选择的弹幕源出现404，清除手动选择');
+            userSelectedDanmuAnimeId = null;
+            userSelectedDanmuTitle = null;
+            tempDetailCache.clear(); // 🔥 方案二：同时清除详情缓存，防止下次继续用过期 episodeId
+            showToast('当前弹幕源部分集数不可用，已自动切换', 'warning');
+        }}
 			
         return [];
 
