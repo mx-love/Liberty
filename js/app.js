@@ -1,6 +1,7 @@
 // 全局变量
 let selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || '["tyyszy","dyttzy", "bfzy", "ruyi"]'); // 默认选中资源
 let customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]'); // 存储自定义API列表
+let mergedSearchGroups = {};
 
 // 添加当前播放的集数索引
 let currentEpisodeIndex = 0;
@@ -8,6 +9,7 @@ let currentEpisodeIndex = 0;
 let currentEpisodes = [];
 // 添加当前视频的标题
 let currentVideoTitle = '';
+let currentVideoYear = ''; // 新增
 // 全局变量用于倒序状态
 let episodesReversed = false;
 
@@ -603,86 +605,326 @@ function getCustomApiInfo(customApiIndex) {
     return customAPIs[index];
 }
 // 优化搜索结果排序：按源分组，同源内按剧集顺序排列
-function optimizeSearchResults(results) {
-    // 按源名称分组
-    const groupedBySource = results.reduce((groups, item) => {
-        const sourceName = item.source_name || '未知来源';
-        if (!groups[sourceName]) {
-            groups[sourceName] = [];
-        }
-        groups[sourceName].push(item);
-        return groups;
-    }, {});
-    
-    // 对每个源内的结果进行排序
-    Object.keys(groupedBySource).forEach(sourceName => {
-        groupedBySource[sourceName].sort((a, b) => {
-            const nameA = a.vod_name || '';
-            const nameB = b.vod_name || '';
-            
-            // 提取剧名主体和季数信息
-            const parseSeriesInfo = (name) => {
-                // 匹配各种季数表示方式：第二季、第2季、S2、Season 2等
-                const seasonMatch = name.match(/(?:第(\d+)季|第([一二三四五六七八九十]+)季|[Ss](?:eason\s*)?(\d+)|(\d+)(?:st|nd|rd|th)?\s*season)/i);
-                
-                let seriesName = name;
-                let seasonNum = 1; // 默认为第一季
-                
-                if (seasonMatch) {
-                    // 移除季数信息，获取纯剧名
-                    seriesName = name.replace(seasonMatch[0], '').trim();
-                    
-                    // 提取季数
-                    if (seasonMatch[1]) {
-                        seasonNum = parseInt(seasonMatch[1]);
-                    } else if (seasonMatch[2]) {
-                        // 中文数字转换
-                        const chineseNums = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10};
-                        seasonNum = chineseNums[seasonMatch[2]] || 1;
-                    } else if (seasonMatch[3]) {
-                        seasonNum = parseInt(seasonMatch[3]);
-                    } else if (seasonMatch[4]) {
-                        seasonNum = parseInt(seasonMatch[4]);
-                    }
-                }
-                
-                return { seriesName, seasonNum };
-            };
-            
-            const infoA = parseSeriesInfo(nameA);
-            const infoB = parseSeriesInfo(nameB);
-            
-            // 提取年份信息
-            const getYear = (item) => {
-                const year = item.vod_year || '';
-                return year ? parseInt(year) : 0;
-            };
-            
-            const yearA = getYear(a);
-            const yearB = getYear(b);
-            
-            // 首先按年份倒序排列（新年份在前）
-            if (yearA !== yearB) {
-                return yearB - yearA;
+// 搜索结果优化：严格合并同一部内容，避免电影/电视剧串源
+function searchNormalizeV2(text) {
+    return (text || '')
+        .toString()
+        .toLowerCase()
+        .replace(/[·・\s\-_—~～,，.。:：;；!！?？'"“”‘’()[\]（）【】《》]/g, '')
+        .trim();
+}
+
+function getSearchYearV2(item) {
+    const y = parseInt(item.vod_year || '0', 10);
+    return Number.isFinite(y) ? y : 0;
+}
+
+function getSearchCoreTitleV2(item) {
+    let name = searchNormalizeV2(item.vod_name);
+
+    name = name
+        .replace(/第[一二三四五六七八九十\d]+季/g, '')
+        .replace(/season\d+/g, '')
+        .replace(/s\d+/g, '')
+        .replace(/第\d+集/g, '')
+        .replace(/\d+集全/g, '')
+        .replace(/全\d+集/g, '')
+        .replace(/更新至\d+集/g, '')
+        .replace(/完结/g, '')
+        .replace(/全集/g, '')
+        .replace(/高清/g, '')
+        .replace(/蓝光/g, '')
+        .replace(/国语/g, '')
+        .replace(/粤语/g, '')
+        .replace(/hd/g, '')
+        .replace(/bd/g, '')
+        .replace(/正片/g, '')
+        .trim();
+
+    return name;
+}
+
+function getSearchCategoryV2(item) {
+    const type = searchNormalizeV2(item.type_name);
+    const name = searchNormalizeV2(item.vod_name);
+    const remarks = searchNormalizeV2(item.vod_remarks);
+
+    const hasEpisodeSignal =
+        /第\d+集/.test(remarks) ||
+        /更新至\d+集/.test(remarks) ||
+        /\d+集全/.test(remarks) ||
+        /全\d+集/.test(remarks) ||
+        remarks.includes('完结') ||
+        remarks.includes('全集');
+
+    const hasMovieSignal =
+        remarks.includes('正片') ||
+        remarks.includes('hd') ||
+        remarks.includes('bd') ||
+        remarks.includes('蓝光') ||
+        remarks.includes('tc');
+
+    if (
+        type.includes('电影') ||
+        type.includes('喜剧片') ||
+        type.includes('动作片') ||
+        type.includes('剧情片') ||
+        type.includes('科幻片') ||
+        type.includes('爱情片') ||
+        type.includes('恐怖片') ||
+        type.includes('战争片') ||
+        type.includes('纪录片')
+    ) {
+        return 'movie';
+    }
+
+    if (
+        type.includes('国产剧') ||
+        type.includes('大陆剧') ||
+        type.includes('电视剧') ||
+        type.includes('美剧') ||
+        type.includes('欧美剧') ||
+        type.includes('韩剧') ||
+        type.includes('日剧') ||
+        type.includes('港剧') ||
+        type.includes('台剧') ||
+        type.includes('泰剧') ||
+        hasEpisodeSignal
+    ) {
+        return 'series';
+    }
+
+    if (type.includes('动漫') || type.includes('动画') || name.includes('动漫')) {
+        return 'anime';
+    }
+
+    if (type.includes('综艺') || remarks.includes('综艺')) {
+        return 'variety';
+    }
+
+    if (hasMovieSignal && !hasEpisodeSignal) {
+        return 'movie';
+    }
+
+    return 'unknown';
+}
+
+function getEpisodeBucketV2(item) {
+    const category = getSearchCategoryV2(item);
+    const remarks = searchNormalizeV2(item.vod_remarks);
+
+    if (category === 'movie') return 'movie';
+
+    const match =
+        remarks.match(/第(\d+)集/) ||
+        remarks.match(/更新至(\d+)集/) ||
+        remarks.match(/(\d+)集全/) ||
+        remarks.match(/全(\d+)集/);
+
+    if (!match) {
+        return category === 'series' ? 'series_unknown' : 'unknown';
+    }
+
+    const count = parseInt(match[1], 10);
+
+    if (!Number.isFinite(count)) return 'unknown';
+    if (count <= 1) return 'single';
+    if (count <= 12) return 'series_2_12';
+    if (count <= 24) return 'series_13_24';
+    if (count <= 60) return 'series_25_60';
+
+    return 'series_60_plus';
+}
+
+function getSourceWeightV2(sourceCode) {
+    const weights = {
+        wujin: 35,
+        ruyi: 32,
+        bfzy: 30,
+        tyyszy: 28,
+        dyttzy: 25,
+        jisu: 22,
+        wolong: 20,
+        zuid: 18,
+        dbzy: 16,
+        ffzy: 14,
+        ikun: 12
+    };
+
+    return weights[sourceCode] || 0;
+}
+
+function scoreSearchItemV2(item, query) {
+    const q = searchNormalizeV2(query);
+    const name = searchNormalizeV2(item.vod_name);
+    const remarks = searchNormalizeV2(item.vod_remarks);
+    const type = searchNormalizeV2(item.type_name);
+    const year = getSearchYearV2(item);
+
+    let score = 0;
+
+    if (name === q) score += 1000;
+    else if (name.startsWith(q)) score += 800;
+    else if (name.includes(q)) score += 600;
+
+    if (type.includes(q)) score += 60;
+
+    if (remarks.includes('完结') || remarks.includes('全集')) score += 50;
+    if (remarks.includes('hd') || remarks.includes('高清') || remarks.includes('正片')) score += 25;
+    if (remarks.includes('更新')) score += 15;
+
+    if (item.vod_pic && /^https?:\/\//.test(item.vod_pic)) score += 20;
+
+    if (year >= 2024) score += 16;
+    else if (year >= 2020) score += 12;
+    else if (year >= 2010) score += 8;
+    else if (year > 0) score += 4;
+
+    score += getSourceWeightV2(item.source_code);
+
+    const badWords = ['解说', '预告', '花絮', '片段', '资讯', '短剧'];
+    if (badWords.some(w => name.includes(w) || type.includes(w))) {
+        score -= 150;
+    }
+
+    return score;
+}
+
+function canMergeSearchItemsV2(a, b) {
+    const titleA = getSearchCoreTitleV2(a);
+    const titleB = getSearchCoreTitleV2(b);
+
+    if (!titleA || !titleB) return false;
+    if (titleA !== titleB) return false;
+
+    const categoryA = getSearchCategoryV2(a);
+    const categoryB = getSearchCategoryV2(b);
+
+    // 类型不明确时不合并，避免误把电影和电视剧揉在一起
+    if (categoryA === 'unknown' || categoryB === 'unknown') return false;
+
+    // 电影、电视剧、动漫、综艺必须类型一致才合并
+    if (categoryA !== categoryB) return false;
+
+    const yearA = getSearchYearV2(a);
+    const yearB = getSearchYearV2(b);
+
+    // 两边都有年份时，年份必须一致
+    if (yearA && yearB && yearA !== yearB) return false;
+
+    const bucketA = getEpisodeBucketV2(a);
+    const bucketB = getEpisodeBucketV2(b);
+
+    // 电影和剧集绝不合并
+    if (bucketA === 'movie' && bucketB !== 'movie') return false;
+    if (bucketB === 'movie' && bucketA !== 'movie') return false;
+
+    // 都有明确集数区间时，区间差太大不合并
+    if (
+        bucketA !== 'unknown' &&
+        bucketB !== 'unknown' &&
+        bucketA !== 'series_unknown' &&
+        bucketB !== 'series_unknown' &&
+        bucketA !== bucketB
+    ) {
+        return false;
+    }
+
+    return true;
+}
+
+function optimizeSearchResults(results, query = '') {
+    if (!Array.isArray(results)) return [];
+
+    const groups = [];
+
+    results.forEach(item => {
+        if (!item || !item.vod_name) return;
+
+        const score = scoreSearchItemV2(item, query);
+
+        const sourceItem = {
+            source_code: item.source_code || '',
+            source_name: item.source_name || '未知资源',
+            vod_id: item.vod_id || '',
+            vod_name: item.vod_name || '',
+            vod_pic: item.vod_pic || '',
+            vod_year: item.vod_year || '',
+            type_name: item.type_name || '',
+            vod_remarks: item.vod_remarks || '',
+            api_url: item.api_url || '',
+            score
+        };
+
+        let matchedGroup = null;
+
+        for (const group of groups) {
+            if (canMergeSearchItemsV2(group.main, item)) {
+                matchedGroup = group;
+                break;
             }
-            
-            // 然后按剧名主体排序
-            const seriesCompare = infoA.seriesName.localeCompare(infoB.seriesName);
-            if (seriesCompare !== 0) return seriesCompare;
-            
-            // 如果是同一部剧，按季数倒序排列（新季在前）
-            return infoB.seasonNum - infoA.seasonNum;
-        });
+        }
+
+        if (!matchedGroup) {
+            const groupId = `group_${groups.length}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+            groups.push({
+                id: groupId,
+                main: {
+                    ...item,
+                    _groupId: groupId,
+                    _searchScore: score,
+                    _mergedSources: [sourceItem],
+                    _mergedCount: 1
+                }
+            });
+            return;
+        }
+
+        const sourceKey = `${sourceItem.source_code}_${sourceItem.vod_id}`;
+        const existsSource = matchedGroup.main._mergedSources.some(
+            s => `${s.source_code}_${s.vod_id}` === sourceKey
+        );
+
+        if (!existsSource) {
+            matchedGroup.main._mergedSources.push(sourceItem);
+            matchedGroup.main._mergedCount = matchedGroup.main._mergedSources.length;
+        }
+
+        // 展示卡片用最高分的信息，但不再强制首选播放源
+        if (score > matchedGroup.main._searchScore) {
+            matchedGroup.main = {
+                ...item,
+                _groupId: matchedGroup.id,
+                _searchScore: score,
+                _mergedSources: matchedGroup.main._mergedSources,
+                _mergedCount: matchedGroup.main._mergedSources.length
+            };
+        }
     });
-    
-    // 将各源的结果按源名称排序后合并
-    const sortedSources = Object.keys(groupedBySource).sort();
-    const finalResults = [];
-    
-    sortedSources.forEach(sourceName => {
-        finalResults.push(...groupedBySource[sourceName]);
+
+    const finalResults = groups.map(group => {
+        group.main._mergedSources.sort((a, b) => b.score - a.score);
+        return group.main;
+    }).sort((a, b) => {
+        if (b._searchScore !== a._searchScore) {
+            return b._searchScore - a._searchScore;
+        }
+
+        const yearDiff = getSearchYearV2(b) - getSearchYearV2(a);
+        if (yearDiff !== 0) return yearDiff;
+
+        return (a.vod_name || '').localeCompare(b.vod_name || '');
     });
-    
+
+    // 保存合并后的资源组，点击卡片时用
+    mergedSearchGroups = {};
+    finalResults.forEach(item => {
+        if (item._groupId) {
+            mergedSearchGroups[item._groupId] = item;
+        }
+    });
+
     return finalResults;
 }
 
@@ -740,13 +982,7 @@ async function search() {
         });
 
         // 优化的排序逻辑：按源分组，同源内按剧集顺序排列
-        allResults = optimizeSearchResults(allResults);
-
-        // 更新搜索结果计数
-        const searchResultsCount = document.getElementById('searchResultsCount');
-        if (searchResultsCount) {
-            searchResultsCount.textContent = allResults.length;
-        }
+        allResults = optimizeSearchResults(allResults, query);
 
         // 显示结果区域，调整搜索区域
         document.getElementById('searchArea').classList.remove('flex-1');
@@ -817,6 +1053,12 @@ async function search() {
             );
         });
 
+		// 更新搜索结果计数
+		const searchResultsCount = document.getElementById('searchResultsCount');
+		if (searchResultsCount) {
+		    searchResultsCount.textContent = allResults.length;
+		}
+
         // 添加XSS保护，使用textContent和属性转义
         const safeResults = allResults.map(item => {
             const safeId = item.vod_id ? item.vod_id.toString().replace(/[^\w-]/g, '') : '';
@@ -824,9 +1066,15 @@ async function search() {
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;');
-            const sourceInfo = item.source_name ?
-                `<span class="bg-[#222] text-xs px-1.5 py-0.5 rounded-full">${item.source_name}</span>` : '';
-            const sourceCode = item.source_code || '';
+            const sourceText = item._mergedCount && item._mergedCount > 1
+			    ? `${item._mergedCount}个可选资源`
+			    : (item.source_name || '');
+			
+			const sourceInfo = sourceText
+			    ? `<span class="bg-[#222] text-xs px-1.5 py-0.5 rounded-full">${sourceText}</span>`
+			    : '';
+			
+			const sourceCode = item.source_code || '';
 
             // 添加API URL属性，用于详情获取
             const apiUrlAttr = item.api_url ?
@@ -837,7 +1085,7 @@ async function search() {
 
             return `
                 <div class="card-hover bg-[#111] rounded-lg overflow-hidden cursor-pointer transition-all hover:scale-[1.02] h-full shadow-sm hover:shadow-md" 
-                     onclick="showDetails('${safeId}','${safeName}','${sourceCode}')" ${apiUrlAttr}>
+				     onclick="${item._mergedCount && item._mergedCount > 1 ? `showSourcePicker('${item._groupId}')` : `showDetails('${safeId}','${safeName}','${sourceCode}')`}" ${apiUrlAttr}>
                     <div class="flex h-full">
                         ${hasCover ? `
                         <div class="relative flex-shrink-0 search-card-img-container">
@@ -943,6 +1191,69 @@ function hookInput() {
 }
 document.addEventListener('DOMContentLoaded', hookInput);
 
+function showSourcePicker(groupId) {
+    const item = mergedSearchGroups[groupId];
+
+    if (!item || !item._mergedSources || item._mergedSources.length === 0) {
+        showToast('没有可用资源，请重新搜索', 'warning');
+        return;
+    }
+
+    const modal = document.getElementById('modal');
+    const modalTitle = document.getElementById('modalTitle');
+    const modalContent = document.getElementById('modalContent');
+
+    const safeTitle = (item.vod_name || '未知视频')
+        .toString()
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    modalTitle.innerHTML = `<span class="break-words">${safeTitle}</span>`;
+
+    const sourcesHtml = item._mergedSources.map((source, index) => {
+        const sourceName = source.source_name || '未知资源';
+        const remarks = source.vod_remarks || item.vod_remarks || '暂无备注';
+        const typeName = source.type_name || item.type_name || '';
+        const year = source.vod_year || item.vod_year || '';
+        const sourceCode = source.source_code || '';
+        const vodId = source.vod_id || '';
+        const vodName = (source.vod_name || item.vod_name || '').replace(/'/g, "\\'");
+
+        return `
+            <button
+                onclick="showDetails('${vodId}', '${vodName}', '${sourceCode}')"
+                class="w-full text-left p-4 rounded-lg bg-[#1b2636] hover:bg-[#223247] border border-[#29445f] transition-all">
+                <div class="flex items-center justify-between gap-3">
+                    <div class="min-w-0">
+                        <div class="font-semibold text-white truncate">
+                            ${index + 1}. ${sourceName}
+                        </div>
+                        <div class="text-xs text-gray-400 mt-1">
+                            ${typeName ? `<span class="mr-2">${typeName}</span>` : ''}
+                            ${year ? `<span class="mr-2">${year}</span>` : ''}
+                            <span>${remarks}</span>
+                        </div>
+                    </div>
+                    <div class="text-sm text-blue-300 flex-shrink-0">
+                        查看
+                    </div>
+                </div>
+            </button>
+        `;
+    }).join('');
+
+    modalContent.innerHTML = `
+        <div class="mb-4 text-sm text-gray-400">
+            找到 ${item._mergedSources.length} 个可用资源。某个源打不开时，返回这里换一个源即可。
+        </div>
+        <div class="space-y-3">
+            ${sourcesHtml}
+        </div>
+    `;
+
+    modal.classList.remove('hidden');
+}
+
 // 显示详情 - 修改为支持自定义API
 async function showDetails(id, vod_name, sourceCode) {
     // 密码保护校验
@@ -1000,6 +1311,7 @@ async function showDetails(id, vod_name, sourceCode) {
         // 不对标题进行截断处理，允许完整显示
         modalTitle.innerHTML = `<span class="break-words">${vod_name || '未知视频'}</span>${sourceName}`;
         currentVideoTitle = vod_name || '未知视频';
+		currentVideoYear = (data.videoInfo && data.videoInfo.year) ? String(data.videoInfo.year) : ''; // 新增
 
         if (data.episodes && data.episodes.length > 0) {
             // 构建详情信息HTML
@@ -1089,7 +1401,7 @@ function playVideo(url, vod_name, sourceCode, episodeIndex = 0, vodId = '') {
     let currentPath = window.location.href;
 
     // 构建播放页面URL，使用watch.html作为中间跳转页
-    let watchUrl = `watch.html?id=${vodId || ''}&source=${sourceCode || ''}&url=${encodeURIComponent(url)}&index=${episodeIndex}&title=${encodeURIComponent(vod_name || '')}`;
+    let watchUrl = `watch.html?id=${vodId || ''}&source=${sourceCode || ''}&url=${encodeURIComponent(url)}&index=${episodeIndex}&title=${encodeURIComponent(vod_name || '')}&year=${encodeURIComponent(currentVideoYear)}`;
 
     // 添加返回URL参数
     if (currentPath.includes('index.html') || currentPath.endsWith('/')) {
@@ -1099,6 +1411,7 @@ function playVideo(url, vod_name, sourceCode, episodeIndex = 0, vodId = '') {
     // 保存当前状态到localStorage
     try {
         localStorage.setItem('currentVideoTitle', vod_name || '未知视频');
+        localStorage.setItem('currentVideoYear', currentVideoYear);
         localStorage.setItem('currentEpisodes', JSON.stringify(currentEpisodes));
         localStorage.setItem('currentEpisodeIndex', episodeIndex);
         localStorage.setItem('currentSourceCode', sourceCode || '');
