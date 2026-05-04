@@ -658,6 +658,132 @@ function buildDanmuMatchFileName(title, episodeIndex) {
     return fileName;
 }
 
+function normalizeDanmuTitleNumberText(value) {
+    return String(value || '')
+        .replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+        .replace(/[①②③④⑤⑥⑦⑧⑨⑩]/g, ch => {
+            const map = {
+                '①': '1', '②': '2', '③': '3', '④': '4', '⑤': '5',
+                '⑥': '6', '⑦': '7', '⑧': '8', '⑨': '9', '⑩': '10'
+            };
+            return map[ch] || ch;
+        })
+        .trim();
+}
+
+function chineseEpisodeNumberToInt(raw) {
+    const s = String(raw || '').trim();
+
+    if (/^\d+$/.test(s)) {
+        return parseInt(s, 10);
+    }
+
+    const map = {
+        '零': 0, '〇': 0,
+        '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,
+        '六': 6, '七': 7, '八': 8, '九': 9
+    };
+
+    if (s === '十') return 10;
+
+    const tenMatch = s.match(/^([一二两三四五六七八九])?十([一二两三四五六七八九])?$/);
+    if (tenMatch) {
+        const tens = tenMatch[1] ? map[tenMatch[1]] : 1;
+        const ones = tenMatch[2] ? map[tenMatch[2]] : 0;
+        return tens * 10 + ones;
+    }
+
+    if (s.length === 1 && map[s] !== undefined) {
+        return map[s];
+    }
+
+    return null;
+}
+
+function isBadEpisodeNumber(n) {
+    if (!Number.isFinite(n)) return true;
+    if (n <= 0 || n > 999) return true;
+
+    // 避免把年份当集数
+    if (n >= 1900 && n <= 2099) return true;
+
+    return false;
+}
+
+function extractEpisodeNumberFromDanmuTitle(title) {
+    const s = normalizeDanmuTitleNumberText(title);
+
+    const patterns = [
+        // S01E02 / s1e2
+        /[Ss]\d{1,2}[Ee]\s*0*(\d{1,4})/,
+
+        // 第2集 / 第2话 / 第2期 / 第十二集
+        /第\s*([一二两三四五六七八九十\d]+)\s*[集话話期回]/,
+
+        // EP02 / E02
+        /(?:^|[\s._-])[Ee][Pp]?\.?\s*0*(\d{1,4})(?=$|[\s._-])/,
+
+        // #第2话# / #2
+        /[#＃]\s*第?\s*([一二两三四五六七八九十\d]+)\s*[集话話期回]?/,
+
+        // 综艺常见：xxx（下）4 / xxx(上)3
+        /[（(](?:上|中|下|前篇|后篇|後篇|part\s*\d+|第[上下中]部分)[）)]\s*0*(\d{1,4})\s*$/i,
+
+        // 标题末尾数字：哥伦比亚亚马逊河（下）4
+        /(?:^|[^\d])0*(\d{1,4})\s*(?:集|话|話|期|回)?\s*$/
+    ];
+
+    for (const pattern of patterns) {
+        const match = s.match(pattern);
+        if (!match) continue;
+
+        const n = chineseEpisodeNumberToInt(match[1]);
+        if (!isBadEpisodeNumber(n)) {
+            return n;
+        }
+    }
+
+    return null;
+}
+
+function pickValidDanmuApiMatch(matches, episodeIndex) {
+    const targetNumber = episodeIndex + 1;
+    const list = Array.isArray(matches)
+        ? matches.filter(m => m && m.episodeId)
+        : [];
+
+    if (list.length === 0) return null;
+
+    const analyzed = list.map(m => ({
+        match: m,
+        episodeNumber: extractEpisodeNumberFromDanmuTitle(m.episodeTitle),
+        title: m.episodeTitle || ''
+    }));
+
+    const exact = analyzed.find(item => item.episodeNumber === targetNumber);
+    if (exact) {
+        return exact.match;
+    }
+
+    const hasExplicitEpisodeNumber = analyzed.some(item => item.episodeNumber !== null);
+
+    if (hasExplicitEpisodeNumber) {
+        console.warn(
+            `⚠️ match 接口返回的集数与当前播放集不一致：当前第${targetNumber}集，拒绝错配结果`,
+            analyzed.map(item => ({
+                title: item.title,
+                parsedEpisode: item.episodeNumber,
+                episodeId: item.match.episodeId
+            }))
+        );
+        return null;
+    }
+
+    // 所有候选都解析不出集数时，才相信 match 接口的第一个结果
+    console.warn(`⚠️ match 候选没有明确集数，暂按接口结果使用：`, list[0]);
+    return list[0];
+}
+
 async function matchDanmuByApi(title, episodeIndex) {
     if (!DANMU_CONFIG.adaptive?.enableMatchApi) return null;
 
@@ -676,9 +802,9 @@ async function matchDanmuByApi(title, episodeIndex) {
         }, 2, 15000);
 
         const data = await response.json();
-        const match = data?.matches?.[0];
-
-        if (data?.isMatched && match?.episodeId) {
+		const match = pickValidDanmuApiMatch(data?.matches, episodeIndex);
+		
+		if (data?.isMatched && match?.episodeId) {
             currentDanmuAnimeId = match.animeId || null;
             currentDanmuSourceName = match.animeTitle || '';
 
@@ -1362,79 +1488,190 @@ function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
 
     const targetNumber = targetIndex + 1;
 
-    const episodesWithInfo = episodes.map((ep, idx) => {
-        const title = ep.episodeTitle || '';
-        let episodeNumber = null;
+    function normalizeEpisodeTitle(title) {
+        return String(title || '')
+            .replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+            .replace(/[①②③④⑤⑥⑦⑧⑨⑩]/g, ch => {
+                const map = {
+                    '①': '1', '②': '2', '③': '3', '④': '4', '⑤': '5',
+                    '⑥': '6', '⑦': '7', '⑧': '8', '⑨': '9', '⑩': '10'
+                };
+                return map[ch] || ch;
+            })
+            .trim();
+    }
 
-        // 按优先级匹配集数
-        for (const pattern of MATCH_CONFIG.episodePatterns) {
-            const match = title.match(pattern);
-            if (match) {
-                episodeNumber = parseInt(match[1]);
-                if (episodeNumber > 0 && episodeNumber <= 9999) {
-                    break;
-                }
+    function chineseNumberToInt(raw) {
+        const s = String(raw || '').trim();
+
+        if (/^\d+$/.test(s)) {
+            return parseInt(s, 10);
+        }
+
+        const map = {
+            '零': 0, '〇': 0,
+            '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,
+            '六': 6, '七': 7, '八': 8, '九': 9
+        };
+
+        if (s === '十') return 10;
+
+        const tenMatch = s.match(/^([一二两三四五六七八九])?十([一二两三四五六七八九])?$/);
+        if (tenMatch) {
+            const tens = tenMatch[1] ? map[tenMatch[1]] : 1;
+            const ones = tenMatch[2] ? map[tenMatch[2]] : 0;
+            return tens * 10 + ones;
+        }
+
+        if (s.length === 1 && map[s] !== undefined) {
+            return map[s];
+        }
+
+        return null;
+    }
+
+    function isValidEpisodeNumber(n) {
+        if (!Number.isFinite(n)) return false;
+        if (n <= 0 || n > 999) return false;
+
+        // 避免把年份当成集数
+        if (n >= 1900 && n <= 2099) return false;
+
+        return true;
+    }
+
+    function extractEpisodeNumber(title) {
+        const s = normalizeEpisodeTitle(title);
+
+        const patterns = [
+            // S01E02 / s1e2
+            /[Ss]\d{1,2}[Ee]\s*0*(\d{1,4})/,
+
+            // 第2集 / 第2话 / 第2期 / 第十二集
+            /第\s*([一二两三四五六七八九十\d]+)\s*[集话話期回]/,
+
+            // EP02 / E02
+            /(?:^|[\s._-])[Ee][Pp]?\.?\s*0*(\d{1,4})(?=$|[\s._-])/,
+
+            // #2 / #第2期
+            /[#＃]\s*第?\s*([一二两三四五六七八九十\d]+)\s*[集话話期回]?/,
+
+            // 综艺常见：xxx（下）4 / xxx(上)3
+            /[（(](?:上|中|下|前篇|后篇|後篇|part\s*\d+|第[上下中]部分)[）)]\s*0*(\d{1,4})\s*$/i,
+
+            // 标题末尾数字：哥伦比亚亚马逊河（下）4
+            /(?:^|[^\d])0*(\d{1,4})\s*(?:集|话|話|期|回)?\s*$/
+        ];
+
+        for (const pattern of patterns) {
+            const match = s.match(pattern);
+            if (!match) continue;
+
+            const n = chineseNumberToInt(match[1]);
+            if (isValidEpisodeNumber(n)) {
+                return n;
             }
         }
 
         // 特殊处理：纯数字标题
-        if (!episodeNumber && /^\d+$/.test(title.trim())) {
-            episodeNumber = parseInt(title.trim());
+        if (/^\d+$/.test(s)) {
+            const n = parseInt(s, 10);
+            if (isValidEpisodeNumber(n)) {
+                return n;
+            }
         }
+
+        return null;
+    }
+
+    const episodesWithInfo = episodes.map((ep, idx) => {
+        const title = ep.episodeTitle || '';
+        const episodeNumber = extractEpisodeNumber(title);
 
         return {
             episode: ep,
-            number: episodeNumber !== null ? episodeNumber : (idx + 1),
-            title: title,
+            number: episodeNumber,
+            title,
             index: idx,
             confidence: episodeNumber !== null ? 'high' : 'low'
         };
     });
 
-    // 策略1: 精确匹配
-    const exactMatch = episodesWithInfo.find(ep => 
+    // 策略1：标题里能解析出明确集数，并且集数刚好等于当前播放集
+    const exactMatch = episodesWithInfo.find(ep =>
         ep.number === targetNumber && ep.confidence === 'high'
     );
+
     if (exactMatch) {
         console.log(`✅ [弹幕] 精确匹配 第${targetNumber}集: ${exactMatch.title}`);
         return exactMatch.episode;
     }
 
-    // 策略2: 索引匹配（检查连续性）
+    // 策略2：只要弹幕标题里存在明确集数，但没有命中当前集，就直接拒绝
+    // 例如当前第2集，候选是“xxx（下）4”，不能继续按索引兜底
+    const explicitEpisodes = episodesWithInfo.filter(ep => ep.confidence === 'high');
+
+    if (explicitEpisodes.length > 0) {
+        console.warn(
+            `⚠️ [弹幕] 未找到明确的第${targetNumber}集，拒绝索引/模糊兜底，避免错配。可用集数：`,
+            explicitEpisodes.map(ep => ({
+                index: ep.index,
+                number: ep.number,
+                title: ep.title,
+                episodeId: ep.episode?.episodeId
+            }))
+        );
+        return null;
+    }
+
+    // 策略3：所有弹幕标题都解析不出明确集数，才允许按索引匹配
     if (targetIndex >= 0 && targetIndex < episodes.length) {
         const indexMatch = episodesWithInfo[targetIndex];
 
-        // 检查集数是否连续
-        const isSequential = episodesWithInfo.every((ep, i) => {
-            if (i === 0) return true;
-            return ep.number === episodesWithInfo[i - 1].number + 1;
-        });
+        console.warn(
+            `⚠️ [弹幕] 弹幕标题没有明确集数，暂按索引匹配：当前第${targetNumber}集 → 候选索引${targetIndex}`,
+            {
+                title: indexMatch.title,
+                episodeId: indexMatch.episode?.episodeId
+            }
+        );
 
-        if (isSequential || indexMatch.confidence === 'high') {
-            console.log(`✅ [弹幕] 索引匹配 第${targetNumber}集 → 弹幕第${indexMatch.number}集`);
-            return indexMatch.episode;
-        }
+        return indexMatch.episode;
     }
 
-    // 策略3: 模糊匹配（±1偏差）
-    const fuzzyMatch = episodesWithInfo.find(ep => 
-        Math.abs(ep.number - targetNumber) <= 1 && ep.confidence === 'high'
-    );
-    if (fuzzyMatch) {
-        console.log(`⚠️ [弹幕] 模糊匹配 第${targetNumber}集 → 弹幕第${fuzzyMatch.number}集 (±1)`);
-        return fuzzyMatch.episode;
-    }
-
-    // 策略4：最终兜底 - 直接按索引返回，总比返回null强
-    if (targetIndex >= 0 && targetIndex < episodes.length) {
-        console.warn(`⚠️ [弹幕] 兜底匹配：直接使用索引${targetIndex}`);
-        return episodes[targetIndex];
-    }
-
-    console.error(`❌ [弹幕] 无法匹配第${targetNumber}集 (共${episodes.length}集)`);
-    console.log('可用集数:', episodesWithInfo.map(e => `${e.index}:${e.number}`));
+    console.error(`❌ [弹幕] 无法匹配第${targetNumber}集，共${episodes.length}集`);
+    console.log('可用弹幕:', episodesWithInfo.map(e => ({
+        index: e.index,
+        number: e.number,
+        confidence: e.confidence,
+        title: e.title
+    })));
 
     return null;
+}
+
+function pickMatchedDanmuEpisode(episodes, episodeIndex, title) {
+    if (!episodes || episodes.length === 0) return null;
+
+    const playerEpisodeCount = Array.isArray(currentEpisodes)
+        ? currentEpisodes.length
+        : 0;
+
+    // 弹幕源只有 1 集，通常是电影 / 单集内容
+    // 但如果当前视频本身是多集剧/动漫/综艺，就不要把单集弹幕源套到每一集上
+    if (episodes.length === 1) {
+        if (playerEpisodeCount <= 1) {
+            console.log('✅ [弹幕] 单集内容，直接使用唯一弹幕剧集');
+            return episodes[0];
+        }
+
+        console.warn(
+            `⚠️ [弹幕] 弹幕源只有1集，但当前视频有${playerEpisodeCount}集，拒绝单集源兜底，避免错配`
+        );
+        return null;
+    }
+
+    return findBestEpisodeMatch(episodes, episodeIndex, title);
 }
 
 // ✅ 优化后的弹幕获取函数 - 解决主线程阻塞
@@ -1806,9 +2043,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                 // 用户选定的源有效，走这条路径
                 animeId = currentDanmuAnimeId;
 
-                const matchedEpisode = isMovieContent(episodes[0])
-                    ? episodes[0]
-                    : findBestEpisodeMatch(episodes, episodeIndex, title);
+                const matchedEpisode = pickMatchedDanmuEpisode(episodes, episodeIndex, title);
 
                 if (!matchedEpisode) {
                     console.warn(`⚠️ 用户选定源无法匹配第${episodeIndex + 1}集，降级自动搜索`);
@@ -1871,9 +2106,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
         }
 
         // ⑤ 匹配集数并获取弹幕
-        const matchedEpisode = isMovieContent(episodes[0])
-            ? episodes[0]
-            : findBestEpisodeMatch(episodes, episodeIndex, title);
+        const matchedEpisode = pickMatchedDanmuEpisode(episodes, episodeIndex, title);
 
         if (!matchedEpisode) {
             console.warn(`⚠️ 无法匹配第${episodeIndex + 1}集`);
@@ -4744,7 +4977,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
             return;
         }
 
-        const matchedEpisode = findBestEpisodeMatch(episodes, currentEpisodeIndex, currentVideoTitle);
+        const matchedEpisode = pickMatchedDanmuEpisode(episodes, currentEpisodeIndex, currentVideoTitle);
         
 
         if (!matchedEpisode) {
