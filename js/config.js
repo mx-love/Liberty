@@ -30,18 +30,26 @@ const API_SITES = {
         api: 'https://cj.rycjapi.com',
         name: '如意资源',
     },
+    yaya: {
+        api: 'https://cj.yayazy.net',
+        name: '鸭鸭资源',
+    },
+   maotai: {
+        api: 'https://caiji.maotaizy.cc',
+        name: '茅台资源',
+    },
     bfzy: {
         api: 'https://bfzyapi.com',
         name: '暴风资源',
-    },
-    guangsu: {
-        api: 'https://api.guangsuapi.com/api.php/provide/vod',
-        name: '光速',
     },
     tyyszy: {
         api: 'https://tyyszy.com',
         name: '天涯资源',
     },
+guangsu: {
+    api: 'https://api.guangsuapi.com',
+    name: '光速',
+},
     ffzy: {
         api: 'https://cj.ffzyapi.com/api.php/provide/vod',
         name: '非凡资源',
@@ -63,11 +71,11 @@ const API_SITES = {
         detail: 'https://jszyapi.com',
     },
     dbzy: {
-        api: 'https://dbzy.tv/api.php/provide/vod',
+        api: 'https://dbzy.tv',
         name: '豆瓣资源',
     },
     mozhua: {
-        api: 'https://mozhuazy.com',
+        api: 'https://caiji.dbzy5.com/api.php/provide/vod',
         name: '魔爪资源',
     },
     mdzy: {
@@ -119,7 +127,7 @@ const API_SITES = {
 const AGGREGATED_SEARCH_CONFIG = {
     enabled: true,             // 是否启用聚合搜索
     timeout: 8000,            // 单个源超时时间（毫秒）
-    maxResults: 10000,          // 最大结果数量
+    maxResults: 200,          // 最大结果数量
     parallelRequests: true,   // 是否并行请求所有源
     showSourceBadges: true    // 是否显示来源徽章
 };
@@ -130,7 +138,7 @@ const API_CONFIG = {
         // 修改搜索接口支持分页参数
         path: '/api.php/provide/vod/?ac=videolist&wd=',
         pagePath: '/api.php/provide/vod/?ac=videolist&wd={query}&pg={page}',
-        maxPages: 50, // 最大获取页数
+        maxPages: 3, // 最大获取页数
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             'Accept': 'application/json'
@@ -196,3 +204,9 @@ const CUSTOM_API_CONFIG = {
 
 // 隐藏内置黄色采集站API的变量
 const HIDE_BUILTIN_ADULT_APIS = false;
+
+// config.js 文件末尾
+window.extendAPISites = function(customSites) {
+    Object.assign(API_SITES, customSites);
+    console.log('已加载自定义站点:', Object.keys(customSites));
+};
