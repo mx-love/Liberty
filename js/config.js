@@ -22,17 +22,12 @@ const SITE_CONFIG = {
 // API站点配置
 const API_SITES = {
     dyttzy: {
-        api: 'http://caiji.dyttzyapi.com',
+        api: 'https://caiji.dyttzyapi.com',
         name: '电影天堂资源',
-        detail: 'http://caiji.dyttzyapi.com',
     },
     ruyi: {
         api: 'https://cj.rycjapi.com',
         name: '如意资源',
-    },
-    yaya: {
-        api: 'https://cj.yayazy.net',
-        name: '鸭鸭资源',
     },
    maotai: {
         api: 'https://caiji.maotaizy.cc',
