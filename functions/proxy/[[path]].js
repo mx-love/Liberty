@@ -49,6 +49,7 @@ export async function onRequest(context) {
     const DEBUG_ENABLED = (env.DEBUG === 'true');
     const CACHE_TTL = parseInt(env.CACHE_TTL || '86400'); // 默认 24 小时
     const MAX_RECURSION = parseInt(env.MAX_RECURSION || '5'); // 默认 5 层
+    const PROXY_MEDIA_SEGMENTS = env.PROXY_MEDIA_SEGMENTS === 'true'; // 默认直连媒体分片
     // 广告过滤已移至播放器处理，代理不再执行
     let USER_AGENTS = [ // 提供一个基础的默认值
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -241,6 +242,50 @@ export async function onRequest(context) {
         return `/proxy/${encodeURIComponent(targetUrl)}`;
     }
 
+    function isMediaSegmentUrl(url) {
+        return /\.(ts|m4s|mp4|m4v|m4a|aac|webm)(?:\?|$)/i.test(url || '');
+    }
+
+    function isProxyTextAssetUrl(url) {
+        return /\.(m3u8|key|vtt|srt|ass)(?:\?|$)/i.test(url || '');
+    }
+
+    function shouldProxyPlaylistLine(absoluteUrl) {
+        if (isProxyTextAssetUrl(absoluteUrl)) return true;
+        if (isMediaSegmentUrl(absoluteUrl)) return PROXY_MEDIA_SEGMENTS;
+        return true;
+    }
+
+    async function createBinaryProxyResponse(targetUrl, request) {
+        const targetOrigin = new URL(targetUrl).origin;
+        const headers = new Headers();
+
+        headers.set('User-Agent', request.headers.get('User-Agent') || getRandomUserAgent());
+        headers.set('Accept', '*/*');
+        headers.set('Accept-Language', request.headers.get('Accept-Language') || 'zh-CN,zh;q=0.9,en;q=0.8');
+        headers.set('Referer', request.headers.get('Referer') || `${targetOrigin}/`);
+
+        const range = request.headers.get('Range');
+        if (range) headers.set('Range', range);
+
+        const upstream = await fetch(targetUrl, {
+            method: request.method === 'HEAD' ? 'HEAD' : 'GET',
+            headers,
+            redirect: 'follow',
+        });
+
+        const responseHeaders = new Headers(upstream.headers);
+        responseHeaders.set('Access-Control-Allow-Origin', '*');
+        responseHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        responseHeaders.set('Access-Control-Allow-Headers', '*');
+
+        return new Response(request.method === 'HEAD' ? null : upstream.body, {
+            status: upstream.status,
+            statusText: upstream.statusText,
+            headers: responseHeaders,
+        });
+    }
+
     // 获取远程内容及其类型
     async function fetchContentWithType(targetUrl) {
         const headers = new Headers({
@@ -319,7 +364,9 @@ export async function onRequest(context) {
          return line.replace(/URI="([^"]+)"/, (match, uri) => {
              const absoluteUri = resolveUrl(baseUrl, uri);
              logDebug(`处理 MAP URI: 原始='${uri}', 绝对='${absoluteUri}'`);
-             return `URI="${rewriteUrlToProxy(absoluteUri)}"`; // 重写为代理路径
+             return shouldProxyPlaylistLine(absoluteUri)
+                ? `URI="${rewriteUrlToProxy(absoluteUri)}"`
+                : `URI="${absoluteUri}"`;
          });
      }
 
@@ -352,8 +399,12 @@ export async function onRequest(context) {
              }
              if (!line.startsWith('#')) {
                  const absoluteUrl = resolveUrl(baseUrl, line);
-                 logDebug(`重写媒体片段: 原始='${line}', 绝对='${absoluteUrl}'`);
-                 output.push(rewriteUrlToProxy(absoluteUrl));
+                 logDebug(`处理播放列表资源: 原始='${line}', 绝对='${absoluteUrl}'`);
+                 output.push(
+                    shouldProxyPlaylistLine(absoluteUrl)
+                        ? rewriteUrlToProxy(absoluteUrl)
+                        : absoluteUrl
+                 );
                  continue;
              }
              // 其他 M3U8 标签直接添加
@@ -493,6 +544,11 @@ export async function onRequest(context) {
         }
 
         logDebug(`收到代理请求: ${targetUrl}`);
+
+        if (isMediaSegmentUrl(targetUrl)) {
+            logDebug(`媒体分片使用二进制流式代理，不读入文本、不写 KV: ${targetUrl}`);
+            return createBinaryProxyResponse(targetUrl, request);
+        }
 
         // --- 缓存检查 (KV) ---
         const cacheKey = `proxy_raw:${targetUrl}`; // 使用原始内容的缓存键

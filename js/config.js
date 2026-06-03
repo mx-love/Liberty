@@ -120,9 +120,9 @@ guangsu: {
 
 // 添加聚合搜索的配置选项
 const AGGREGATED_SEARCH_CONFIG = {
-    enabled: true,             // 是否启用聚合搜索
-    timeout: 8000,            // 单个源超时时间（毫秒）
-    maxResults: 200,          // 最大结果数量
+    enabled: false,            // 保留配置项，但搜索结果默认不再跨源聚合
+    timeout: 6000,             // 单个源超时时间（毫秒）
+    maxResults: 120,           // 最大结果数量
     parallelRequests: true,   // 是否并行请求所有源
     showSourceBadges: true    // 是否显示来源徽章
 };
@@ -133,7 +133,7 @@ const API_CONFIG = {
         // 修改搜索接口支持分页参数
         path: '/api.php/provide/vod/?ac=videolist&wd=',
         pagePath: '/api.php/provide/vod/?ac=videolist&wd={query}&pg={page}',
-        maxPages: 3, // 最大获取页数
+        maxPages: 1, // 最大获取页数
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             'Accept': 'application/json'
@@ -166,6 +166,13 @@ const PLAYER_CONFIG = {
     autoPlayNext: true,  // 默认启用自动连播功能
     adFilteringEnabled: true, // 默认开启分片广告过滤
     adFilteringStorage: 'adFilteringEnabled' // 存储广告过滤设置的键名
+};
+
+window.DANMU_CONFIG = {
+    enabled: false,
+    baseUrl: '',
+    strictAutoLoad: true,
+    maxDurationDiffRatio: 0.08,
 };
 
 // 增加错误信息本地化

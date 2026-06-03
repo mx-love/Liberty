@@ -833,80 +833,103 @@ function canMergeSearchItemsV2(a, b) {
     return true;
 }
 
+function searchNormalizeFlat(text) {
+    return (text || '')
+        .toString()
+        .toLowerCase()
+        .replace(/[·・\s\-_—~～,，.。:：;；!！?？'"“”‘’()[\]（）〖〗《》]/g, '')
+        .trim();
+}
+
+function getFlatSourceWeight(sourceCode) {
+    const weights = {
+        ruyi: 32,
+        bfzy: 30,
+        tyyszy: 28,
+        dyttzy: 25,
+        wujin: 24,
+        jisu: 22,
+        wolong: 18,
+        zuid: 16,
+        dbzy: 14,
+        ffzy: 12,
+    };
+    return weights[sourceCode] || 0;
+}
+
+function getFlatSearchScore(item, query) {
+    const q = searchNormalizeFlat(query);
+    const name = searchNormalizeFlat(item.vod_name);
+    const remarks = searchNormalizeFlat(item.vod_remarks);
+    const type = searchNormalizeFlat(item.type_name);
+    const year = parseInt(item.vod_year || '0', 10) || 0;
+
+    let score = 0;
+
+    if (q && name === q) score += 1000;
+    else if (q && name.startsWith(q)) score += 800;
+    else if (q && name.includes(q)) score += 500;
+    else if (q) score -= 100;
+
+    if (remarks.includes('完结') || remarks.includes('全集')) score += 40;
+    if (
+        remarks.includes('高清') ||
+        remarks.includes('蓝光') ||
+        remarks.includes('hd') ||
+        remarks.includes('bd') ||
+        remarks.includes('正片')
+    ) {
+        score += 20;
+    }
+
+    if (year >= 2024) score += 16;
+    else if (year >= 2020) score += 12;
+    else if (year >= 2010) score += 8;
+    else if (year > 0) score += 4;
+
+    if (item.vod_pic && /^https?:\/\//.test(item.vod_pic)) score += 10;
+
+    const badWords = ['解说', '预告', '花絮', '片段', '资讯', '短剧'];
+    if (badWords.some((word) => name.includes(word) || type.includes(word))) {
+        score -= 180;
+    }
+
+    score += getFlatSourceWeight(item.source_code);
+
+    return score;
+}
+
 function optimizeSearchResults(results, query = '') {
     if (!Array.isArray(results)) return [];
 
-    const groups = [];
+    const seen = new Set();
+    const flatResults = [];
 
-    results.forEach(item => {
+    results.forEach((item, index) => {
         if (!item || !item.vod_name) return;
 
-        const score = scoreSearchItemV2(item, query);
+        const sourceCode = item.source_code || '';
+        const apiUrl = item.api_url || '';
+        const vodId = item.vod_id || '';
+        const dedupeKey = vodId
+            ? `${sourceCode}:${apiUrl}:${vodId}`
+            : `${sourceCode}:${apiUrl}:missing-id:${index}`;
 
-        const sourceItem = {
-            source_code: item.source_code || '',
-            source_name: item.source_name || '未知资源',
-            vod_id: item.vod_id || '',
-            vod_name: item.vod_name || '',
-            vod_pic: item.vod_pic || '',
-            vod_year: item.vod_year || '',
-            type_name: item.type_name || '',
-            vod_remarks: item.vod_remarks || '',
-            api_url: item.api_url || '',
-            score
-        };
+        if (seen.has(dedupeKey)) return;
+        seen.add(dedupeKey);
 
-        let matchedGroup = null;
-
-        for (const group of groups) {
-            if (canMergeSearchItemsV2(group.main, item)) {
-                matchedGroup = group;
-                break;
-            }
-        }
-
-        if (!matchedGroup) {
-            const groupId = `group_${groups.length}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-            groups.push({
-                id: groupId,
-                main: {
-                    ...item,
-                    _groupId: groupId,
-                    _searchScore: score,
-                    _mergedSources: [sourceItem],
-                    _mergedCount: 1
-                }
-            });
-            return;
-        }
-
-        const sourceKey = `${sourceItem.source_code}_${sourceItem.vod_id}`;
-        const existsSource = matchedGroup.main._mergedSources.some(
-            s => `${s.source_code}_${s.vod_id}` === sourceKey
-        );
-
-        if (!existsSource) {
-            matchedGroup.main._mergedSources.push(sourceItem);
-            matchedGroup.main._mergedCount = matchedGroup.main._mergedSources.length;
-        }
-
-        // 展示卡片用最高分的信息，但不再强制首选播放源
-        if (score > matchedGroup.main._searchScore) {
-            matchedGroup.main = {
-                ...item,
-                _groupId: matchedGroup.id,
-                _searchScore: score,
-                _mergedSources: matchedGroup.main._mergedSources,
-                _mergedCount: matchedGroup.main._mergedSources.length
-            };
-        }
+        flatResults.push({
+            ...item,
+            _mergedCount: 1,
+            _mergedSources: null,
+            _groupId: '',
+            _searchScore: getFlatSearchScore(item, query)
+        });
     });
 
-    const finalResults = groups.map(group => {
-        group.main._mergedSources.sort((a, b) => b.score - a.score);
-        return group.main;
-    }).sort((a, b) => {
+    mergedSearchGroups = {};
+
+    return flatResults.sort((a, b) => {
         if (b._searchScore !== a._searchScore) {
             return b._searchScore - a._searchScore;
         }
@@ -914,18 +937,11 @@ function optimizeSearchResults(results, query = '') {
         const yearDiff = getSearchYearV2(b) - getSearchYearV2(a);
         if (yearDiff !== 0) return yearDiff;
 
+        const sourceDiff = getFlatSourceWeight(b.source_code) - getFlatSourceWeight(a.source_code);
+        if (sourceDiff !== 0) return sourceDiff;
+
         return (a.vod_name || '').localeCompare(b.vod_name || '');
     });
-
-    // 保存合并后的资源组，点击卡片时用
-    mergedSearchGroups = {};
-    finalResults.forEach(item => {
-        if (item._groupId) {
-            mergedSearchGroups[item._groupId] = item;
-        }
-    });
-
-    return finalResults;
 }
 
 // 搜索功能 - 修改为支持多选API和多页结果
@@ -1066,9 +1082,10 @@ async function search() {
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;');
-            const sourceText = item._mergedCount && item._mergedCount > 1
-			    ? `${item._mergedCount}个可选资源`
-			    : (item.source_name || '');
+            const safeNameForJs = safeName
+                .replace(/\\/g, '\\\\')
+                .replace(/'/g, "\\'");
+            const sourceText = item.source_name || '';
 			
 			const sourceInfo = sourceText
 			    ? `<span class="bg-[#222] text-xs px-1.5 py-0.5 rounded-full">${sourceText}</span>`
@@ -1085,7 +1102,7 @@ async function search() {
 
             return `
                 <div class="card-hover bg-[#111] rounded-lg overflow-hidden cursor-pointer transition-all hover:scale-[1.02] h-full shadow-sm hover:shadow-md" 
-				     onclick="${item._mergedCount && item._mergedCount > 1 ? `showSourcePicker('${item._groupId}')` : `showDetails('${safeId}','${safeName}','${sourceCode}')`}" ${apiUrlAttr}>
+				     onclick="showDetails('${safeId}','${safeNameForJs}','${sourceCode}')" ${apiUrlAttr}>
                     <div class="flex h-full">
                         ${hasCover ? `
                         <div class="relative flex-shrink-0 search-card-img-container">
