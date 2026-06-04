@@ -169,8 +169,8 @@ const PLAYER_CONFIG = {
 };
 
 window.DANMU_CONFIG = {
-    enabled: false,
-    baseUrl: '',
+    enabled: true,
+    baseUrl: '/api/danmu',
     strictAutoLoad: true,
     maxDurationDiffRatio: 0.08,
 };
