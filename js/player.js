@@ -5122,16 +5122,16 @@ async function showDanmuSourceModal() {
 		html += `
 			<button
 				onclick="switchDanmuSource('${source.animeId}', '${encodeURIComponent(source.animeTitle)}')"
-				class="w-full text-left px-4 py-3 rounded-lg transition-all ${
+				class="danmu-source-button w-full text-left px-4 py-3 rounded-lg transition-all ${
 					isActive 
 						? 'bg-blue-600 text-white shadow-lg border-2 border-blue-400' 
 						: 'bg-gray-800 hover:bg-gray-700 text-gray-200 border-2 border-transparent'
 				}">
-                    <div class="flex items-center justify-between">
-                        <div class="font-medium">${source.animeTitle}</div>
-                        ${isActive ? '<span class="text-yellow-300 text-sm">✓ 当前使用</span>' : ''}
+                    <div class="flex items-center justify-between gap-2 min-w-0">
+                        <div class="danmu-source-name font-medium min-w-0">${source.animeTitle}</div>
+                        ${isActive ? '<span class="danmu-source-badge text-yellow-300 text-sm shrink-0">✓ 当前使用</span>' : ''}
                     </div>
-                    <div class="text-sm opacity-75 mt-1">
+                    <div class="danmu-source-meta text-sm opacity-75 mt-1">
                         ${typeInfo} · ${source.episodeCount} 集 · 相似度: ${(similarity * 100).toFixed(0)}%
                     </div>
                 </button>

@@ -1849,8 +1849,8 @@ async function showDetails(id, vod_name, sourceCode) {
                 <div id="playSourceContainer">
                     ${renderPlaySourceButtons(sourceCode, id)}
                 </div>
-                <div class="flex flex-wrap items-center justify-between mb-4 gap-2">
-                    <div class="flex items-center gap-2">
+                <div class="detail-episode-actions flex flex-wrap items-center justify-between mb-4 gap-2">
+                    <div class="episode-toolbar flex items-center gap-2">
                         <button onclick="toggleEpisodeOrder('${sourceCode}', '${id}')" 
                                 class="px-3 py-1.5 bg-[#333] hover:bg-[#444] border border-[#444] rounded text-sm transition-colors flex items-center gap-1">
                             <svg class="w-4 h-4 transform ${episodesReversed ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1858,9 +1858,9 @@ async function showDetails(id, vod_name, sourceCode) {
                             </svg>
                             <span>${episodesReversed ? '正序排列' : '倒序排列'}</span>
                         </button>
-                        <span id="episodeStats" class="text-gray-400 text-sm">当前源共 ${currentEpisodes.length} 集${getCurrentPlaySourceName() ? ` · 当前源：${escapeHtml(getCurrentPlaySourceName())}` : ''}</span>
+                        <span id="episodeStats" class="episode-summary text-gray-400 text-sm">当前源共 ${currentEpisodes.length} 集${getCurrentPlaySourceName() ? ` · 当前源：${escapeHtml(getCurrentPlaySourceName())}` : ''}</span>
                     </div>
-                    <button onclick="copyLinks()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition-colors">
+                    <button onclick="copyLinks()" class="detail-copy-links px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition-colors">
                         复制链接
                     </button>
                 </div>

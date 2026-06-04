@@ -545,11 +545,95 @@ button:disabled::before {
     }
 
     .resource-info-bar-left {
+        min-width: 0;
         font-size: 1rem;
+        flex: 1 1 100%;
+        flex-wrap: wrap;
+        gap: 0.25rem 0.5rem;
     }
 
     .resource-info-bar-videos {
         font-size: 0.85rem;
+        margin-left: 0;
+        flex-shrink: 0;
+    }
+
+    #resourceInfoBarContainer {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: flex-start;
+        padding: 0.75rem;
+    }
+
+    #resourceInfoBarContainer > * {
+        min-width: 0;
+    }
+
+    #resourceInfoBarContainer .resource-info-bar-left > span:first-child {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 100%;
+    }
+
+    #resourceInfoBarContainer .resource-switch-btn {
+        width: 100%;
+        justify-content: center;
+        padding: 9px 12px;
+    }
+
+    #prevButton,
+    #nextButton {
+        min-width: 0;
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+    }
+
+    #episodeInfo {
+        min-width: 0;
+        text-align: center;
+        font-size: 0.875rem;
+    }
+
+    .player-container:has(#autoplayToggle) > .flex {
+        align-items: stretch;
+        gap: 0.5rem;
+    }
+
+    .player-container:has(#autoplayToggle) > .flex > .flex:first-child {
+        width: 100%;
+        margin-right: 0;
+    }
+
+    .player-container:has(#autoplayToggle) > .flex > .flex:last-child {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        width: 100%;
+        gap: 0.5rem;
+    }
+
+    .player-container:has(#autoplayToggle) > .flex > .flex:last-child button {
+        width: 100%;
+        min-width: 0;
+        justify-content: center;
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    #episodesList {
+        grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    }
+
+    #episodesList .episode-btn {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
     }
 }
 
@@ -918,6 +1002,29 @@ textarea:focus {
     #danmuSourceModal > div {
         max-width: 95vw;
         max-height: 85vh;
+        padding: 1rem;
+    }
+
+    .danmu-source-button {
+        min-width: 0;
+        width: 100%;
+        padding: 0.75rem;
+    }
+
+    .danmu-source-name {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        line-height: 1.35;
+    }
+
+    .danmu-source-badge {
+        flex-shrink: 0;
+        white-space: nowrap;
+    }
+
+    .danmu-source-meta {
+        overflow-wrap: anywhere;
+        line-height: 1.35;
     }
 }
 
