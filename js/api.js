@@ -1,3 +1,195 @@
+function isPlayableUrl(url) {
+    return typeof url === 'string' && /^https?:\/\//.test(url.trim());
+}
+
+function cleanEpisodeName(name, fallback) {
+    const cleaned = (name || '')
+        .toString()
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&#36;/g, '$')
+        .trim();
+
+    return cleaned || fallback;
+}
+
+function parseEpisodeEntry(entry, index) {
+    const raw = (entry || '').toString().trim();
+    if (!raw) return null;
+
+    const dollarIndex = raw.indexOf('$');
+    const fallbackName = `第${index + 1}集`;
+    let name = fallbackName;
+    let url = raw;
+
+    if (dollarIndex !== -1) {
+        name = cleanEpisodeName(raw.slice(0, dollarIndex), fallbackName);
+        url = raw.slice(dollarIndex + 1).trim();
+    }
+
+    if (!isPlayableUrl(url)) return null;
+
+    return { name, url };
+}
+
+function parseVodPlaySources(vodPlayFrom = '', vodPlayUrl = '') {
+    if (!vodPlayUrl) return [];
+
+    const sourceNames = (vodPlayFrom || '').split('$$$').map(name => name.trim());
+    const sourceGroups = vodPlayUrl.split('$$$');
+
+    return sourceGroups.map((group, groupIndex) => {
+        const episodes = group
+            .split('#')
+            .map((entry, episodeIndex) => parseEpisodeEntry(entry, episodeIndex))
+            .filter(Boolean);
+
+        if (episodes.length === 0) return null;
+
+        return {
+            name: sourceNames[groupIndex] || `播放源 ${groupIndex + 1}`,
+            episodes
+        };
+    }).filter(Boolean);
+}
+
+function buildSinglePlaySourceFromUrls(urls, sourceName = '播放源 1') {
+    const seen = new Set();
+    const episodes = [];
+
+    urls.forEach((url, index) => {
+        const cleanUrl = (url || '').toString().trim();
+        if (!isPlayableUrl(cleanUrl) || seen.has(cleanUrl)) return;
+        seen.add(cleanUrl);
+        episodes.push({
+            name: `第${episodes.length + 1}集`,
+            url: cleanUrl
+        });
+    });
+
+    return episodes.length > 0 ? [{ name: sourceName, episodes }] : [];
+}
+
+function parseHtmlPlaySources(html, sourceName = '播放源 1') {
+    const seen = new Set();
+    const episodes = [];
+    const pairPattern = /([^#"'<>$\r\n]{0,80})\$(https?:\/\/[^"'\s<>]+?(?:\.m3u8|\/share\/[A-Za-z0-9_-]+)[^"'\s<>]*)/g;
+    let match;
+
+    while ((match = pairPattern.exec(html)) !== null) {
+        const url = match[2].trim();
+        if (!isPlayableUrl(url) || seen.has(url)) continue;
+
+        seen.add(url);
+        const name = cleanEpisodeName(match[1], `第${episodes.length + 1}集`);
+        episodes.push({ name, url });
+    }
+
+    if (episodes.length > 0) {
+        return [{ name: sourceName, episodes }];
+    }
+
+    const matches = html.match(M3U8_PATTERN) || [];
+    const urls = matches.map(link => link.replace(/^\$/, ''));
+    return buildSinglePlaySourceFromUrls(urls, sourceName);
+}
+
+function buildDetailPayload(videoDetail, detailUrl, sourceCode) {
+    let playSources = parseVodPlaySources(videoDetail.vod_play_from, videoDetail.vod_play_url);
+
+    if (playSources.length === 0 && videoDetail.vod_content) {
+        const matches = videoDetail.vod_content.match(M3U8_PATTERN) || [];
+        const urls = matches.map(link => link.replace(/^\$/, ''));
+        playSources = buildSinglePlaySourceFromUrls(urls);
+    }
+
+    const selectedPlaySourceIndex = 0;
+    const episodes = playSources[selectedPlaySourceIndex]?.episodes || [];
+
+    return {
+        code: 200,
+        episodes,
+        playSources,
+        selectedPlaySourceIndex,
+        detailUrl: detailUrl,
+        videoInfo: {
+            title: videoDetail.vod_name,
+            cover: videoDetail.vod_pic,
+            desc: videoDetail.vod_content,
+            type: videoDetail.type_name,
+            year: videoDetail.vod_year,
+            area: videoDetail.vod_area,
+            director: videoDetail.vod_director,
+            actor: videoDetail.vod_actor,
+            remarks: videoDetail.vod_remarks,
+            source_name: sourceCode === 'custom' ? '自定义源' : API_SITES[sourceCode].name,
+            source_code: sourceCode
+        }
+    };
+}
+
+function joinUrlPath(baseUrl, path = '') {
+    const cleanBase = String(baseUrl || '').trim().replace(/\/+$/, '');
+    const cleanPath = String(path || '').trim().replace(/^\/+/, '');
+    if (!cleanPath) return cleanBase;
+    return `${cleanBase}/${cleanPath}`;
+}
+
+function isVodProviderEndpoint(url) {
+    return /\/api\.php\/provide\/vod\/?$/i.test(String(url || '').split('?')[0]);
+}
+
+function buildVodDetailUrl(apiUrl, detailPath, vodId) {
+    const cleanApiUrl = String(apiUrl || '').trim();
+    const encodedId = encodeURIComponent(vodId);
+
+    if (isVodProviderEndpoint(cleanApiUrl)) {
+        const separator = cleanApiUrl.includes('?') ? '&' : '?';
+        return `${cleanApiUrl.replace(/\/+$/, '')}${separator}ac=videolist&ids=${encodedId}`;
+    }
+
+    const endpoint = joinUrlPath(cleanApiUrl, detailPath);
+    const endpointSeparator = endpoint.includes('?') ? '&' : '?';
+    return `${endpoint}${endpointSeparator}ac=videolist&ids=${encodedId}`;
+}
+
+async function fetchJsonDetailPayload(id, sourceCode, customApi = '') {
+    const apiUrl = customApi || API_SITES[sourceCode].api;
+    const detailUrl = buildVodDetailUrl(apiUrl, API_CONFIG.detail.path, id);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    try {
+        const proxiedUrl = await window.ProxyAuth?.addAuthToProxyUrl ?
+            await window.ProxyAuth.addAuthToProxyUrl(PROXY_URL + encodeURIComponent(detailUrl)) :
+            PROXY_URL + encodeURIComponent(detailUrl);
+
+        const response = await fetch(proxiedUrl, {
+            headers: API_CONFIG.detail.headers,
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            throw new Error(`详情请求失败: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (!data || !data.list || !Array.isArray(data.list) || data.list.length === 0) {
+            throw new Error('获取到的详情内容无效');
+        }
+
+        return buildDetailPayload(data.list[0], detailUrl, sourceCode);
+    } catch (error) {
+        clearTimeout(timeoutId);
+        throw error;
+    }
+}
+
 // 改进的API请求处理函数
 async function handleApiRequest(url) {
     const customApi = url.searchParams.get('customApi') || '';
@@ -109,90 +301,9 @@ async function handleApiRequest(url) {
                 return await handleCustomApiSpecialDetail(id, customApi);
             }
 
-            const detailUrl = customApi
-                ? `${customApi}${API_CONFIG.detail.path}${id}`
-                : `${API_SITES[sourceCode].api}${API_CONFIG.detail.path}${id}`;
-
-            // 添加超时处理
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
-
             try {
-                // 添加鉴权参数到代理URL
-                const proxiedUrl = await window.ProxyAuth?.addAuthToProxyUrl ? 
-                    await window.ProxyAuth.addAuthToProxyUrl(PROXY_URL + encodeURIComponent(detailUrl)) :
-                    PROXY_URL + encodeURIComponent(detailUrl);
-
-                const response = await fetch(proxiedUrl, {
-                    headers: API_CONFIG.detail.headers,
-                    signal: controller.signal
-                });
-
-                clearTimeout(timeoutId);
-
-                if (!response.ok) {
-                    throw new Error(`详情请求失败: ${response.status}`);
-                }
-
-                // 解析JSON
-                const data = await response.json();
-
-                // 检查返回的数据是否有效
-                if (!data || !data.list || !Array.isArray(data.list) || data.list.length === 0) {
-                    throw new Error('获取到的详情内容无效');
-                }
-
-                // 获取第一个匹配的视频详情
-                const videoDetail = data.list[0];
-
-                // 提取播放地址
-                let episodes = [];
-
-                if (videoDetail.vod_play_url) {
-                    // 分割不同播放源
-                    const playSources = videoDetail.vod_play_url.split('$$$');
-
-                    // 提取第一个播放源的集数（通常为主要源）
-                    if (playSources.length > 0) {
-                        const mainSource = playSources[0];
-                        const episodeList = mainSource.split('#');
-
-                        // 从每个集数中提取URL
-                        episodes = episodeList.map(ep => {
-                            const parts = ep.split('$');
-                            // 返回URL部分(通常是第二部分，如果有的话)
-                            return parts.length > 1 ? parts[1] : '';
-                        }).filter(url => url && (url.startsWith('http://') || url.startsWith('https://')));
-                    }
-                }
-
-                // 如果没有找到播放地址，尝试使用正则表达式查找m3u8链接
-                if (episodes.length === 0 && videoDetail.vod_content) {
-                    const matches = videoDetail.vod_content.match(M3U8_PATTERN) || [];
-                    episodes = matches.map(link => link.replace(/^\$/, ''));
-                }
-
-                return JSON.stringify({
-                    code: 200,
-                    episodes: episodes,
-                    detailUrl: detailUrl,
-                    videoInfo: {
-                        title: videoDetail.vod_name,
-                        cover: videoDetail.vod_pic,
-                        desc: videoDetail.vod_content,
-                        type: videoDetail.type_name,
-                        year: videoDetail.vod_year,
-                        area: videoDetail.vod_area,
-                        director: videoDetail.vod_director,
-                        actor: videoDetail.vod_actor,
-                        remarks: videoDetail.vod_remarks,
-                        // 添加源信息
-                        source_name: sourceCode === 'custom' ? '自定义源' : API_SITES[sourceCode].name,
-                        source_code: sourceCode
-                    }
-                });
+                return JSON.stringify(await fetchJsonDetailPayload(id, sourceCode, customApi));
             } catch (fetchError) {
-                clearTimeout(timeoutId);
                 throw fetchError;
             }
         }
@@ -241,16 +352,8 @@ async function handleCustomApiSpecialDetail(id, customApi) {
         // 获取HTML内容
         const html = await response.text();
 
-        // 使用通用模式提取m3u8链接
-        const generalPattern = /\$(https?:\/\/[^"'\s]+?\.m3u8)/g;
-        let matches = html.match(generalPattern) || [];
-
-        // 处理链接
-        matches = matches.map(link => {
-            link = link.substring(1, link.length);
-            const parenIndex = link.indexOf('(');
-            return parenIndex > 0 ? link.substring(0, parenIndex) : link;
-        });
+        const playSources = parseHtmlPlaySources(html, '自定义源');
+        const episodes = playSources[0]?.episodes || [];
 
         // 提取基本信息
         const titleMatch = html.match(/<h1[^>]*>([^<]+)<\/h1>/);
@@ -261,7 +364,9 @@ async function handleCustomApiSpecialDetail(id, customApi) {
 
         return JSON.stringify({
             code: 200,
-            episodes: matches,
+            episodes,
+            playSources,
+            selectedPlaySourceIndex: 0,
             detailUrl: detailUrl,
             videoInfo: {
                 title: titleText,
@@ -279,6 +384,15 @@ async function handleCustomApiSpecialDetail(id, customApi) {
 // 通用特殊源详情处理函数
 async function handleSpecialSourceDetail(id, sourceCode) {
     try {
+        try {
+            const jsonPayload = await fetchJsonDetailPayload(id, sourceCode);
+            if (jsonPayload.episodes && jsonPayload.episodes.length > 0) {
+                return JSON.stringify(jsonPayload);
+            }
+        } catch (jsonError) {
+            console.warn(`${API_SITES[sourceCode].name} JSON详情获取失败，回退HTML详情:`, jsonError);
+        }
+
         // 构建详情页URL（使用配置中的detail URL而不是api URL）
         const detailUrl = `${API_SITES[sourceCode].detail}/index.php/vod/detail/id/${id}.html`;
 
@@ -308,28 +422,8 @@ async function handleSpecialSourceDetail(id, sourceCode) {
         // 获取HTML内容
         const html = await response.text();
 
-        // 根据不同源类型使用不同的正则表达式
-        let matches = [];
-
-        if (sourceCode === 'ffzy') {
-            // 非凡影视使用特定的正则表达式
-            const ffzyPattern = /\$(https?:\/\/[^"'\s]+?\/\d{8}\/\d+_[a-f0-9]+\/index\.m3u8)/g;
-            matches = html.match(ffzyPattern) || [];
-        }
-
-        // 如果没有找到链接或者是其他源类型，尝试一个更通用的模式
-        if (matches.length === 0) {
-            const generalPattern = /\$(https?:\/\/[^"'\s]+?\.m3u8)/g;
-            matches = html.match(generalPattern) || [];
-        }
-        // 去重处理，避免一个播放源多集显示
-        matches = [...new Set(matches)];
-        // 处理链接
-        matches = matches.map(link => {
-            link = link.substring(1, link.length);
-            const parenIndex = link.indexOf('(');
-            return parenIndex > 0 ? link.substring(0, parenIndex) : link;
-        });
+        const playSources = parseHtmlPlaySources(html, API_SITES[sourceCode].name);
+        const episodes = playSources[0]?.episodes || [];
 
         // 提取可能存在的标题、简介等基本信息
         const titleMatch = html.match(/<h1[^>]*>([^<]+)<\/h1>/);
@@ -340,7 +434,9 @@ async function handleSpecialSourceDetail(id, sourceCode) {
 
         return JSON.stringify({
             code: 200,
-            episodes: matches,
+            episodes,
+            playSources,
+            selectedPlaySourceIndex: 0,
             detailUrl: detailUrl,
             videoInfo: {
                 title: titleText,

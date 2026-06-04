@@ -7,11 +7,24 @@ let mergedSearchGroups = {};
 let currentEpisodeIndex = 0;
 // 添加当前视频的所有集数
 let currentEpisodes = [];
+let currentPlaySources = [];
+let currentPlaySourceIndex = 0;
 // 添加当前视频的标题
 let currentVideoTitle = '';
 let currentVideoYear = ''; // 新增
 // 全局变量用于倒序状态
 let episodesReversed = false;
+const SEARCH_PAGE_SIZE = 40;
+let currentSearchQuery = '';
+let currentSearchResults = [];
+let filteredSearchResults = [];
+let visibleSearchResultCount = SEARCH_PAGE_SIZE;
+let searchResultFilters = {
+    sort: 'latest',
+    type: 'all',
+    source: 'all',
+    year: 'all'
+};
 
 // 页面初始化
 document.addEventListener('DOMContentLoaded', function () {
@@ -857,46 +870,167 @@ function getFlatSourceWeight(sourceCode) {
     return weights[sourceCode] || 0;
 }
 
-function getFlatSearchScore(item, query) {
+const hardNoiseKeywords = [
+    '电影解说',
+    '影视解说',
+    '剧情解说',
+    '解说版',
+    '预告片',
+    '先导片',
+    '花絮',
+    '幕后',
+    '娱乐资讯',
+    '影视资讯',
+    '几分钟看完',
+    '分钟看完',
+    '速看',
+    '一口气看完',
+    'reaction',
+    '混剪',
+    '盘点',
+    '吐槽',
+    '短视频',
+    '小视频'
+];
+
+const softNoiseKeywords = [
+    '解说',
+    '预告',
+    '资讯',
+    '片段',
+    'cut',
+    '合集'
+];
+
+function getSearchableText(item) {
+    return [
+        item.vod_name,
+        item.type_name,
+        item.vod_remarks,
+        item.vod_content,
+        item.vod_blurb
+    ].filter(Boolean).join(' ');
+}
+
+function getResultYear(item) {
+    const directYear = parseInt(item.vod_year || item.year || '0', 10);
+    if (directYear >= 1900 && directYear <= 2100) return directYear;
+
+    const match = getSearchableText(item).match(/(19\d{2}|20\d{2}|2100)/);
+    if (match) return parseInt(match[1], 10);
+
+    return 0;
+}
+
+function getFlatTitleScore(item, query) {
     const q = searchNormalizeFlat(query);
+    const name = searchNormalizeFlat(item.vod_name);
+
+    if (!q || !name) return 0;
+    if (name === q) return 100;
+    if (name.startsWith(q)) return 90;
+    if (name.includes(q)) return 70;
+    return -50;
+}
+
+function getFlatQualityScore(item) {
     const name = searchNormalizeFlat(item.vod_name);
     const remarks = searchNormalizeFlat(item.vod_remarks);
     const type = searchNormalizeFlat(item.type_name);
-    const year = parseInt(item.vod_year || '0', 10) || 0;
+    const text = searchNormalizeFlat(getSearchableText(item));
 
     let score = 0;
 
-    if (q && name === q) score += 1000;
-    else if (q && name.startsWith(q)) score += 800;
-    else if (q && name.includes(q)) score += 500;
-    else if (q) score -= 100;
+    if (remarks.includes('完结') || remarks.includes('全集')) score += 20;
+    if (remarks.includes('正片')) score += 18;
+    if (remarks.includes('高清') || remarks.includes('蓝光') || remarks.includes('hd') || remarks.includes('bd')) score += 10;
 
-    if (remarks.includes('完结') || remarks.includes('全集')) score += 40;
-    if (
-        remarks.includes('高清') ||
-        remarks.includes('蓝光') ||
-        remarks.includes('hd') ||
-        remarks.includes('bd') ||
-        remarks.includes('正片')
-    ) {
-        score += 20;
-    }
+    if (type.includes('电影')) score += 12;
+    if (type.includes('电视剧')) score += 12;
+    if (type.includes('国产剧')) score += 12;
+    if (type.includes('动漫')) score += 12;
+    if (type.includes('番剧')) score += 12;
+    if (type.includes('综艺')) score += 6;
 
-    if (year >= 2024) score += 16;
-    else if (year >= 2020) score += 12;
-    else if (year >= 2010) score += 8;
-    else if (year > 0) score += 4;
+    if (name.includes('剧场版')) score += 15;
+    if (name.includes('电影')) score += 8;
+    if (name.includes('特别篇')) score += 6;
+    if (name.includes('ova')) score += 6;
+    if (name.includes('sp')) score += 4;
 
-    if (item.vod_pic && /^https?:\/\//.test(item.vod_pic)) score += 10;
-
-    const badWords = ['解说', '预告', '花絮', '片段', '资讯', '短剧'];
-    if (badWords.some((word) => name.includes(word) || type.includes(word))) {
-        score -= 180;
-    }
-
-    score += getFlatSourceWeight(item.source_code);
+    softNoiseKeywords.forEach(keyword => {
+        if (text.includes(searchNormalizeFlat(keyword))) score -= 45;
+    });
 
     return score;
+}
+
+function isHardNoiseResult(item) {
+    const text = searchNormalizeFlat(getSearchableText(item));
+    return hardNoiseKeywords.some(keyword => text.includes(searchNormalizeFlat(keyword)));
+}
+
+function getSearchResultType(item) {
+    const type = searchNormalizeFlat(item.type_name);
+    const name = searchNormalizeFlat(item.vod_name);
+
+    if (type.includes('动漫') || type.includes('动画') || type.includes('番剧') || name.includes('动漫')) {
+        return 'anime';
+    }
+
+    if (type.includes('综艺')) {
+        return 'variety';
+    }
+
+    const category = getSearchCategoryV2(item);
+    if (category === 'movie') return 'movie';
+    if (category === 'series') return 'series';
+    return 'unknown';
+}
+
+function getYearFilterBucket(item) {
+    const year = getResultYear(item);
+    if (!year) return 'unknown';
+    if (year >= 2020) return '2020';
+    if (year >= 2010) return '2010';
+    if (year >= 2000) return '2000';
+    if (year >= 1990) return '1990';
+    return 'earlier';
+}
+
+function sortSearchResults(results, query, sortMode = 'latest') {
+    return [...results].sort((a, b) => {
+        const yearA = getResultYear(a);
+        const yearB = getResultYear(b);
+        const titleDiff = getFlatTitleScore(b, query) - getFlatTitleScore(a, query);
+        const qualityDiff = getFlatQualityScore(b) - getFlatQualityScore(a);
+        const sourceDiff = getFlatSourceWeight(b.source_code) - getFlatSourceWeight(a.source_code);
+
+        if (sortMode === 'relevance') {
+            if (titleDiff !== 0) return titleDiff;
+            if (!!yearB !== !!yearA) return yearB ? 1 : -1;
+            if (yearB !== yearA) return yearB - yearA;
+            if (qualityDiff !== 0) return qualityDiff;
+            if (sourceDiff !== 0) return sourceDiff;
+            return (a.vod_name || '').localeCompare(b.vod_name || '');
+        }
+
+        if (sortMode === 'source') {
+            if (sourceDiff !== 0) return sourceDiff;
+            if (!!yearB !== !!yearA) return yearB ? 1 : -1;
+            if (yearB !== yearA) return yearB - yearA;
+            if (titleDiff !== 0) return titleDiff;
+            if (qualityDiff !== 0) return qualityDiff;
+            return (a.vod_name || '').localeCompare(b.vod_name || '');
+        }
+
+        if (!!yearB !== !!yearA) return yearB ? 1 : -1;
+        if (yearB !== yearA) return yearB - yearA;
+        if (titleDiff !== 0) return titleDiff;
+        if (qualityDiff !== 0) return qualityDiff;
+        if (sourceDiff !== 0) return sourceDiff;
+        return (a.vod_name || '').localeCompare(b.vod_name || '');
+    });
 }
 
 function optimizeSearchResults(results, query = '') {
@@ -907,6 +1041,7 @@ function optimizeSearchResults(results, query = '') {
 
     results.forEach((item, index) => {
         if (!item || !item.vod_name) return;
+        if (isHardNoiseResult(item)) return;
 
         const sourceCode = item.source_code || '';
         const apiUrl = item.api_url || '';
@@ -923,25 +1058,276 @@ function optimizeSearchResults(results, query = '') {
             _mergedCount: 1,
             _mergedSources: null,
             _groupId: '',
-            _searchScore: getFlatSearchScore(item, query)
+            _titleScore: getFlatTitleScore(item, query),
+            _qualityScore: getFlatQualityScore(item),
+            _resultYear: getResultYear(item)
         });
     });
 
     mergedSearchGroups = {};
 
-    return flatResults.sort((a, b) => {
-        if (b._searchScore !== a._searchScore) {
-            return b._searchScore - a._searchScore;
+    return sortSearchResults(flatResults, query, 'latest');
+}
+
+function getSearchResultSourceKey(item) {
+    return item.source_code || item.source_name || 'unknown';
+}
+
+function getSourceFilterOptions(results) {
+    const counts = new Map();
+    const labels = new Map();
+
+    results.forEach(item => {
+        const key = getSearchResultSourceKey(item);
+        counts.set(key, (counts.get(key) || 0) + 1);
+        labels.set(key, item.source_name || item.source_code || '未知来源');
+    });
+
+    return Array.from(counts.entries())
+        .map(([key, count]) => ({
+            key,
+            count,
+            label: labels.get(key)
+        }))
+        .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
+
+function ensureSearchFilterToolbar() {
+    const resultsDiv = document.getElementById('results');
+    let toolbar = document.getElementById('searchFilterToolbar');
+
+    if (!toolbar && resultsDiv && resultsDiv.parentNode) {
+        toolbar = document.createElement('div');
+        toolbar.id = 'searchFilterToolbar';
+        toolbar.className = 'search-filter-toolbar';
+        resultsDiv.parentNode.insertBefore(toolbar, resultsDiv);
+    }
+
+    let loadMore = document.getElementById('searchLoadMore');
+    if (!loadMore && resultsDiv && resultsDiv.parentNode) {
+        loadMore = document.createElement('div');
+        loadMore.id = 'searchLoadMore';
+        loadMore.className = 'search-load-more';
+        resultsDiv.parentNode.insertBefore(loadMore, resultsDiv.nextSibling);
+    }
+
+    return toolbar;
+}
+
+function renderSearchFilterToolbar() {
+    const toolbar = ensureSearchFilterToolbar();
+    if (!toolbar) return;
+
+    const sourceOptions = getSourceFilterOptions(currentSearchResults)
+        .map(source => `<option value="${escapeHtml(source.key)}" ${searchResultFilters.source === source.key ? 'selected' : ''}>${escapeHtml(source.label)} (${source.count})</option>`)
+        .join('');
+
+    toolbar.innerHTML = `
+        <div class="search-filter-group">
+            <label for="searchSortMode">排序</label>
+            <select id="searchSortMode">
+                <option value="latest" ${searchResultFilters.sort === 'latest' ? 'selected' : ''}>最新优先</option>
+                <option value="relevance" ${searchResultFilters.sort === 'relevance' ? 'selected' : ''}>相关优先</option>
+                <option value="source" ${searchResultFilters.sort === 'source' ? 'selected' : ''}>来源优先</option>
+            </select>
+        </div>
+        <div class="search-filter-group">
+            <label for="searchTypeFilter">类型</label>
+            <select id="searchTypeFilter">
+                <option value="all" ${searchResultFilters.type === 'all' ? 'selected' : ''}>全部</option>
+                <option value="movie" ${searchResultFilters.type === 'movie' ? 'selected' : ''}>电影</option>
+                <option value="series" ${searchResultFilters.type === 'series' ? 'selected' : ''}>电视剧</option>
+                <option value="anime" ${searchResultFilters.type === 'anime' ? 'selected' : ''}>动漫</option>
+                <option value="variety" ${searchResultFilters.type === 'variety' ? 'selected' : ''}>综艺</option>
+            </select>
+        </div>
+        <div class="search-filter-group">
+            <label for="searchSourceFilter">来源</label>
+            <select id="searchSourceFilter">
+                <option value="all" ${searchResultFilters.source === 'all' ? 'selected' : ''}>全部来源</option>
+                ${sourceOptions}
+            </select>
+        </div>
+        <div class="search-filter-group">
+            <label for="searchYearFilter">年份</label>
+            <select id="searchYearFilter">
+                <option value="all" ${searchResultFilters.year === 'all' ? 'selected' : ''}>全部年份</option>
+                <option value="2020" ${searchResultFilters.year === '2020' ? 'selected' : ''}>2020+</option>
+                <option value="2010" ${searchResultFilters.year === '2010' ? 'selected' : ''}>2010-2019</option>
+                <option value="2000" ${searchResultFilters.year === '2000' ? 'selected' : ''}>2000-2009</option>
+                <option value="1990" ${searchResultFilters.year === '1990' ? 'selected' : ''}>1990-1999</option>
+                <option value="earlier" ${searchResultFilters.year === 'earlier' ? 'selected' : ''}>更早</option>
+                <option value="unknown" ${searchResultFilters.year === 'unknown' ? 'selected' : ''}>未知年份</option>
+            </select>
+        </div>
+    `;
+
+    document.getElementById('searchSortMode')?.addEventListener('change', event => {
+        searchResultFilters.sort = event.target.value;
+        applySearchFilters(true);
+    });
+    document.getElementById('searchTypeFilter')?.addEventListener('change', event => {
+        searchResultFilters.type = event.target.value;
+        applySearchFilters(true);
+    });
+    document.getElementById('searchSourceFilter')?.addEventListener('change', event => {
+        searchResultFilters.source = event.target.value;
+        applySearchFilters(true);
+    });
+    document.getElementById('searchYearFilter')?.addEventListener('change', event => {
+        searchResultFilters.year = event.target.value;
+        applySearchFilters(true);
+    });
+}
+
+function getFilteredSearchResults() {
+    let results = currentSearchResults.filter(item => {
+        if (searchResultFilters.type !== 'all' && getSearchResultType(item) !== searchResultFilters.type) {
+            return false;
         }
 
-        const yearDiff = getSearchYearV2(b) - getSearchYearV2(a);
-        if (yearDiff !== 0) return yearDiff;
+        if (searchResultFilters.source !== 'all' && getSearchResultSourceKey(item) !== searchResultFilters.source) {
+            return false;
+        }
 
-        const sourceDiff = getFlatSourceWeight(b.source_code) - getFlatSourceWeight(a.source_code);
-        if (sourceDiff !== 0) return sourceDiff;
+        if (searchResultFilters.year !== 'all' && getYearFilterBucket(item) !== searchResultFilters.year) {
+            return false;
+        }
 
-        return (a.vod_name || '').localeCompare(b.vod_name || '');
+        return true;
     });
+
+    return sortSearchResults(results, currentSearchQuery, searchResultFilters.sort);
+}
+
+function updateSearchResultCount() {
+    const countEl = document.getElementById('searchResultsCount');
+    const countContainer = countEl ? countEl.parentElement : null;
+    const total = currentSearchResults.length;
+    const filtered = filteredSearchResults.length;
+    const shown = Math.min(visibleSearchResultCount, filtered);
+    const message = filtered === total
+        ? `共 ${total} 个结果，当前显示 ${shown} 个`
+        : `筛选后 ${filtered} 个结果 · 已显示 ${shown} / 共 ${total}`;
+
+    if (countContainer) {
+        countContainer.innerHTML = `<span id="searchResultsCount">${escapeHtml(message)}</span>`;
+    }
+}
+
+function renderNoSearchResults(message = '没有找到匹配的结果', description = '请尝试其他关键词或更换筛选条件') {
+    const resultsDiv = document.getElementById('results');
+    if (!resultsDiv) return;
+
+    resultsDiv.innerHTML = `
+        <div class="col-span-full text-center py-16">
+            <svg class="mx-auto h-12 w-12 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <h3 class="mt-2 text-lg font-medium text-gray-400">${escapeHtml(message)}</h3>
+            <p class="mt-1 text-sm text-gray-500">${escapeHtml(description)}</p>
+        </div>
+    `;
+}
+
+function renderSearchResults() {
+    const resultsDiv = document.getElementById('results');
+    if (!resultsDiv) return;
+
+    updateSearchResultCount();
+
+    if (filteredSearchResults.length === 0) {
+        renderNoSearchResults();
+        renderSearchLoadMore();
+        return;
+    }
+
+    const visibleResults = filteredSearchResults.slice(0, visibleSearchResultCount);
+    const safeResults = visibleResults.map(item => renderSearchResultCard(item)).join('');
+    resultsDiv.innerHTML = safeResults;
+    renderSearchLoadMore();
+}
+
+function renderSearchLoadMore() {
+    const loadMore = document.getElementById('searchLoadMore');
+    if (!loadMore) return;
+
+    const shown = Math.min(visibleSearchResultCount, filteredSearchResults.length);
+    if (shown >= filteredSearchResults.length) {
+        loadMore.innerHTML = '';
+        return;
+    }
+
+    loadMore.innerHTML = `
+        <button type="button" onclick="loadMoreSearchResults()" class="search-load-more-btn">
+            加载更多
+        </button>
+    `;
+}
+
+function loadMoreSearchResults() {
+    visibleSearchResultCount += SEARCH_PAGE_SIZE;
+    renderSearchResults();
+}
+
+function applySearchFilters(resetVisible = false) {
+    if (resetVisible) {
+        visibleSearchResultCount = SEARCH_PAGE_SIZE;
+    }
+
+    filteredSearchResults = getFilteredSearchResults();
+    renderSearchFilterToolbar();
+    renderSearchResults();
+}
+
+function renderSearchResultCard(item) {
+    const safeId = item.vod_id ? item.vod_id.toString().replace(/[^\w-]/g, '') : '';
+    const safeName = escapeHtml(item.vod_name || '');
+    const safeNameForJs = escapeJsString(safeName);
+    const safeSourceCode = escapeJsString(item.source_code || '');
+    const sourceText = item.source_name || '';
+    const sourceInfo = sourceText
+        ? `<span class="bg-[#222] text-xs px-1.5 py-0.5 rounded-full">${escapeHtml(sourceText)}</span>`
+        : '';
+    const apiUrlAttr = item.api_url ? `data-api-url="${escapeHtml(item.api_url)}"` : '';
+    const typeName = item.type_name ? escapeHtml(item.type_name) : '';
+    const year = getResultYear(item) || item.vod_year || '';
+    const remarks = escapeHtml(item.vod_remarks || '暂无介绍');
+    const hasCover = item.vod_pic && item.vod_pic.startsWith('http');
+    const safePic = hasCover ? escapeHtml(item.vod_pic) : '';
+
+    return `
+        <div class="card-hover bg-[#111] rounded-lg overflow-hidden cursor-pointer transition-all hover:scale-[1.02] h-full shadow-sm hover:shadow-md"
+             onclick="showDetails('${safeId}','${safeNameForJs}','${safeSourceCode}')" ${apiUrlAttr}>
+            <div class="flex h-full">
+                <div class="relative flex-shrink-0 search-card-img-container ${hasCover ? '' : 'image-error'}">
+                    <div class="search-card-placeholder">无封面</div>
+                    ${hasCover ? `
+                    <img src="${safePic}" alt="${safeName}"
+                         class="search-card-img transition-transform hover:scale-105"
+                         onerror="this.onerror=null; this.closest('.search-card-img-container').classList.add('image-error'); this.remove();"
+                         loading="lazy">` : ''}
+                </div>
+
+                <div class="p-2 flex flex-col flex-grow min-w-0">
+                    <div class="flex-grow">
+                        <h3 class="font-semibold mb-2 break-words line-clamp-2" title="${safeName}">${safeName}</h3>
+
+                        <div class="flex flex-wrap gap-1 mb-2">
+                            ${typeName ? `<span class="text-xs py-0.5 px-1.5 rounded bg-opacity-20 bg-blue-500 text-blue-300">${typeName}</span>` : ''}
+                            ${year ? `<span class="text-xs py-0.5 px-1.5 rounded bg-opacity-20 bg-purple-500 text-purple-300">${escapeHtml(year)}</span>` : ''}
+                        </div>
+                        <p class="text-gray-400 line-clamp-2 overflow-hidden mb-2">${remarks}</p>
+                    </div>
+
+                    <div class="flex justify-between items-center mt-1 pt-1 border-t border-gray-800">
+                        ${sourceInfo ? `<div>${sourceInfo}</div>` : '<div></div>'}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
 }
 
 // 搜索功能 - 修改为支持多选API和多页结果
@@ -997,9 +1383,6 @@ async function search() {
             }
         });
 
-        // 优化的排序逻辑：按源分组，同源内按剧集顺序排列
-        allResults = optimizeSearchResults(allResults, query);
-
         // 显示结果区域，调整搜索区域
         document.getElementById('searchArea').classList.remove('flex-1');
         document.getElementById('searchArea').classList.add('mb-8');
@@ -1009,41 +1392,6 @@ async function search() {
         const doubanArea = document.getElementById('doubanArea');
         if (doubanArea) {
             doubanArea.classList.add('hidden');
-        }
-
-        const resultsDiv = document.getElementById('results');
-
-        // 如果没有结果
-        if (!allResults || allResults.length === 0) {
-            resultsDiv.innerHTML = `
-                <div class="col-span-full text-center py-16">
-                    <svg class="mx-auto h-12 w-12 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
-                              d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    <h3 class="mt-2 text-lg font-medium text-gray-400">没有找到匹配的结果</h3>
-                    <p class="mt-1 text-sm text-gray-500">请尝试其他关键词或更换数据源</p>
-                </div>
-            `;
-            hideLoading();
-            return;
-        }
-
-        // 有搜索结果时，才更新URL
-        try {
-            // 使用URI编码确保特殊字符能够正确显示
-            const encodedQuery = encodeURIComponent(query);
-            // 使用HTML5 History API更新URL，不刷新页面
-            window.history.pushState(
-                { search: query },
-                `搜索: ${query} - LibreTV`,
-                `/s=${encodedQuery}`
-            );
-            // 更新页面标题
-            document.title = `搜索: ${query} - LibreTV`;
-        } catch (e) {
-            console.error('更新浏览器历史失败:', e);
-            // 如果更新URL失败，继续执行搜索
         }
 
         // 处理搜索结果过滤：如果启用了黄色内容过滤，则过滤掉分类含有敏感内容的项目
@@ -1056,7 +1404,7 @@ async function search() {
             });
         }
 
-	// 过滤短剧内容
+        // 过滤短剧内容
         allResults = allResults.filter(item => {
             const typeName = item.type_name || '';
             const vodName = item.vod_name || '';
@@ -1069,89 +1417,44 @@ async function search() {
             );
         });
 
-		// 更新搜索结果计数
-		const searchResultsCount = document.getElementById('searchResultsCount');
-		if (searchResultsCount) {
-		    searchResultsCount.textContent = allResults.length;
-		}
+        // 优化排序并初始化本地筛选状态，不恢复跨源聚合
+        currentSearchQuery = query;
+        currentSearchResults = optimizeSearchResults(allResults, query);
+        filteredSearchResults = [];
+        visibleSearchResultCount = SEARCH_PAGE_SIZE;
+        searchResultFilters = {
+            sort: 'latest',
+            type: 'all',
+            source: 'all',
+            year: 'all'
+        };
 
-        // 添加XSS保护，使用textContent和属性转义
-        const safeResults = allResults.map(item => {
-            const safeId = item.vod_id ? item.vod_id.toString().replace(/[^\w-]/g, '') : '';
-            const safeName = (item.vod_name || '').toString()
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;');
-            const safeNameForJs = safeName
-                .replace(/\\/g, '\\\\')
-                .replace(/'/g, "\\'");
-            const sourceText = item.source_name || '';
-			
-			const sourceInfo = sourceText
-			    ? `<span class="bg-[#222] text-xs px-1.5 py-0.5 rounded-full">${sourceText}</span>`
-			    : '';
-			
-			const sourceCode = item.source_code || '';
+        ensureSearchFilterToolbar();
 
-            // 添加API URL属性，用于详情获取
-            const apiUrlAttr = item.api_url ?
-                `data-api-url="${item.api_url.replace(/"/g, '&quot;')}"` : '';
+        if (!currentSearchResults || currentSearchResults.length === 0) {
+            renderSearchFilterToolbar();
+            filteredSearchResults = [];
+            updateSearchResultCount();
+            renderNoSearchResults('没有找到匹配的结果', '请尝试其他关键词或更换数据源');
+            renderSearchLoadMore();
+            hideLoading();
+            return;
+        }
 
-            // 修改为水平卡片布局，图片在左侧，文本在右侧，并优化样式
-            const hasCover = item.vod_pic && item.vod_pic.startsWith('http');
+        // 有搜索结果时，才更新URL
+        try {
+            const encodedQuery = encodeURIComponent(query);
+            window.history.pushState(
+                { search: query },
+                `搜索: ${query} - LibreTV`,
+                `/s=${encodedQuery}`
+            );
+            document.title = `搜索: ${query} - LibreTV`;
+        } catch (e) {
+            console.error('更新浏览器历史失败:', e);
+        }
 
-            return `
-                <div class="card-hover bg-[#111] rounded-lg overflow-hidden cursor-pointer transition-all hover:scale-[1.02] h-full shadow-sm hover:shadow-md" 
-				     onclick="showDetails('${safeId}','${safeNameForJs}','${sourceCode}')" ${apiUrlAttr}>
-                    <div class="flex h-full">
-                        ${hasCover ? `
-                        <div class="relative flex-shrink-0 search-card-img-container">
-                            <img src="${item.vod_pic}" alt="${safeName}" 
-                                 class="h-full w-full object-cover transition-transform hover:scale-110" 
-                                 onerror="this.onerror=null; this.src='https://via.placeholder.com/300x450?text=无封面'; this.classList.add('object-contain');" 
-                                 loading="lazy">
-                            <div class="absolute inset-0 bg-gradient-to-r from-black/30 to-transparent"></div>
-                        </div>` : ''}
-                        
-                        <div class="p-2 flex flex-col flex-grow">
-                            <div class="flex-grow">
-                                <h3 class="font-semibold mb-2 break-words line-clamp-2 ${hasCover ? '' : 'text-center'}" title="${safeName}">${safeName}</h3>
-                                
-                                <div class="flex flex-wrap ${hasCover ? '' : 'justify-center'} gap-1 mb-2">
-                                    ${(item.type_name || '').toString().replace(/</g, '&lt;') ?
-                    `<span class="text-xs py-0.5 px-1.5 rounded bg-opacity-20 bg-blue-500 text-blue-300">
-                                          ${(item.type_name || '').toString().replace(/</g, '&lt;')}
-                                      </span>` : ''}
-                                    ${(item.vod_year || '') ?
-                    `<span class="text-xs py-0.5 px-1.5 rounded bg-opacity-20 bg-purple-500 text-purple-300">
-                                          ${item.vod_year}
-                                      </span>` : ''}
-                                </div>
-                                <p class="text-gray-400 line-clamp-2 overflow-hidden ${hasCover ? '' : 'text-center'} mb-2">
-                                    ${(item.vod_remarks || '暂无介绍').toString().replace(/</g, '&lt;')}
-                                </p>
-                            </div>
-                            
-                            <div class="flex justify-between items-center mt-1 pt-1 border-t border-gray-800">
-                                ${sourceInfo ? `<div>${sourceInfo}</div>` : '<div></div>'}
-                                <!-- 接口名称过长会被挤变形
-                                <div>
-                                    <span class="text-gray-500 flex items-center hover:text-blue-400 transition-colors">
-                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                                        </svg>
-                                        播放
-                                    </span>
-                                </div>
-                                -->
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }).join('');
-
-        resultsDiv.innerHTML = safeResults;
+        applySearchFilters(true);
     } catch (error) {
         console.error('搜索错误:', error);
         if (error.name === 'AbortError') {
@@ -1271,6 +1574,147 @@ function showSourcePicker(groupId) {
     modal.classList.remove('hidden');
 }
 
+function escapeHtml(value) {
+    return (value || '')
+        .toString()
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function escapeJsString(value) {
+    return (value || '')
+        .toString()
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/\r?\n/g, ' ');
+}
+
+function getEpisodeUrl(episode) {
+    return typeof episode === 'string' ? episode : (episode && episode.url) || '';
+}
+
+function getEpisodeName(episode, index) {
+    if (episode && typeof episode === 'object' && episode.name) {
+        return episode.name;
+    }
+    return `第${index + 1}集`;
+}
+
+function normalizeEpisodeList(episodes) {
+    if (!Array.isArray(episodes)) return [];
+
+    return episodes.map((episode, index) => {
+        if (typeof episode === 'string') {
+            return {
+                name: `第${index + 1}集`,
+                url: episode
+            };
+        }
+
+        if (episode && typeof episode === 'object') {
+            return {
+                name: episode.name || `第${index + 1}集`,
+                url: episode.url || ''
+            };
+        }
+
+        return null;
+    }).filter(episode => episode && episode.url);
+}
+
+function normalizePlaySources(playSources, fallbackEpisodes) {
+    if (Array.isArray(playSources) && playSources.length > 0) {
+        return playSources.map((source, index) => {
+            const episodes = normalizeEpisodeList(source.episodes);
+            if (episodes.length === 0) return null;
+
+            return {
+                name: source.name || `播放源 ${index + 1}`,
+                episodes
+            };
+        }).filter(Boolean);
+    }
+
+    const episodes = normalizeEpisodeList(fallbackEpisodes);
+    return episodes.length > 0 ? [{ name: '播放源 1', episodes }] : [];
+}
+
+function getCurrentPlaySourceName() {
+    return currentPlaySources[currentPlaySourceIndex]?.name || '';
+}
+
+function getCurrentEpisodeUrls() {
+    return currentEpisodes.map(getEpisodeUrl).filter(Boolean);
+}
+
+function renderPlaySourceButtons(sourceCode, vodId) {
+    if (!Array.isArray(currentPlaySources) || currentPlaySources.length <= 1) return '';
+
+    return `
+        <div class="mb-4">
+            <div class="text-sm text-gray-400 mb-2">播放源</div>
+            <div class="flex flex-wrap gap-2" id="playSourceButtons">
+                ${currentPlaySources.map((source, index) => {
+                    const active = index === currentPlaySourceIndex;
+                    return `
+                        <button onclick="switchPlaySource(${index}, '${escapeJsString(sourceCode)}', '${escapeJsString(vodId)}')"
+                                class="px-3 py-1.5 rounded text-sm border transition-colors ${active ? 'bg-blue-600 border-blue-500 text-white' : 'bg-[#222] hover:bg-[#333] border-[#333] text-gray-300'}"
+                                title="${escapeHtml(source.name)}">
+                            ${escapeHtml(source.name)}
+                        </button>
+                    `;
+                }).join('')}
+            </div>
+        </div>
+    `;
+}
+
+function updateEpisodeStats() {
+    const stats = document.getElementById('episodeStats');
+    if (!stats) return;
+
+    const sourceName = getCurrentPlaySourceName();
+    stats.textContent = sourceName
+        ? `当前源共 ${currentEpisodes.length} 集 · 当前源：${sourceName}`
+        : `当前源共 ${currentEpisodes.length} 集`;
+}
+
+function switchPlaySource(index, sourceCode, vodId) {
+    const source = currentPlaySources[index];
+    if (!source) return;
+
+    currentPlaySourceIndex = index;
+    currentEpisodes = source.episodes;
+    currentEpisodeIndex = 0;
+
+    const sourceContainer = document.getElementById('playSourceContainer');
+    if (sourceContainer) {
+        sourceContainer.innerHTML = renderPlaySourceButtons(sourceCode, vodId);
+    }
+
+    const episodesGrid = document.getElementById('episodesGrid');
+    if (episodesGrid) {
+        episodesGrid.innerHTML = renderEpisodes(currentVideoTitle, sourceCode, vodId);
+    }
+
+    updateEpisodeStats();
+}
+
+function playEpisode(episodeIndex, sourceCode, vodId) {
+    const episode = currentEpisodes[episodeIndex];
+    const url = getEpisodeUrl(episode);
+
+    if (!url) {
+        showToast('该集播放链接无效', 'error');
+        return;
+    }
+
+    playVideo(url, currentVideoTitle, sourceCode, episodeIndex, vodId);
+}
+
 // 显示详情 - 修改为支持自定义API
 async function showDetails(id, vod_name, sourceCode) {
     // 密码保护校验
@@ -1330,7 +1774,14 @@ async function showDetails(id, vod_name, sourceCode) {
         currentVideoTitle = vod_name || '未知视频';
 		currentVideoYear = (data.videoInfo && data.videoInfo.year) ? String(data.videoInfo.year) : ''; // 新增
 
-        if (data.episodes && data.episodes.length > 0) {
+        currentPlaySources = normalizePlaySources(data.playSources, data.episodes);
+        currentPlaySourceIndex = Number.isInteger(data.selectedPlaySourceIndex) ? data.selectedPlaySourceIndex : 0;
+        if (!currentPlaySources[currentPlaySourceIndex]) {
+            currentPlaySourceIndex = 0;
+        }
+        currentEpisodes = currentPlaySources[currentPlaySourceIndex]?.episodes || [];
+
+        if (currentEpisodes.length > 0) {
             // 构建详情信息HTML
             let detailInfoHtml = '';
             if (data.videoInfo) {
@@ -1362,11 +1813,13 @@ async function showDetails(id, vod_name, sourceCode) {
                 }
             }
 
-            currentEpisodes = data.episodes;
             currentEpisodeIndex = 0;
 
             modalContent.innerHTML = `
                 ${detailInfoHtml}
+                <div id="playSourceContainer">
+                    ${renderPlaySourceButtons(sourceCode, id)}
+                </div>
                 <div class="flex flex-wrap items-center justify-between mb-4 gap-2">
                     <div class="flex items-center gap-2">
                         <button onclick="toggleEpisodeOrder('${sourceCode}', '${id}')" 
@@ -1376,7 +1829,7 @@ async function showDetails(id, vod_name, sourceCode) {
                             </svg>
                             <span>${episodesReversed ? '正序排列' : '倒序排列'}</span>
                         </button>
-                        <span class="text-gray-400 text-sm">共 ${data.episodes.length} 集</span>
+                        <span id="episodeStats" class="text-gray-400 text-sm">当前源共 ${currentEpisodes.length} 集${getCurrentPlaySourceName() ? ` · 当前源：${escapeHtml(getCurrentPlaySourceName())}` : ''}</span>
                     </div>
                     <button onclick="copyLinks()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition-colors">
                         复制链接
@@ -1414,11 +1867,17 @@ function playVideo(url, vod_name, sourceCode, episodeIndex = 0, vodId = '') {
         }
     }
 
+    const playUrl = getEpisodeUrl(url);
+    if (!playUrl) {
+        showToast('视频播放链接无效', 'error');
+        return;
+    }
+
     // 获取当前路径作为返回页面
     let currentPath = window.location.href;
 
     // 构建播放页面URL，使用watch.html作为中间跳转页
-    let watchUrl = `watch.html?id=${vodId || ''}&source=${sourceCode || ''}&url=${encodeURIComponent(url)}&index=${episodeIndex}&title=${encodeURIComponent(vod_name || '')}&year=${encodeURIComponent(currentVideoYear)}`;
+    let watchUrl = `watch.html?id=${vodId || ''}&source=${sourceCode || ''}&url=${encodeURIComponent(playUrl)}&index=${episodeIndex}&title=${encodeURIComponent(vod_name || '')}&year=${encodeURIComponent(currentVideoYear)}`;
 
     // 添加返回URL参数
     if (currentPath.includes('index.html') || currentPath.endsWith('/')) {
@@ -1429,7 +1888,7 @@ function playVideo(url, vod_name, sourceCode, episodeIndex = 0, vodId = '') {
     try {
         localStorage.setItem('currentVideoTitle', vod_name || '未知视频');
         localStorage.setItem('currentVideoYear', currentVideoYear);
-        localStorage.setItem('currentEpisodes', JSON.stringify(currentEpisodes));
+        localStorage.setItem('currentEpisodes', JSON.stringify(getCurrentEpisodeUrls()));
         localStorage.setItem('currentEpisodeIndex', episodeIndex);
         localStorage.setItem('currentSourceCode', sourceCode || '');
         localStorage.setItem('lastPlayTime', Date.now());
@@ -1490,7 +1949,7 @@ function closeVideoPlayer(home = false) {
 function playPreviousEpisode(sourceCode) {
     if (currentEpisodeIndex > 0) {
         const prevIndex = currentEpisodeIndex - 1;
-        const prevUrl = currentEpisodes[prevIndex];
+        const prevUrl = getEpisodeUrl(currentEpisodes[prevIndex]);
         playVideo(prevUrl, currentVideoTitle, sourceCode, prevIndex);
     }
 }
@@ -1499,7 +1958,7 @@ function playPreviousEpisode(sourceCode) {
 function playNextEpisode(sourceCode) {
     if (currentEpisodeIndex < currentEpisodes.length - 1) {
         const nextIndex = currentEpisodeIndex + 1;
-        const nextUrl = currentEpisodes[nextIndex];
+        const nextUrl = getEpisodeUrl(currentEpisodes[nextIndex]);
         playVideo(nextUrl, currentVideoTitle, sourceCode, nextIndex);
     }
 }
@@ -1516,10 +1975,12 @@ function renderEpisodes(vodName, sourceCode, vodId) {
     return episodes.map((episode, index) => {
         // 根据倒序状态计算真实的剧集索引
         const realIndex = episodesReversed ? currentEpisodes.length - 1 - index : index;
+        const episodeName = getEpisodeName(episode, realIndex);
         return `
-            <button id="episode-${realIndex}" onclick="playVideo('${episode}','${vodName.replace(/"/g, '&quot;')}', '${sourceCode}', ${realIndex}, '${vodId}')" 
-                    class="px-4 py-2 bg-[#222] hover:bg-[#333] border border-[#333] rounded-lg transition-colors text-center episode-btn">
-                ${realIndex + 1}
+            <button id="episode-${realIndex}" onclick="playEpisode(${realIndex}, '${escapeJsString(sourceCode)}', '${escapeJsString(vodId)}')"
+                    class="px-3 py-2 bg-[#222] hover:bg-[#333] border border-[#333] rounded-lg transition-colors text-center episode-btn truncate"
+                    title="${escapeHtml(episodeName)}">
+                ${escapeHtml(episodeName)}
             </button>
         `;
     }).join('');
@@ -1528,7 +1989,7 @@ function renderEpisodes(vodName, sourceCode, vodId) {
 // 复制视频链接到剪贴板
 function copyLinks() {
     const episodes = episodesReversed ? [...currentEpisodes].reverse() : currentEpisodes;
-    const linkList = episodes.join('\r\n');
+    const linkList = episodes.map(getEpisodeUrl).filter(Boolean).join('\r\n');
     navigator.clipboard.writeText(linkList).then(() => {
         showToast('播放链接已复制', 'success');
     }).catch(err => {
