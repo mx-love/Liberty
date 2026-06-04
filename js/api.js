@@ -140,18 +140,48 @@ function isVodProviderEndpoint(url) {
     return /\/api\.php\/provide\/vod\/?$/i.test(String(url || '').split('?')[0]);
 }
 
-function buildVodDetailUrl(apiUrl, detailPath, vodId) {
-    const cleanApiUrl = String(apiUrl || '').trim();
-    const encodedId = encodeURIComponent(vodId);
+function splitUrlQuery(url) {
+    const raw = String(url || '').trim();
+    const queryIndex = raw.indexOf('?');
 
-    if (isVodProviderEndpoint(cleanApiUrl)) {
-        const separator = cleanApiUrl.includes('?') ? '&' : '?';
-        return `${cleanApiUrl.replace(/\/+$/, '')}${separator}ac=videolist&ids=${encodedId}`;
+    if (queryIndex === -1) {
+        return { path: raw, query: '' };
     }
 
-    const endpoint = joinUrlPath(cleanApiUrl, detailPath);
-    const endpointSeparator = endpoint.includes('?') ? '&' : '?';
-    return `${endpoint}${endpointSeparator}ac=videolist&ids=${encodedId}`;
+    return {
+        path: raw.slice(0, queryIndex),
+        query: raw.slice(queryIndex + 1)
+    };
+}
+
+function appendVodDetailQuery(endpoint, existingQuery, vodId) {
+    const params = new URLSearchParams(existingQuery || '');
+    params.set('ac', 'videolist');
+    params.set('ids', String(vodId));
+    return `${endpoint.replace(/\/+$/, '')}?${params.toString()}`;
+}
+
+function buildVodDetailUrl(apiUrl, detailPath, vodId) {
+    const cleanApiUrl = String(apiUrl || '').trim();
+
+    if (isVodProviderEndpoint(cleanApiUrl)) {
+        const apiParts = splitUrlQuery(cleanApiUrl);
+        return appendVodDetailQuery(apiParts.path, apiParts.query, vodId);
+    }
+
+    const apiParts = splitUrlQuery(cleanApiUrl);
+    const detailParts = splitUrlQuery(detailPath);
+    const endpoint = joinUrlPath(apiParts.path, detailParts.path);
+    const params = new URLSearchParams(apiParts.query || '');
+    const detailParams = new URLSearchParams(detailParts.query || '');
+
+    detailParams.forEach((value, key) => {
+        params.set(key, value);
+    });
+    params.set('ac', 'videolist');
+    params.set('ids', String(vodId));
+
+    return `${endpoint}?${params.toString()}`;
 }
 
 async function fetchJsonDetailPayload(id, sourceCode, customApi = '') {

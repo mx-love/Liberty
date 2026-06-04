@@ -1642,6 +1642,35 @@ function normalizePlaySources(playSources, fallbackEpisodes) {
     return episodes.length > 0 ? [{ name: '播放源 1', episodes }] : [];
 }
 
+function hasPlayableEpisodes(episodes) {
+    return Array.isArray(episodes) && episodes.some(episode => getEpisodeUrl(episode));
+}
+
+function getPlayableEpisodes(data) {
+    if (!data) return [];
+
+    if (hasPlayableEpisodes(data.episodes)) {
+        return data.episodes.filter(episode => getEpisodeUrl(episode));
+    }
+
+    if (Array.isArray(data.playSources)) {
+        const source = data.playSources.find(item => hasPlayableEpisodes(item.episodes));
+        return source ? source.episodes.filter(episode => getEpisodeUrl(episode)) : [];
+    }
+
+    return [];
+}
+
+function getPlayableSourceIndex(playSources, preferredIndex = 0) {
+    if (!Array.isArray(playSources) || playSources.length === 0) return -1;
+
+    if (playSources[preferredIndex] && hasPlayableEpisodes(playSources[preferredIndex].episodes)) {
+        return preferredIndex;
+    }
+
+    return playSources.findIndex(source => hasPlayableEpisodes(source.episodes));
+}
+
 function getCurrentPlaySourceName() {
     return currentPlaySources[currentPlaySourceIndex]?.name || '';
 }
@@ -1775,13 +1804,13 @@ async function showDetails(id, vod_name, sourceCode) {
 		currentVideoYear = (data.videoInfo && data.videoInfo.year) ? String(data.videoInfo.year) : ''; // 新增
 
         currentPlaySources = normalizePlaySources(data.playSources, data.episodes);
-        currentPlaySourceIndex = Number.isInteger(data.selectedPlaySourceIndex) ? data.selectedPlaySourceIndex : 0;
-        if (!currentPlaySources[currentPlaySourceIndex]) {
-            currentPlaySourceIndex = 0;
-        }
-        currentEpisodes = currentPlaySources[currentPlaySourceIndex]?.episodes || [];
+        const preferredSourceIndex = Number.isInteger(data.selectedPlaySourceIndex) ? data.selectedPlaySourceIndex : 0;
+        currentPlaySourceIndex = getPlayableSourceIndex(currentPlaySources, preferredSourceIndex);
+        currentEpisodes = currentPlaySourceIndex >= 0
+            ? currentPlaySources[currentPlaySourceIndex].episodes.filter(episode => getEpisodeUrl(episode))
+            : getPlayableEpisodes(data);
 
-        if (currentEpisodes.length > 0) {
+        if (hasPlayableEpisodes(currentEpisodes)) {
             // 构建详情信息HTML
             let detailInfoHtml = '';
             if (data.videoInfo) {
@@ -1840,6 +1869,12 @@ async function showDetails(id, vod_name, sourceCode) {
                 </div>
             `;
         } else {
+            console.warn('[Detail Debug] 未找到可播放资源', {
+                sourceCode,
+                id,
+                episodes: data?.episodes,
+                playSources: data?.playSources
+            });
             modalContent.innerHTML = `
                 <div class="text-center py-8">
                     <div class="text-red-400 mb-2">❌ 未找到播放资源</div>
