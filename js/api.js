@@ -54,6 +54,76 @@ function parseVodPlaySources(vodPlayFrom = '', vodPlayUrl = '') {
     }).filter(Boolean);
 }
 
+function getApiEpisodeUrlValue(episode) {
+    if (!episode) return '';
+    if (typeof episode === 'string') return episode;
+    return episode.url || '';
+}
+
+function isApiDirectMediaUrl(url = '') {
+    const value = String(url || '').toLowerCase().split('?')[0];
+    return value.endsWith('.m3u8') ||
+        value.endsWith('.mp4') ||
+        value.endsWith('.webm') ||
+        value.endsWith('.flv');
+}
+
+function isApiHlsUrl(url = '') {
+    return String(url || '').toLowerCase().split('?')[0].endsWith('.m3u8');
+}
+
+function isApiLikelyWebPageUrl(url = '') {
+    const value = String(url || '').toLowerCase();
+    return value.includes('/share/') ||
+        value.includes('/play/') ||
+        value.includes('/vodplay/') ||
+        value.includes('.html');
+}
+
+function getApiPlaySourcePriority(source = {}) {
+    const name = String(source.name || '').toLowerCase();
+    const episodes = Array.isArray(source.episodes) ? source.episodes : [];
+    const urls = episodes.map(getApiEpisodeUrlValue).filter(Boolean);
+
+    if (!urls.length) return -10000;
+
+    const hasHlsName = name.includes('m3u8') || name.includes('hls');
+    const hasHlsUrl = urls.some(isApiHlsUrl);
+    const hasDirectMedia = urls.some(isApiDirectMediaUrl);
+    const hasWebPage = urls.some(isApiLikelyWebPageUrl);
+
+    let score = 0;
+    if (hasHlsUrl) score += 1000;
+    if (hasHlsName) score += 500;
+    if (hasDirectMedia) score += 100;
+    if (hasWebPage) score -= 300;
+    score += Math.min(urls.length, 100);
+
+    return score;
+}
+
+function getApiPreferredPlaySourceIndex(playSources = []) {
+    if (!Array.isArray(playSources) || playSources.length === 0) return 0;
+
+    let bestIndex = -1;
+    let bestScore = -Infinity;
+
+    playSources.forEach((source, index) => {
+        const score = getApiPlaySourcePriority(source);
+        if (score > bestScore) {
+            bestScore = score;
+            bestIndex = index;
+        }
+    });
+
+    if (bestIndex >= 0 && bestScore > -10000) return bestIndex;
+
+    return playSources.findIndex(source =>
+        Array.isArray(source.episodes) &&
+        source.episodes.some(episode => getApiEpisodeUrlValue(episode))
+    );
+}
+
 function buildSinglePlaySourceFromUrls(urls, sourceName = '播放源 1') {
     const seen = new Set();
     const episodes = [];
@@ -104,7 +174,8 @@ function buildDetailPayload(videoDetail, detailUrl, sourceCode) {
         playSources = buildSinglePlaySourceFromUrls(urls);
     }
 
-    const selectedPlaySourceIndex = 0;
+    const preferredIndex = getApiPreferredPlaySourceIndex(playSources);
+    const selectedPlaySourceIndex = preferredIndex >= 0 ? preferredIndex : 0;
     const episodes = playSources[selectedPlaySourceIndex]?.episodes || [];
 
     return {

@@ -1596,6 +1596,75 @@ function getEpisodeUrl(episode) {
     return typeof episode === 'string' ? episode : (episode && episode.url) || '';
 }
 
+function isDirectMediaUrl(url = '') {
+    const value = String(url || '').toLowerCase().split('?')[0];
+    return value.endsWith('.m3u8') ||
+        value.endsWith('.mp4') ||
+        value.endsWith('.webm') ||
+        value.endsWith('.flv');
+}
+
+function isHlsUrl(url = '') {
+    return String(url || '').toLowerCase().split('?')[0].endsWith('.m3u8');
+}
+
+function isLikelyWebPageUrl(url = '') {
+    const value = String(url || '').toLowerCase();
+    return value.includes('/share/') ||
+        value.includes('/play/') ||
+        value.includes('/vodplay/') ||
+        value.includes('.html');
+}
+
+function getPlaySourcePriority(source = {}) {
+    const name = String(source.name || '').toLowerCase();
+    const episodes = Array.isArray(source.episodes) ? source.episodes : [];
+    const urls = episodes.map(getEpisodeUrl).filter(Boolean);
+
+    if (!urls.length) return -10000;
+
+    const hasHlsName = name.includes('m3u8') || name.includes('hls');
+    const hasHlsUrl = urls.some(isHlsUrl);
+    const hasDirectMedia = urls.some(isDirectMediaUrl);
+    const hasWebPage = urls.some(isLikelyWebPageUrl);
+
+    let score = 0;
+    if (hasHlsUrl) score += 1000;
+    if (hasHlsName) score += 500;
+    if (hasDirectMedia) score += 100;
+    if (hasWebPage) score -= 300;
+    score += Math.min(urls.length, 100);
+
+    return score;
+}
+
+function getPreferredPlaySourceIndex(playSources = []) {
+    if (!Array.isArray(playSources) || playSources.length === 0) return 0;
+
+    let bestIndex = -1;
+    let bestScore = -Infinity;
+
+    playSources.forEach((source, index) => {
+        const score = getPlaySourcePriority(source);
+        if (score > bestScore) {
+            bestScore = score;
+            bestIndex = index;
+        }
+    });
+
+    if (bestIndex >= 0 && bestScore > -10000) return bestIndex;
+
+    return playSources.findIndex(source =>
+        Array.isArray(source.episodes) &&
+        source.episodes.some(episode => getEpisodeUrl(episode))
+    );
+}
+
+function isWebPagePlaySource(source = {}) {
+    const episodes = Array.isArray(source.episodes) ? source.episodes : [];
+    return episodes.map(getEpisodeUrl).filter(Boolean).some(isLikelyWebPageUrl);
+}
+
 function getEpisodeName(episode, index) {
     if (episode && typeof episode === 'object' && episode.name) {
         return episode.name;
@@ -1668,6 +1737,11 @@ function getPlayableSourceIndex(playSources, preferredIndex = 0) {
         return preferredIndex;
     }
 
+    const recommendedIndex = getPreferredPlaySourceIndex(playSources);
+    if (playSources[recommendedIndex] && hasPlayableEpisodes(playSources[recommendedIndex].episodes)) {
+        return recommendedIndex;
+    }
+
     return playSources.findIndex(source => hasPlayableEpisodes(source.episodes));
 }
 
@@ -1682,17 +1756,26 @@ function getCurrentEpisodeUrls() {
 function renderPlaySourceButtons(sourceCode, vodId) {
     if (!Array.isArray(currentPlaySources) || currentPlaySources.length <= 1) return '';
 
+    const recommendedIndex = getPreferredPlaySourceIndex(currentPlaySources);
+
     return `
         <div class="mb-4">
             <div class="text-sm text-gray-400 mb-2">播放源</div>
             <div class="flex flex-wrap gap-2" id="playSourceButtons">
                 ${currentPlaySources.map((source, index) => {
                     const active = index === currentPlaySourceIndex;
+                    const recommended = index === recommendedIndex;
+                    const webPageSource = isWebPagePlaySource(source);
+                    const title = webPageSource
+                        ? `${source.name} - 网页线路，可能无法直接播放`
+                        : source.name;
                     return `
                         <button onclick="switchPlaySource(${index}, '${escapeJsString(sourceCode)}', '${escapeJsString(vodId)}')"
                                 class="px-3 py-1.5 rounded text-sm border transition-colors ${active ? 'bg-blue-600 border-blue-500 text-white' : 'bg-[#222] hover:bg-[#333] border-[#333] text-gray-300'}"
-                                title="${escapeHtml(source.name)}">
+                                title="${escapeHtml(title)}">
                             ${escapeHtml(source.name)}
+                            ${recommended ? '<span class="ml-1 text-[10px] opacity-80">推荐</span>' : ''}
+                            ${webPageSource ? '<span class="ml-1 text-[10px] opacity-70">备用</span>' : ''}
                         </button>
                     `;
                 }).join('')}
@@ -1804,7 +1887,9 @@ async function showDetails(id, vod_name, sourceCode) {
 		currentVideoYear = (data.videoInfo && data.videoInfo.year) ? String(data.videoInfo.year) : ''; // 新增
 
         currentPlaySources = normalizePlaySources(data.playSources, data.episodes);
-        const preferredSourceIndex = Number.isInteger(data.selectedPlaySourceIndex) ? data.selectedPlaySourceIndex : 0;
+        const preferredSourceIndex = Number.isInteger(data.selectedPlaySourceIndex)
+            ? data.selectedPlaySourceIndex
+            : getPreferredPlaySourceIndex(currentPlaySources);
         currentPlaySourceIndex = getPlayableSourceIndex(currentPlaySources, preferredSourceIndex);
         currentEpisodes = currentPlaySourceIndex >= 0
             ? currentPlaySources[currentPlaySourceIndex].episodes.filter(episode => getEpisodeUrl(episode))

@@ -699,9 +699,16 @@ function normalizeDanmuTitle(title) {
 function getCurrentEpisodeName(index) {
     const raw = Array.isArray(currentEpisodes) ? currentEpisodes[index] : '';
     if (!raw) return '';
+    if (typeof raw === 'object') return raw.name || '';
     const text = String(raw);
     if (text.includes('$')) return text.split('$')[0];
     return text;
+}
+
+function getPlayerEpisodeUrlValue(episode) {
+    if (!episode) return '';
+    if (typeof episode === 'string') return episode;
+    return episode.url || '';
 }
 
 function guessEpisodeNumber(index, episodeName) {
@@ -4979,7 +4986,11 @@ async function switchToResource(sourceKey, vodId) {
 
         const data = await response.json();
 
-        if (!data.episodes || data.episodes.length === 0) {
+        const playableEpisodes = Array.isArray(data.episodes)
+            ? data.episodes.map(getPlayerEpisodeUrlValue).filter(Boolean)
+            : [];
+
+        if (playableEpisodes.length === 0) {
             showToast('未找到播放资源', 'error');
             hideLoading();
             return;
@@ -4990,13 +5001,13 @@ async function switchToResource(sourceKey, vodId) {
 
         // 确定要播放的集数索引
         let targetIndex = 0;
-        if (currentIndex < data.episodes.length) {
+        if (currentIndex < playableEpisodes.length) {
             // 如果当前集数在新资源中存在，则使用相同集数
             targetIndex = currentIndex;
         }
 
         // 获取目标集数的URL
-        const targetUrl = data.episodes[targetIndex];
+        const targetUrl = playableEpisodes[targetIndex];
 
         // ✅ 保存当前播放进度
 		let currentPlaybackTime = 0;
@@ -5021,7 +5032,7 @@ async function switchToResource(sourceKey, vodId) {
         // 保存当前状态到localStorage
         try {
             localStorage.setItem('currentVideoTitle', data.vod_name || '未知视频');
-            localStorage.setItem('currentEpisodes', JSON.stringify(data.episodes));
+            localStorage.setItem('currentEpisodes', JSON.stringify(playableEpisodes));
             localStorage.setItem('currentEpisodeIndex', targetIndex);
             localStorage.setItem('currentSourceCode', sourceKey);
             localStorage.setItem('lastPlayTime', Date.now());
