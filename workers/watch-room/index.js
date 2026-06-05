@@ -570,6 +570,9 @@ export class WatchRoomDurableObject {
         }
 
         if (!this.areViewersReady(room)) {
+            console.log('[WatchRoomDO] host:start rejected: viewers not ready', {
+                roomId: room.roomId,
+            });
             this.sendError(socket, ERROR_CODE.VIEWERS_NOT_READY, 'Viewers are not ready');
             return;
         }

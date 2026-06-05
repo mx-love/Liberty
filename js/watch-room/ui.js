@@ -25,6 +25,9 @@
     let pendingInitialStatus = 'waiting';
     let lastSeekSyncToastAt = 0;
     let isStartingWatchRoom = false;
+    let localTechnicalReady = false;
+    let localUserReady = false;
+    let lastPlaybackGateLogAt = 0;
 
     const HOST_SYNC_INTERVAL = 5000;
     const HOST_SEEK_DEBOUNCE = 300;
@@ -506,6 +509,23 @@
         return viewers.length === 0 || viewers.every((participant) => participant.ready);
     }
 
+    function getLocalParticipant() {
+        if (!activeRoom?.clientId) return null;
+        return getParticipants().find((participant) => participant.id === activeRoom.clientId) || null;
+    }
+
+    function getViewerReadyButtonText() {
+        if (!localTechnicalReady) return '视频准备中';
+        if (localUserReady || getLocalParticipant()?.ready) return '已准备';
+        return '我已准备';
+    }
+
+    function getViewerReadyStatusText() {
+        if (!localTechnicalReady) return '视频准备中';
+        if (localUserReady || getLocalParticipant()?.ready) return '已准备';
+        return '未准备';
+    }
+
     function renderParticipantsStatus() {
         const participants = getParticipants();
         if (!participants.length) return '';
@@ -529,6 +549,7 @@
 
         const playbackInfo = getCurrentPlaybackInfo();
         const isHost = activeRoom.role === 'host';
+        const isViewer = activeRoom.role === 'viewer';
         const isWaitingHost = isHost && activeRoom.status === 'waiting';
         const canStart = isWaitingHost && areAllViewersReady();
         content.innerHTML = `
@@ -569,9 +590,16 @@
                         ? '准备开播中。'
                         : '已加入一起看，正在跟随房主播放。'}</p>
             ${renderParticipantsStatus()}
+            ${isViewer ? `<div class="watch-room-current">
+                <div class="watch-room-current-row">
+                    <span>我的状态</span>
+                    <strong>${getViewerReadyStatusText()}</strong>
+                </div>
+            </div>` : ''}
             <div class="watch-room-actions">
                 ${isHost ? '<button type="button" class="watch-room-primary" id="copyWatchRoomIdBtn">复制房间号</button>' : ''}
-                ${isWaitingHost ? `<button type="button" class="watch-room-primary" id="startWatchRoomBtn" ${canStart ? '' : 'disabled'}>开始一起看</button>` : ''}
+                ${isWaitingHost ? `<button type="button" class="watch-room-primary" id="startWatchRoomBtn" ${canStart ? '' : 'disabled'}>${canStart ? '开始一起看' : '等待观众准备'}</button>` : ''}
+                ${isViewer && activeRoom.status === 'waiting' ? `<button type="button" class="watch-room-primary" id="viewerReadyBtn" ${localTechnicalReady && !localUserReady && !getLocalParticipant()?.ready ? '' : 'disabled'}>${getViewerReadyButtonText()}</button>` : ''}
                 <button type="button" class="${isHost ? 'watch-room-danger' : 'watch-room-primary'}" id="${isHost ? 'endWatchRoomBtn' : 'leaveWatchRoomBtn'}">
                     ${isHost ? '结束房间' : '退出房间'}
                 </button>
@@ -580,6 +608,7 @@
 
         content.querySelector('#copyWatchRoomIdBtn')?.addEventListener('click', copyRoomId);
         content.querySelector('#startWatchRoomBtn')?.addEventListener('click', startWatchRoom);
+        content.querySelector('#viewerReadyBtn')?.addEventListener('click', markViewerUserReady);
         content.querySelector('#endWatchRoomBtn')?.addEventListener('click', endRoom);
         content.querySelector('#leaveWatchRoomBtn')?.addEventListener('click', leaveRoom);
     }
@@ -651,6 +680,7 @@
         playerSyncVideo = video;
         playerSyncRole = activeRoom.role;
 
+        setupPlaybackGate(video);
         if (activeRoom.role === 'host') {
             setupHostPlaybackSync(video);
         } else if (activeRoom.role === 'viewer') {
@@ -695,11 +725,70 @@
         pendingInitialPlayback = null;
         pendingInitialMedia = null;
         pendingInitialStatus = 'waiting';
+        localTechnicalReady = false;
+        localUserReady = false;
     }
 
     function addVideoSyncListener(video, eventName, handler) {
         video.addEventListener(eventName, handler);
         playerSyncCleanupCallbacks.push(() => video.removeEventListener(eventName, handler));
+    }
+
+    function shouldBlockLocalPlayback() {
+        if (!activeRoom?.roomId || !activeRoom?.role) return false;
+        if (activeRoom.status === 'waiting') return true;
+        if (activeRoom.status === 'starting') return true;
+        if (activeRoom.role === 'viewer' && !localUserReady && activeRoom.status !== 'playing') {
+            return true;
+        }
+        return false;
+    }
+
+    function enforceWatchRoomPause(reason) {
+        const art = getCurrentArtInstance();
+        const video = getWatchRoomVideoElement();
+
+        isApplyingRemoteSync = true;
+        try {
+            if (video && !video.paused) video.pause();
+        } catch (error) {}
+
+        try {
+            if (art && typeof art.pause === 'function') art.pause();
+        } catch (error) {}
+
+        const now = Date.now();
+        if (reason !== 'timeupdate' || now - lastPlaybackGateLogAt > 1000) {
+            lastPlaybackGateLogAt = now;
+            console.log('[WatchRoom] local playback blocked', {
+                reason,
+                roomStatus: activeRoom?.status,
+                role: activeRoom?.role,
+                localTechnicalReady,
+                localUserReady
+            });
+        }
+
+        window.setTimeout(() => {
+            isApplyingRemoteSync = false;
+        }, REMOTE_SYNC_LOCK_MS);
+    }
+
+    function handleLocalVideoPlay(event) {
+        if (!shouldBlockLocalPlayback()) return;
+        enforceWatchRoomPause(event?.type || 'play');
+    }
+
+    function handleLocalVideoTimeUpdate() {
+        const video = getWatchRoomVideoElement();
+        if (!shouldBlockLocalPlayback() || !video || video.paused) return;
+        enforceWatchRoomPause('timeupdate');
+    }
+
+    function setupPlaybackGate(video) {
+        addVideoSyncListener(video, 'play', handleLocalVideoPlay);
+        addVideoSyncListener(video, 'playing', handleLocalVideoPlay);
+        addVideoSyncListener(video, 'timeupdate', handleLocalVideoTimeUpdate);
     }
 
     function canBroadcastHostSync() {
@@ -857,11 +946,21 @@
             } catch (error) {}
 
             const finishReady = () => {
-                sendViewerReady(targetTime);
+                localTechnicalReady = true;
+                viewerInitialSyncComplete = true;
+                console.log('[WatchRoom] viewer technical ready', {
+                    currentTime: Number(video.currentTime) || 0,
+                    waitTargetTime: targetTime,
+                    paused: video.paused
+                });
                 if (status === 'playing') {
                     tryPlayVideo(video);
                 } else {
                     showMessage('正在等待房主开始播放', 'info');
+                    setActiveRoom({
+                        ...(activeRoom || {}),
+                        status: activeRoom?.status || 'waiting'
+                    });
                 }
                 window.setTimeout(() => {
                     isApplyingRemoteSync = false;
@@ -885,18 +984,50 @@
     }
 
     function sendViewerReady(currentTime) {
-        if (viewerReadySent) return;
+        if (viewerReadySent) return false;
 
-        viewerReadySent = true;
-        viewerInitialSyncComplete = true;
         console.log('[WatchRoom] viewer ready sent');
-        sendSocketMessage({
+        const sent = sendSocketMessage({
             type: 'viewer:ready',
             payload: {
                 currentTime,
                 playbackRate: getWatchRoomVideoElement()?.playbackRate || 1,
                 readyAt: Date.now()
             }
+        });
+        if (!sent) {
+            showMessage('一起看尚未连接，请稍后重试', 'warning');
+            return false;
+        }
+        viewerReadySent = true;
+        return true;
+    }
+
+    function markViewerUserReady() {
+        if (activeRoom?.role !== 'viewer' || activeRoom?.status !== 'waiting') return;
+
+        console.log('[WatchRoom] viewer manual ready clicked');
+        if (!localTechnicalReady) {
+            showMessage('视频还在准备中，请稍等', 'warning');
+            return;
+        }
+
+        const video = getWatchRoomVideoElement();
+        if (video && !video.paused) {
+            enforceWatchRoomPause('manual_ready');
+        }
+
+        if (!sendViewerReady(Number(video?.currentTime || pendingInitialPlayback?.currentTime || 0))) {
+            return;
+        }
+        localUserReady = true;
+        setActiveRoom({
+            ...(activeRoom || {}),
+            participants: getParticipants().map((participant) => (
+                participant.id === activeRoom.clientId
+                    ? { ...participant, ready: true }
+                    : participant
+            ))
         });
     }
 
@@ -969,6 +1100,7 @@
             ...(activeRoom || {}),
             status: 'playing'
         });
+        console.log('[WatchRoom] playback gate released');
         viewerInitialSyncComplete = true;
 
         waitForVideoReady((video) => {
@@ -1296,6 +1428,10 @@
                 status: payload.status || activeRoom?.status || 'waiting',
                 participants: payload.participants || activeRoom?.participants || []
             };
+            const localParticipant = room.participants.find((participant) => participant.id === room.clientId);
+            if (room.role === 'viewer' && localParticipant?.ready) {
+                localUserReady = true;
+            }
             setActiveRoom(room);
             persistRoomSession(room);
 
@@ -1348,11 +1484,16 @@
 
         if (message.type === 'room:participants') {
             const payload = message.payload || {};
+            const participants = payload.participants || activeRoom?.participants || [];
+            const localParticipant = participants.find((participant) => participant.id === activeRoom?.clientId);
+            if (activeRoom?.role === 'viewer' && localParticipant?.ready) {
+                localUserReady = true;
+            }
             const room = {
                 ...(activeRoom || {}),
                 participantCount: payload.count || payload.participants?.length || 1,
                 maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10,
-                participants: payload.participants || activeRoom?.participants || []
+                participants
             };
             setActiveRoom(room);
             persistRoomSession(room);
