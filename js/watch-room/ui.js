@@ -488,8 +488,38 @@
 
     function getRoomStatusText() {
         if (activeRoom?.status === 'waiting') return '等待开播';
+        if (activeRoom?.status === 'starting') return '准备开播';
         if (activeRoom?.status === 'playing') return '一起看中';
         return '已连接';
+    }
+
+    function getParticipants() {
+        return Array.isArray(activeRoom?.participants) ? activeRoom.participants : [];
+    }
+
+    function getViewers() {
+        return getParticipants().filter((participant) => participant.role === 'viewer');
+    }
+
+    function areAllViewersReady() {
+        const viewers = getViewers();
+        return viewers.length === 0 || viewers.every((participant) => participant.ready);
+    }
+
+    function renderParticipantsStatus() {
+        const participants = getParticipants();
+        if (!participants.length) return '';
+
+        const rows = participants.map((participant) => {
+            const label = participant.role === 'host' ? '房主' : '观众';
+            const readyText = participant.ready ? '已准备' : '未准备';
+            return `<div class="watch-room-current-row">
+                <span>${escapeHtml(label)}</span>
+                <strong>${escapeHtml(participant.name || participant.id || label)} · ${readyText}</strong>
+            </div>`;
+        }).join('');
+
+        return `<div class="watch-room-current">${rows}</div>`;
     }
 
     function renderWatchRoomPanel() {
@@ -500,6 +530,7 @@
         const playbackInfo = getCurrentPlaybackInfo();
         const isHost = activeRoom.role === 'host';
         const isWaitingHost = isHost && activeRoom.status === 'waiting';
+        const canStart = isWaitingHost && areAllViewersReady();
         content.innerHTML = `
             <div class="watch-room-room-id" aria-label="房间号">${activeRoom.roomId}</div>
             <div class="watch-room-meta-grid">
@@ -534,10 +565,13 @@
                 ? '把房间号发给好友，好友打开网站后在设置里输入房间号即可加入。'
                 : activeRoom.status === 'waiting'
                     ? '正在等待房主开始播放。'
-                    : '已加入一起看，正在跟随房主播放。'}</p>
+                    : activeRoom.status === 'starting'
+                        ? '准备开播中。'
+                        : '已加入一起看，正在跟随房主播放。'}</p>
+            ${renderParticipantsStatus()}
             <div class="watch-room-actions">
                 ${isHost ? '<button type="button" class="watch-room-primary" id="copyWatchRoomIdBtn">复制房间号</button>' : ''}
-                ${isWaitingHost ? '<button type="button" class="watch-room-primary" id="startWatchRoomBtn">开始一起看</button>' : ''}
+                ${isWaitingHost ? `<button type="button" class="watch-room-primary" id="startWatchRoomBtn" ${canStart ? '' : 'disabled'}>开始一起看</button>` : ''}
                 <button type="button" class="${isHost ? 'watch-room-danger' : 'watch-room-primary'}" id="${isHost ? 'endWatchRoomBtn' : 'leaveWatchRoomBtn'}">
                     ${isHost ? '结束房间' : '退出房间'}
                 </button>
@@ -570,7 +604,7 @@
 
         const label = button.querySelector('.watch-room-button-label');
         const text = activeRoom
-            ? `${activeRoom.status === 'waiting' ? '等待开播' : '一起看中'} · ${getParticipantCount()}/${getMaxMembers()}`
+            ? `${getRoomStatusText()} · ${getParticipantCount()}/${getMaxMembers()}`
             : '一起看';
 
         if (label) {
@@ -727,10 +761,18 @@
 
     function setupHostPlaybackSync(video) {
         addVideoSyncListener(video, 'play', () => {
-            if (activeRoom?.role === 'host' && activeRoom?.status === 'waiting') {
+            if (
+                activeRoom?.role === 'host'
+                && ['waiting', 'starting'].includes(activeRoom?.status)
+            ) {
                 console.log('[WatchRoom] host play blocked in waiting, use start button');
                 pauseLocalForWaiting();
-                showMessage('请点击“开始一起看”统一开播', 'info');
+                showMessage(
+                    activeRoom.status === 'starting'
+                        ? '准备开播中'
+                        : '请点击“开始一起看”统一开播',
+                    'info'
+                );
                 return;
             }
             sendHostPlaybackEvent('host:play');
@@ -752,14 +794,18 @@
 
     function setupViewerWaitingGuard(video) {
         addVideoSyncListener(video, 'play', () => {
-            if (activeRoom?.role !== 'viewer' || activeRoom?.status !== 'waiting' || isApplyingRemoteSync) return;
+            if (
+                activeRoom?.role !== 'viewer'
+                || !['waiting', 'starting'].includes(activeRoom?.status)
+                || isApplyingRemoteSync
+            ) return;
 
             console.log('[WatchRoom] viewer play blocked in waiting');
             isApplyingRemoteSync = true;
             try {
                 video.pause();
             } catch (error) {}
-            showMessage('正在等待房主开始播放', 'info');
+            showMessage(activeRoom.status === 'starting' ? '准备开播中' : '正在等待房主开始播放', 'info');
             window.setTimeout(() => {
                 isApplyingRemoteSync = false;
             }, REMOTE_SYNC_LOCK_MS);
@@ -843,6 +889,7 @@
 
         viewerReadySent = true;
         viewerInitialSyncComplete = true;
+        console.log('[WatchRoom] viewer ready sent');
         sendSocketMessage({
             type: 'viewer:ready',
             payload: {
@@ -853,9 +900,71 @@
         });
     }
 
+    function handleSyncPrepare(payload = {}) {
+        if (!isPlayerPage() || !activeRoom) return;
+
+        console.log('[WatchRoom] received sync:prepare', payload);
+        setActiveRoom({
+            ...(activeRoom || {}),
+            status: 'starting'
+        });
+
+        waitForVideoReady((video) => {
+            if (!video) return;
+
+            const targetTime = calculateTargetTime({
+                ...payload,
+                paused: true
+            });
+
+            isApplyingRemoteSync = true;
+            try {
+                video.pause();
+                if (Math.abs((Number(video.currentTime) || 0) - targetTime) > 0.5) {
+                    video.currentTime = targetTime;
+                }
+                if (payload.playbackRate && Number.isFinite(Number(payload.playbackRate))) {
+                    video.playbackRate = Number(payload.playbackRate);
+                }
+            } catch (error) {}
+
+            let readySent = false;
+            const finishReady = () => {
+                if (readySent) return;
+                readySent = true;
+                console.log('[WatchRoom] client ready for starting');
+                sendSocketMessage({
+                    type: 'client:ready',
+                    payload: {
+                        currentTime: targetTime,
+                        readyAt: Date.now()
+                    }
+                });
+                window.setTimeout(() => {
+                    isApplyingRemoteSync = false;
+                }, REMOTE_SYNC_LOCK_MS);
+            };
+
+            if (Math.abs((Number(video.currentTime) || 0) - targetTime) > 0.5) {
+                const onSeeked = () => {
+                    video.removeEventListener('seeked', onSeeked);
+                    finishReady();
+                };
+                video.addEventListener('seeked', onSeeked);
+                window.setTimeout(() => {
+                    video.removeEventListener('seeked', onSeeked);
+                    finishReady();
+                }, 1500);
+            } else {
+                finishReady();
+            }
+        });
+    }
+
     function handleSyncStart(payload = {}) {
         if (!isPlayerPage() || !activeRoom) return;
 
+        console.log('[WatchRoom] received sync:start', payload);
         setActiveRoom({
             ...(activeRoom || {}),
             status: 'playing'
@@ -977,12 +1086,14 @@
         showMessage('正在创建房间...', 'info');
 
         try {
+            const createPayload = buildCreatePayload();
+            pauseLocalForWaiting();
             const response = await fetch('/api/watch/create', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify(buildCreatePayload())
+                body: JSON.stringify(createPayload)
             });
             const data = await response.json().catch(() => ({}));
 
@@ -999,7 +1110,6 @@
                 maxMembers: data.maxMembers || 10,
                 status: data.status || 'waiting'
             };
-            pauseLocalForWaiting();
             setActiveRoom(room);
             persistRoomSession(room);
             connectRoomSocket(data.roomId, 'host', data.clientId);
@@ -1034,12 +1144,18 @@
 
     function startWatchRoom() {
         if (activeRoom?.role !== 'host') return;
+        if (activeRoom?.status !== 'waiting') return;
 
         console.log('[WatchRoom] start together button clicked', {
             roomId: activeRoom?.roomId,
             role: activeRoom?.role,
             roomStatus: activeRoom?.status
         });
+
+        if (!areAllViewersReady()) {
+            showMessage('还有观众未准备', 'warning');
+            return;
+        }
 
         sendHostStartFromCurrentPlayback('button');
     }
@@ -1065,9 +1181,8 @@
 
         setActiveRoom({
             ...(activeRoom || {}),
-            status: 'playing'
+            status: 'starting'
         });
-        tryPlayVideo(getWatchRoomVideoElement());
         window.setTimeout(() => {
             isStartingWatchRoom = false;
         }, 1000);
@@ -1178,7 +1293,8 @@
                 clientId: message.clientId || activeRoom?.clientId || '',
                 participantCount: payload.participantCount || payload.participants?.length || activeRoom?.participantCount || 1,
                 maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10,
-                status: payload.status || activeRoom?.status || 'waiting'
+                status: payload.status || activeRoom?.status || 'waiting',
+                participants: payload.participants || activeRoom?.participants || []
             };
             setActiveRoom(room);
             persistRoomSession(room);
@@ -1195,6 +1311,10 @@
 
         if (message.type === 'sync:prepare') {
             const payload = message.payload || {};
+            if (payload.status === 'starting') {
+                handleSyncPrepare(payload);
+                return;
+            }
             scheduleViewerInitialSync(payload.playback || {}, payload.media || {}, payload.status || activeRoom?.status || 'waiting');
             return;
         }
@@ -1231,7 +1351,8 @@
             const room = {
                 ...(activeRoom || {}),
                 participantCount: payload.count || payload.participants?.length || 1,
-                maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10
+                maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10,
+                participants: payload.participants || activeRoom?.participants || []
             };
             setActiveRoom(room);
             persistRoomSession(room);
@@ -1246,6 +1367,17 @@
 
         if (message.type === 'room:error') {
             showMessage(getErrorMessage(message.payload?.code) || message.payload?.message || '一起看发生错误', 'error');
+            if (
+                activeRoom?.role === 'host'
+                && ['VIEWERS_NOT_READY', 'UNAUTHORIZED_ACTION'].includes(message.payload?.code)
+                && activeRoom.status === 'starting'
+            ) {
+                isStartingWatchRoom = false;
+                setActiveRoom({
+                    ...(activeRoom || {}),
+                    status: 'waiting'
+                });
+            }
             if (activeRoom?.role === 'viewer') {
                 clearRoomState();
             }
@@ -1337,6 +1469,16 @@
         const roomState = await fetchRoomState(cleaned);
         if (!roomState) return false;
 
+        if (roomState.status !== 'waiting') {
+            showMessage(
+                ['starting', 'playing'].includes(roomState.status)
+                    ? '房间已开播，暂不支持加入'
+                    : '房间不存在或已结束',
+                'warning'
+            );
+            return false;
+        }
+
         setActiveRoom({
             roomId: cleaned,
             role: 'viewer',
@@ -1344,6 +1486,7 @@
             participantCount: roomState.participantCount || roomState.participantsCount || 1,
             maxMembers: roomState.maxMembers || 10,
             status: roomState.status || 'waiting',
+            participants: roomState.participants || [],
             pendingPlayerRedirect: false
         });
         return enterHostPlayback(roomState, {
@@ -1412,7 +1555,9 @@
             ROOM_FULL: '房间人数已满',
             INVALID_ROOM_ID: '请输入 8 位房间号',
             HOST_DISCONNECTED: '房主暂时离线',
-            UNAUTHORIZED_ACTION: '无权执行该操作'
+            UNAUTHORIZED_ACTION: '无权执行该操作',
+            ROOM_ALREADY_STARTED: '房间已开播，暂不支持加入',
+            VIEWERS_NOT_READY: '还有观众未准备'
         };
         return messages[code] || '';
     }
