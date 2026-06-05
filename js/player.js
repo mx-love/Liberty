@@ -1,5 +1,9 @@
 function safeLocalStorageGet(key, fallback = '[]') {
     try {
+        const storageUtils = window.LibertyUtils?.storage;
+        if (storageUtils) {
+            return storageUtils.readStorage(key, storageUtils.safeJsonParse(fallback, []));
+        }
         return JSON.parse(localStorage.getItem(key) || fallback);
     } catch (e) {
         console.warn(`读取 localStorage[${key}] 失败:`, e);
@@ -706,6 +710,8 @@ function getCurrentEpisodeName(index) {
 }
 
 function getPlayerEpisodeUrlValue(episode) {
+    const helper = window.LibertyUtils?.media?.getEpisodeUrl;
+    if (helper) return helper(episode);
     if (!episode) return '';
     if (typeof episode === 'string') return episode;
     return episode.url || '';
@@ -2451,6 +2457,8 @@ function initializePageContent() {
     // 保存当前视频URL
     currentVideoUrl = videoUrl || '';
 
+    const playbackState = window.LibertyUtils?.playbackState;
+
     // 从localStorage获取数据
     currentVideoTitle = title || localStorage.getItem('currentVideoTitle') || '未知视频';
     currentEpisodeIndex = index;
@@ -2470,13 +2478,24 @@ function initializePageContent() {
 
     // 优先使用URL传递的集数信息，否则从localStorage获取
     try {
+        const storageUtils = window.LibertyUtils?.storage;
         if (episodesList) {
             // 如果URL中有集数数据，优先使用它
-            currentEpisodes = JSON.parse(decodeURIComponent(episodesList));
+            const decodedEpisodes = decodeURIComponent(episodesList);
+            const parsedEpisodes = storageUtils
+                ? storageUtils.safeJsonParse(decodedEpisodes, [])
+                : JSON.parse(decodedEpisodes);
+            currentEpisodes = playbackState
+                ? playbackState.normalizeEpisodesToUrls(parsedEpisodes)
+                : parsedEpisodes;
 
         } else {
             // 否则从localStorage获取
-            currentEpisodes = JSON.parse(localStorage.getItem('currentEpisodes') || '[]');
+            currentEpisodes = playbackState
+                ? playbackState.readCurrentEpisodes()
+                : storageUtils
+                    ? storageUtils.readStorage('currentEpisodes', [])
+                    : JSON.parse(localStorage.getItem('currentEpisodes') || '[]');
 
         }
 
@@ -4088,7 +4107,7 @@ function playEpisode(index) {
     }
 
     // 准备切换剧集的URL
-    const url = currentEpisodes[index];
+    const url = getPlayerEpisodeUrlValue(currentEpisodes[index]);
 
     // 首先隐藏之前可能显示的错误
     document.getElementById('error').style.display = 'none';
@@ -4737,7 +4756,7 @@ async function testVideoSourceSpeed(sourceKey, vodId) {
         }
 
         // 测试第一个播放链接的响应速度
-        const firstEpisodeUrl = data.episodes[0];
+        const firstEpisodeUrl = getPlayerEpisodeUrlValue(data.episodes[0]);
         if (!firstEpisodeUrl) {
             return { speed: -1, error: '链接无效' };
         }
@@ -5031,10 +5050,21 @@ async function switchToResource(sourceKey, vodId) {
 
         // 保存当前状态到localStorage
         try {
-            localStorage.setItem('currentVideoTitle', data.vod_name || '未知视频');
-            localStorage.setItem('currentEpisodes', JSON.stringify(playableEpisodes));
-            localStorage.setItem('currentEpisodeIndex', targetIndex);
-            localStorage.setItem('currentSourceCode', sourceKey);
+            const playbackState = window.LibertyUtils?.playbackState;
+            if (playbackState) {
+                playbackState.writePlaybackSession({
+                    title: data.vod_name || '未知视频',
+                    sourceCode: sourceKey,
+                    vodId,
+                    episodeIndex: targetIndex,
+                    episodes: playableEpisodes
+                });
+            } else {
+                localStorage.setItem('currentVideoTitle', data.vod_name || '未知视频');
+                localStorage.setItem('currentEpisodes', JSON.stringify(playableEpisodes));
+                localStorage.setItem('currentEpisodeIndex', targetIndex);
+                localStorage.setItem('currentSourceCode', sourceKey);
+            }
             localStorage.setItem('lastPlayTime', Date.now());
         } catch (e) {
             console.error('保存播放状态失败:', e);

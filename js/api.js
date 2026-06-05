@@ -55,12 +55,16 @@ function parseVodPlaySources(vodPlayFrom = '', vodPlayUrl = '') {
 }
 
 function getApiEpisodeUrlValue(episode) {
+    const helper = window.LibertyUtils?.media?.getEpisodeUrl;
+    if (helper) return helper(episode);
     if (!episode) return '';
     if (typeof episode === 'string') return episode;
     return episode.url || '';
 }
 
 function isApiDirectMediaUrl(url = '') {
+    const helper = window.LibertyUtils?.media?.isDirectMediaUrl;
+    if (helper) return helper(url);
     const value = String(url || '').toLowerCase().split('?')[0];
     return value.endsWith('.m3u8') ||
         value.endsWith('.mp4') ||
@@ -69,10 +73,14 @@ function isApiDirectMediaUrl(url = '') {
 }
 
 function isApiHlsUrl(url = '') {
+    const helper = window.LibertyUtils?.media?.isHlsUrl;
+    if (helper) return helper(url);
     return String(url || '').toLowerCase().split('?')[0].endsWith('.m3u8');
 }
 
 function isApiLikelyWebPageUrl(url = '') {
+    const helper = window.LibertyUtils?.media?.isLikelyWebPageUrl;
+    if (helper) return helper(url);
     const value = String(url || '').toLowerCase();
     return value.includes('/share/') ||
         value.includes('/play/') ||
@@ -81,6 +89,8 @@ function isApiLikelyWebPageUrl(url = '') {
 }
 
 function getApiPlaySourcePriority(source = {}) {
+    const helper = window.LibertyUtils?.media?.getPlaySourcePriority;
+    if (helper) return helper(source);
     const name = String(source.name || '').toLowerCase();
     const episodes = Array.isArray(source.episodes) ? source.episodes : [];
     const urls = episodes.map(getApiEpisodeUrlValue).filter(Boolean);
@@ -103,6 +113,8 @@ function getApiPlaySourcePriority(source = {}) {
 }
 
 function getApiPreferredPlaySourceIndex(playSources = []) {
+    const helper = window.LibertyUtils?.media?.getPreferredPlaySourceIndex;
+    if (helper) return helper(playSources);
     if (!Array.isArray(playSources) || playSources.length === 0) return 0;
 
     let bestIndex = -1;
@@ -770,18 +782,31 @@ async function handleMultipleCustomSearch(searchQuery, customApiUrls) {
     }
 }
 
-// 拦截API请求
+function shouldHandleLocalApiRequest(pathname) {
+    return pathname === '/api/search' || pathname === '/api/detail';
+}
+
+// 拦截项目内部虚拟API请求
 (function() {
     const originalFetch = window.fetch;
 
     window.fetch = async function(input, init) {
-        const requestUrl = typeof input === 'string' ? new URL(input, window.location.origin) : input.url;
+        const rawUrl = typeof input === 'string'
+            ? input
+            : input instanceof URL
+                ? input.href
+                : input?.url;
 
-        if (requestUrl.pathname.startsWith('/api/danmu/')) {
+        if (!rawUrl) {
             return originalFetch.apply(this, arguments);
         }
 
-        if (requestUrl.pathname.startsWith('/api/')) {
+        const requestUrl = new URL(
+            rawUrl,
+            window.location.origin
+        );
+
+        if (requestUrl.origin === window.location.origin && shouldHandleLocalApiRequest(requestUrl.pathname)) {
             if (window.isPasswordProtected && window.isPasswordVerified) {
                 if (window.isPasswordProtected() && !window.isPasswordVerified()) {
                     return;
@@ -808,7 +833,7 @@ async function handleMultipleCustomSearch(searchQuery, customApiUrls) {
             }
         }
 
-        // 非API请求使用原始fetch
+        // 非内部虚拟API请求使用原始fetch，包括 /api/danmu/ 和其他 Cloudflare Functions
         return originalFetch.apply(this, arguments);
     };
 })();

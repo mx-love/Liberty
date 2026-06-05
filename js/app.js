@@ -1,6 +1,10 @@
 // 全局变量
-let selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || '["tyyszy","dyttzy", "bfzy", "ruyi"]'); // 默认选中资源
-let customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]'); // 存储自定义API列表
+let selectedAPIs = window.LibertyUtils?.storage
+    ? window.LibertyUtils.storage.readStorage('selectedAPIs', ["tyyszy", "dyttzy", "bfzy", "ruyi"])
+    : JSON.parse(localStorage.getItem('selectedAPIs') || '["tyyszy","dyttzy", "bfzy", "ruyi"]'); // 默认选中资源
+let customAPIs = window.LibertyUtils?.storage
+    ? window.LibertyUtils.storage.readStorage('customAPIs', [])
+    : JSON.parse(localStorage.getItem('customAPIs') || '[]'); // 存储自定义API列表
 let mergedSearchGroups = {};
 
 // 添加当前播放的集数索引
@@ -1593,10 +1597,14 @@ function escapeJsString(value) {
 }
 
 function getEpisodeUrl(episode) {
+    const helper = window.LibertyUtils?.media?.getEpisodeUrl;
+    if (helper) return helper(episode);
     return typeof episode === 'string' ? episode : (episode && episode.url) || '';
 }
 
 function isDirectMediaUrl(url = '') {
+    const helper = window.LibertyUtils?.media?.isDirectMediaUrl;
+    if (helper) return helper(url);
     const value = String(url || '').toLowerCase().split('?')[0];
     return value.endsWith('.m3u8') ||
         value.endsWith('.mp4') ||
@@ -1605,10 +1613,14 @@ function isDirectMediaUrl(url = '') {
 }
 
 function isHlsUrl(url = '') {
+    const helper = window.LibertyUtils?.media?.isHlsUrl;
+    if (helper) return helper(url);
     return String(url || '').toLowerCase().split('?')[0].endsWith('.m3u8');
 }
 
 function isLikelyWebPageUrl(url = '') {
+    const helper = window.LibertyUtils?.media?.isLikelyWebPageUrl;
+    if (helper) return helper(url);
     const value = String(url || '').toLowerCase();
     return value.includes('/share/') ||
         value.includes('/play/') ||
@@ -1617,6 +1629,8 @@ function isLikelyWebPageUrl(url = '') {
 }
 
 function getPlaySourcePriority(source = {}) {
+    const helper = window.LibertyUtils?.media?.getPlaySourcePriority;
+    if (helper) return helper(source);
     const name = String(source.name || '').toLowerCase();
     const episodes = Array.isArray(source.episodes) ? source.episodes : [];
     const urls = episodes.map(getEpisodeUrl).filter(Boolean);
@@ -1639,6 +1653,8 @@ function getPlaySourcePriority(source = {}) {
 }
 
 function getPreferredPlaySourceIndex(playSources = []) {
+    const helper = window.LibertyUtils?.media?.getPreferredPlaySourceIndex;
+    if (helper) return helper(playSources);
     if (!Array.isArray(playSources) || playSources.length === 0) return 0;
 
     let bestIndex = -1;
@@ -1661,11 +1677,15 @@ function getPreferredPlaySourceIndex(playSources = []) {
 }
 
 function isWebPagePlaySource(source = {}) {
+    const helper = window.LibertyDetail?.playSources?.isWebPagePlaySource;
+    if (helper) return helper(source);
     const episodes = Array.isArray(source.episodes) ? source.episodes : [];
     return episodes.map(getEpisodeUrl).filter(Boolean).some(isLikelyWebPageUrl);
 }
 
 function getEpisodeName(episode, index) {
+    const helper = window.LibertyUtils?.media?.getEpisodeName;
+    if (helper) return helper(episode, index);
     if (episode && typeof episode === 'object' && episode.name) {
         return episode.name;
     }
@@ -1712,6 +1732,8 @@ function normalizePlaySources(playSources, fallbackEpisodes) {
 }
 
 function hasPlayableEpisodes(episodes) {
+    const helper = window.LibertyUtils?.media?.hasPlayableEpisodes;
+    if (helper) return helper(episodes);
     return Array.isArray(episodes) && episodes.some(episode => getEpisodeUrl(episode));
 }
 
@@ -1750,10 +1772,23 @@ function getCurrentPlaySourceName() {
 }
 
 function getCurrentEpisodeUrls() {
-    return currentEpisodes.map(getEpisodeUrl).filter(Boolean);
+    const helper = window.LibertyUtils?.media?.normalizeEpisodeUrls;
+    return helper ? helper(currentEpisodes) : currentEpisodes.map(getEpisodeUrl).filter(Boolean);
 }
 
 function renderPlaySourceButtons(sourceCode, vodId) {
+    const renderer = window.LibertyDetail?.playSources?.renderPlaySourceButtons;
+    if (renderer) {
+        return renderer({
+            playSources: currentPlaySources,
+            currentPlaySourceIndex,
+            sourceCode,
+            vodId,
+            escapeHtml,
+            escapeJsString
+        });
+    }
+
     if (!Array.isArray(currentPlaySources) || currentPlaySources.length <= 1) return '';
 
     const recommendedIndex = getPreferredPlaySourceIndex(currentPlaySources);
@@ -1785,6 +1820,15 @@ function renderPlaySourceButtons(sourceCode, vodId) {
 }
 
 function updateEpisodeStats() {
+    const updater = window.LibertyDetail?.playSources?.updateEpisodeStats;
+    if (updater) {
+        updater({
+            episodes: currentEpisodes,
+            sourceName: getCurrentPlaySourceName()
+        });
+        return;
+    }
+
     const stats = document.getElementById('episodeStats');
     if (!stats) return;
 
@@ -1934,6 +1978,16 @@ async function showDetails(id, vod_name, sourceCode) {
                 <div id="playSourceContainer">
                     ${renderPlaySourceButtons(sourceCode, id)}
                 </div>
+                ${window.LibertyDetail?.modal?.renderEpisodeActions
+                    ? window.LibertyDetail.modal.renderEpisodeActions({
+                        sourceCode,
+                        vodId: id,
+                        episodes: currentEpisodes,
+                        episodesReversed,
+                        sourceName: getCurrentPlaySourceName(),
+                        escapeHtml
+                    })
+                    : `
                 <div class="detail-episode-actions flex flex-wrap items-center justify-between mb-4 gap-2">
                     <div class="episode-toolbar flex items-center gap-2">
                         <button onclick="toggleEpisodeOrder('${sourceCode}', '${id}')" 
@@ -1949,6 +2003,7 @@ async function showDetails(id, vod_name, sourceCode) {
                         复制链接
                     </button>
                 </div>
+                    `}
                 <div id="episodesGrid" class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
                     ${renderEpisodes(vod_name, sourceCode, id)}
                 </div>
@@ -2006,11 +2061,23 @@ function playVideo(url, vod_name, sourceCode, episodeIndex = 0, vodId = '') {
 
     // 保存当前状态到localStorage
     try {
-        localStorage.setItem('currentVideoTitle', vod_name || '未知视频');
-        localStorage.setItem('currentVideoYear', currentVideoYear);
-        localStorage.setItem('currentEpisodes', JSON.stringify(getCurrentEpisodeUrls()));
-        localStorage.setItem('currentEpisodeIndex', episodeIndex);
-        localStorage.setItem('currentSourceCode', sourceCode || '');
+        const playbackState = window.LibertyUtils?.playbackState;
+        if (playbackState) {
+            playbackState.writePlaybackSession({
+                title: vod_name || '未知视频',
+                year: currentVideoYear,
+                sourceCode: sourceCode || '',
+                vodId: vodId || '',
+                episodeIndex,
+                episodes: getCurrentEpisodeUrls()
+            });
+        } else {
+            localStorage.setItem('currentVideoTitle', vod_name || '未知视频');
+            localStorage.setItem('currentVideoYear', currentVideoYear);
+            localStorage.setItem('currentEpisodes', JSON.stringify(getCurrentEpisodeUrls()));
+            localStorage.setItem('currentEpisodeIndex', episodeIndex);
+            localStorage.setItem('currentSourceCode', sourceCode || '');
+        }
         localStorage.setItem('lastPlayTime', Date.now());
         localStorage.setItem('lastSearchPage', currentPath);
         localStorage.setItem('lastPageUrl', currentPath);  // 确保保存返回页面URL
@@ -2091,6 +2158,18 @@ function handlePlayerError() {
 
 // 辅助函数用于渲染剧集按钮（使用当前的排序状态）
 function renderEpisodes(vodName, sourceCode, vodId) {
+    const renderer = window.LibertyDetail?.episodes?.renderEpisodeButtons;
+    if (renderer) {
+        return renderer({
+            episodes: currentEpisodes,
+            episodesReversed,
+            sourceCode,
+            vodId,
+            escapeHtml,
+            escapeJsString
+        });
+    }
+
     const episodes = episodesReversed ? [...currentEpisodes].reverse() : currentEpisodes;
     return episodes.map((episode, index) => {
         // 根据倒序状态计算真实的剧集索引
@@ -2108,8 +2187,9 @@ function renderEpisodes(vodName, sourceCode, vodId) {
 
 // 复制视频链接到剪贴板
 function copyLinks() {
-    const episodes = episodesReversed ? [...currentEpisodes].reverse() : currentEpisodes;
-    const linkList = episodes.map(getEpisodeUrl).filter(Boolean).join('\r\n');
+    const linkList = window.LibertyDetail?.episodes?.getCopyLinkText
+        ? window.LibertyDetail.episodes.getCopyLinkText(currentEpisodes, episodesReversed)
+        : (episodesReversed ? [...currentEpisodes].reverse() : currentEpisodes).map(getEpisodeUrl).filter(Boolean).join('\r\n');
     navigator.clipboard.writeText(linkList).then(() => {
         showToast('播放链接已复制', 'success');
     }).catch(err => {
@@ -2127,12 +2207,17 @@ function toggleEpisodeOrder(sourceCode, vodId) {
     }
 
     // 更新按钮文本和箭头方向
-    const toggleBtn = document.querySelector(`button[onclick="toggleEpisodeOrder('${sourceCode}', '${vodId}')"]`);
-    if (toggleBtn) {
-        toggleBtn.querySelector('span').textContent = episodesReversed ? '正序排列' : '倒序排列';
-        const arrowIcon = toggleBtn.querySelector('svg');
-        if (arrowIcon) {
-            arrowIcon.style.transform = episodesReversed ? 'rotate(180deg)' : 'rotate(0deg)';
+    const updater = window.LibertyDetail?.episodes?.updateOrderToggleButton;
+    if (updater) {
+        updater(sourceCode, vodId, episodesReversed);
+    } else {
+        const toggleBtn = document.querySelector(`button[onclick="toggleEpisodeOrder('${sourceCode}', '${vodId}')"]`);
+        if (toggleBtn) {
+            toggleBtn.querySelector('span').textContent = episodesReversed ? '正序排列' : '倒序排列';
+            const arrowIcon = toggleBtn.querySelector('svg');
+            if (arrowIcon) {
+                arrowIcon.style.transform = episodesReversed ? 'rotate(180deg)' : 'rotate(0deg)';
+            }
         }
     }
 }
