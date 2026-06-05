@@ -52,6 +52,50 @@ function getParticipantList(participants = {}) {
     }));
 }
 
+function isHostControlEvent(type) {
+    return ['host:play', 'host:pause', 'host:seek', 'host:sync'].includes(type);
+}
+
+function getSyncEventType(hostEventType) {
+    const eventMap = {
+        'host:play': 'sync:play',
+        'host:pause': 'sync:pause',
+        'host:seek': 'sync:seek',
+        'host:sync': 'sync:state',
+    };
+    return eventMap[hostEventType] || 'sync:state';
+}
+
+function normalizeNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizePlaybackPayload(type, payload = {}, previousPlayback = {}) {
+    const updatedAt = normalizeNumber(payload.updatedAt, now());
+    const previousPaused = previousPlayback.paused !== undefined
+        ? Boolean(previousPlayback.paused)
+        : true;
+
+    let paused = previousPaused;
+    if (type === 'host:play') paused = false;
+    if (type === 'host:pause') paused = true;
+    if (type === 'host:sync' && payload.paused !== undefined) {
+        paused = Boolean(payload.paused);
+    }
+    if (type === 'host:seek' && payload.paused !== undefined) {
+        paused = Boolean(payload.paused);
+    }
+
+    return {
+        paused,
+        currentTime: Math.max(0, normalizeNumber(payload.currentTime, previousPlayback.currentTime || 0)),
+        duration: Math.max(0, normalizeNumber(payload.duration, previousPlayback.duration || 0)),
+        playbackRate: normalizeNumber(payload.playbackRate, previousPlayback.playbackRate || 1) || 1,
+        updatedAt,
+    };
+}
+
 export class WatchRoomDurableObject {
     constructor(state, env) {
         this.state = state;
@@ -286,7 +330,29 @@ export class WatchRoomDurableObject {
             return;
         }
 
+        if (isHostControlEvent(message.type)) {
+            await this.handleHostControl(socket, room, session, message);
+            return;
+        }
+
         this.sendError(socket, 'UNKNOWN_EVENT', 'Unknown event');
+    }
+
+    async handleHostControl(socket, room, session, message) {
+        if (session.role !== 'host' || session.clientId !== room.hostId) {
+            this.sendError(socket, ERROR_CODE.UNAUTHORIZED_ACTION, 'Only host can control playback');
+            return;
+        }
+
+        const playback = normalizePlaybackPayload(
+            message.type,
+            message.payload || {},
+            room.playback || {}
+        );
+
+        room.playback = playback;
+        await this.writeRoom(room);
+        await this.broadcastPlaybackSync(room, session.clientId, getSyncEventType(message.type), playback);
     }
 
     async touchParticipant(room, clientId) {
@@ -348,6 +414,21 @@ export class WatchRoomDurableObject {
         const message = buildMessage('room:participants', room.roomId, '', payload);
 
         for (const socket of this.sessions.keys()) {
+            try {
+                socket.send(message);
+            } catch (error) {}
+        }
+    }
+
+    async broadcastPlaybackSync(room, sourceClientId, type, playback) {
+        const message = buildMessage(type, room.roomId, sourceClientId, {
+            ...playback,
+            sourceClientId,
+        });
+
+        for (const [socket, session] of this.sessions.entries()) {
+            if (session.role !== 'viewer') continue;
+
             try {
                 socket.send(message);
             } catch (error) {}

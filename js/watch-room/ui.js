@@ -1,9 +1,25 @@
 (function () {
     window.LibertyWatchRoom = window.LibertyWatchRoom || {};
 
+    const SESSION_ROOM_ID_KEY = 'watchRoomId';
+    const SESSION_ROOM_ROLE_KEY = 'watchRoomRole';
+    const SESSION_ROOM_CLIENT_ID_KEY = 'watchRoomClientId';
+
     let activeRoom = null;
     let socket = null;
     let heartbeatTimer = null;
+    let hostSyncTimer = null;
+    let hostSeekDebounceTimer = null;
+    let playerSyncSetupTimer = null;
+    let playerSyncVideo = null;
+    let playerSyncRole = '';
+    let playerSyncCleanupCallbacks = [];
+    let isApplyingRemoteSync = false;
+    let lastSeekSyncToastAt = 0;
+
+    const HOST_SYNC_INTERVAL = 5000;
+    const HOST_SEEK_DEBOUNCE = 300;
+    const REMOTE_SYNC_LOCK_MS = 500;
 
     function showMessage(message, type = 'info') {
         if (typeof window.showToast === 'function') {
@@ -29,16 +45,84 @@
         return `${minutes}:${String(rest).padStart(2, '0')}`;
     }
 
+    function toSafeIndex(value) {
+        const index = Number(value);
+        return Number.isFinite(index) && index >= 0 ? Math.floor(index) : 0;
+    }
+
+    function getPlaybackState() {
+        return window.LibertyUtils?.playbackState || null;
+    }
+
+    function normalizeEpisodeUrls(episodes) {
+        const playbackState = getPlaybackState();
+        if (playbackState?.normalizeEpisodesToUrls) {
+            return playbackState.normalizeEpisodesToUrls(Array.isArray(episodes) ? episodes : []);
+        }
+
+        const getEpisodeUrl = window.LibertyUtils?.media?.getEpisodeUrl || ((episode) => {
+            if (!episode) return '';
+            if (typeof episode === 'string') return episode;
+            return episode.url || '';
+        });
+
+        return (Array.isArray(episodes) ? episodes : []).map(getEpisodeUrl).filter(Boolean);
+    }
+
     function getPlayerVideoElement() {
         return document.querySelector('video');
     }
 
+    function getWatchRoomVideoElement() {
+        return window.LibertyPlayer?.art?.video || getPlayerVideoElement();
+    }
+
+    function isPlayerPage() {
+        return /(^|\/)player\.html$/i.test(window.location.pathname);
+    }
+
+    function readSessionValue(key) {
+        try {
+            return sessionStorage.getItem(key) || '';
+        } catch (error) {
+            return '';
+        }
+    }
+
+    function writeSessionValue(key, value) {
+        try {
+            sessionStorage.setItem(key, String(value || ''));
+        } catch (error) {}
+    }
+
+    function removeSessionValue(key) {
+        try {
+            sessionStorage.removeItem(key);
+        } catch (error) {}
+    }
+
+    function persistRoomSession(room) {
+        if (!room?.roomId || !room?.role) return;
+
+        writeSessionValue(SESSION_ROOM_ID_KEY, room.roomId);
+        writeSessionValue(SESSION_ROOM_ROLE_KEY, room.role);
+        if (room.clientId) {
+            writeSessionValue(SESSION_ROOM_CLIENT_ID_KEY, room.clientId);
+        }
+    }
+
+    function clearStoredRoomSession() {
+        removeSessionValue(SESSION_ROOM_ID_KEY);
+        removeSessionValue(SESSION_ROOM_ROLE_KEY);
+        removeSessionValue(SESSION_ROOM_CLIENT_ID_KEY);
+    }
+
     function getCurrentPlaybackInfo() {
         const urlParams = new URLSearchParams(window.location.search);
-        const video = getPlayerVideoElement();
+        const video = getWatchRoomVideoElement();
         const titleElement = document.getElementById('videoTitle');
         const episodeElement = document.getElementById('episodeInfo');
-        const playbackState = window.LibertyUtils?.playbackState;
+        const playbackState = getPlaybackState();
         const session = playbackState?.readPlaybackSession ? playbackState.readPlaybackSession() : {};
 
         return {
@@ -52,9 +136,40 @@
         };
     }
 
+    function getPlaybackSyncPayload() {
+        const video = getWatchRoomVideoElement();
+        return {
+            paused: video ? video.paused : true,
+            currentTime: video ? video.currentTime || 0 : 0,
+            duration: video ? video.duration || 0 : 0,
+            playbackRate: video ? video.playbackRate || 1 : 1,
+            updatedAt: Date.now()
+        };
+    }
+
+    function getCurrentEpisodeUrl(episodes, episodeIndex) {
+        const urlParams = new URLSearchParams(window.location.search);
+        return urlParams.get('url') || episodes[episodeIndex] || '';
+    }
+
     function buildCreatePayload() {
         const playbackInfo = getCurrentPlaybackInfo();
         const session = playbackInfo.session || {};
+        let episodes = normalizeEpisodeUrls(session.episodes);
+        let episodeIndex = toSafeIndex(session.episodeIndex ?? new URLSearchParams(window.location.search).get('index'));
+        let episodeUrl = getCurrentEpisodeUrl(episodes, episodeIndex);
+
+        if (episodeUrl && !episodes.length) {
+            episodes = [episodeUrl];
+            episodeIndex = 0;
+        }
+
+        if (episodeUrl && episodes.length && !episodes[episodeIndex]) {
+            const matchedIndex = episodes.indexOf(episodeUrl);
+            if (matchedIndex >= 0) {
+                episodeIndex = matchedIndex;
+            }
+        }
 
         return {
             media: {
@@ -63,10 +178,10 @@
                 sourceCode: session.sourceCode || localStorage.getItem('currentSourceCode') || '',
                 sourceName: session.sourceName || localStorage.getItem('currentSourceName') || '',
                 vodId: session.vodId || localStorage.getItem('currentVodId') || '',
-                episodeIndex: session.episodeIndex || Number(new URLSearchParams(window.location.search).get('index')) || 0,
+                episodeIndex,
                 episodeName: playbackInfo.episode,
-                episodeUrl: new URLSearchParams(window.location.search).get('url') || '',
-                episodes: Array.isArray(session.episodes) ? session.episodes : []
+                episodeUrl,
+                episodes
             },
             playback: {
                 paused: playbackInfo.paused,
@@ -76,6 +191,105 @@
                 updatedAt: Date.now()
             }
         };
+    }
+
+    function buildPlaybackSessionFromRoomState(payload = {}) {
+        const media = payload.media || {};
+        let episodes = normalizeEpisodeUrls(media.episodes);
+        let episodeIndex = toSafeIndex(media.episodeIndex);
+        let episodeUrl = media.episodeUrl || episodes[episodeIndex] || '';
+
+        if (!episodeUrl && episodes.length) {
+            episodeIndex = Math.min(episodeIndex, episodes.length - 1);
+            episodeUrl = episodes[episodeIndex] || '';
+        }
+
+        if (episodeUrl && episodes.length && episodes[episodeIndex] !== episodeUrl) {
+            const matchedIndex = episodes.indexOf(episodeUrl);
+            if (matchedIndex >= 0) {
+                episodeIndex = matchedIndex;
+            }
+        }
+
+        if (episodeUrl && !episodes.length) {
+            episodes = [episodeUrl];
+            episodeIndex = 0;
+        }
+
+        if (!episodeUrl || !episodes.length) {
+            return null;
+        }
+
+        return {
+            title: media.title || '未知视频',
+            year: media.year || '',
+            sourceCode: media.sourceCode || '',
+            sourceName: media.sourceName || '',
+            vodId: media.vodId || '',
+            episodeIndex,
+            episodeName: media.episodeName || `第${episodeIndex + 1}集`,
+            episodeUrl,
+            episodes
+        };
+    }
+
+    function writePlaybackSessionForViewer(session) {
+        const playbackState = getPlaybackState();
+        if (playbackState?.writePlaybackSession) {
+            playbackState.writePlaybackSession(session);
+        } else {
+            localStorage.setItem('currentVideoTitle', session.title || '未知视频');
+            localStorage.setItem('currentVideoYear', session.year || '');
+            localStorage.setItem('currentSourceCode', session.sourceCode || '');
+            localStorage.setItem('currentSourceName', session.sourceName || '');
+            localStorage.setItem('currentVodId', session.vodId || '');
+            localStorage.setItem('currentEpisodeIndex', String(session.episodeIndex || 0));
+            localStorage.setItem('currentEpisodes', JSON.stringify(session.episodes || []));
+        }
+
+        localStorage.setItem('lastPlayTime', String(Date.now()));
+    }
+
+    function buildPlayerUrl(session, playback = {}) {
+        const params = new URLSearchParams();
+
+        if (session.vodId) params.set('id', session.vodId);
+        if (session.sourceCode) params.set('source', session.sourceCode);
+        params.set('url', session.episodeUrl);
+        params.set('index', String(session.episodeIndex || 0));
+        params.set('title', session.title || '未知视频');
+        if (session.year) params.set('year', session.year);
+
+        const position = Math.floor(Number(playback.currentTime) || 0);
+        if (position > 0) {
+            params.set('position', String(position));
+        }
+
+        return `player.html?${params.toString()}`;
+    }
+
+    function enterHostPlayback(payload = {}, message = {}) {
+        const session = buildPlaybackSessionFromRoomState(payload);
+        if (!session) {
+            showMessage('房主当前播放信息不完整，无法进入播放页', 'error');
+            return false;
+        }
+
+        const room = {
+            ...(activeRoom || {}),
+            roomId: message.roomId || payload.roomId || activeRoom?.roomId,
+            role: 'viewer',
+            clientId: message.clientId || activeRoom?.clientId || '',
+            participantCount: payload.participantCount || activeRoom?.participantCount || 1,
+            maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10
+        };
+
+        persistRoomSession(room);
+        writePlaybackSessionForViewer(session);
+        closeSocket(false);
+        showMessage('已加入一起看，正在进入播放页', 'success');
+        window.location.href = buildPlayerUrl(session, payload.playback || {});
+        return true;
     }
 
     function ensureWatchRoomModal() {
@@ -200,9 +414,170 @@
     function setActiveRoom(room) {
         activeRoom = room;
         updatePlayerWatchRoomButton();
+        setupPlayerSyncForRoom();
         if (!document.getElementById('watchRoomModal')?.classList.contains('hidden')) {
             renderWatchRoomPanel();
         }
+    }
+
+    function setupPlayerSyncForRoom() {
+        if (!isPlayerPage() || !activeRoom) {
+            cleanupPlayerSync();
+            return;
+        }
+
+        const video = getWatchRoomVideoElement();
+        if (!video) {
+            if (!playerSyncSetupTimer) {
+                playerSyncSetupTimer = window.setTimeout(() => {
+                    playerSyncSetupTimer = null;
+                    setupPlayerSyncForRoom();
+                }, 500);
+            }
+            return;
+        }
+
+        if (playerSyncVideo === video && playerSyncRole === activeRoom.role) return;
+
+        cleanupPlayerSync();
+        playerSyncVideo = video;
+        playerSyncRole = activeRoom.role;
+
+        if (activeRoom.role === 'host') {
+            setupHostPlaybackSync(video);
+        }
+    }
+
+    function cleanupPlayerSync() {
+        if (playerSyncSetupTimer) {
+            window.clearTimeout(playerSyncSetupTimer);
+            playerSyncSetupTimer = null;
+        }
+        if (hostSyncTimer) {
+            window.clearInterval(hostSyncTimer);
+            hostSyncTimer = null;
+        }
+        if (hostSeekDebounceTimer) {
+            window.clearTimeout(hostSeekDebounceTimer);
+            hostSeekDebounceTimer = null;
+        }
+        playerSyncCleanupCallbacks.forEach((cleanup) => {
+            try {
+                cleanup();
+            } catch (error) {}
+        });
+        playerSyncCleanupCallbacks = [];
+        playerSyncVideo = null;
+        playerSyncRole = '';
+    }
+
+    function addVideoSyncListener(video, eventName, handler) {
+        video.addEventListener(eventName, handler);
+        playerSyncCleanupCallbacks.push(() => video.removeEventListener(eventName, handler));
+    }
+
+    function canBroadcastHostSync() {
+        return isPlayerPage()
+            && activeRoom?.role === 'host'
+            && !isApplyingRemoteSync
+            && socket?.readyState === WebSocket.OPEN;
+    }
+
+    function sendHostPlaybackEvent(type) {
+        if (!canBroadcastHostSync()) return false;
+
+        return sendSocketMessage({
+            type,
+            payload: getPlaybackSyncPayload()
+        });
+    }
+
+    function debounceHostSeekSync() {
+        if (hostSeekDebounceTimer) {
+            window.clearTimeout(hostSeekDebounceTimer);
+        }
+
+        hostSeekDebounceTimer = window.setTimeout(() => {
+            hostSeekDebounceTimer = null;
+            sendHostPlaybackEvent('host:seek');
+        }, HOST_SEEK_DEBOUNCE);
+    }
+
+    function setupHostPlaybackSync(video) {
+        addVideoSyncListener(video, 'play', () => {
+            sendHostPlaybackEvent('host:play');
+        });
+        addVideoSyncListener(video, 'pause', () => {
+            if (!video.seeking) {
+                sendHostPlaybackEvent('host:pause');
+            }
+        });
+        addVideoSyncListener(video, 'seeked', () => {
+            debounceHostSeekSync();
+        });
+
+        hostSyncTimer = window.setInterval(() => {
+            if (document.hidden) return;
+            sendHostPlaybackEvent('host:sync');
+        }, HOST_SYNC_INTERVAL);
+    }
+
+    function handleRemoteSyncMessage(type, payload = {}, sourceClientId = '') {
+        if (!isPlayerPage() || activeRoom?.role !== 'viewer') return;
+        if (sourceClientId && sourceClientId === activeRoom?.clientId) return;
+
+        const video = getWatchRoomVideoElement();
+        if (!video) {
+            window.setTimeout(() => handleRemoteSyncMessage(type, payload, sourceClientId), 500);
+            return;
+        }
+
+        applyRemotePlaybackSync(video, type, payload);
+    }
+
+    function applyRemotePlaybackSync(video, type, payload = {}) {
+        const targetTime = Math.max(0, Number(payload.currentTime) || 0);
+        const currentTime = Number(video.currentTime) || 0;
+        const diff = Math.abs(currentTime - targetTime);
+        const isSeekEvent = type === 'sync:seek';
+        const shouldSeek = isSeekEvent || diff > 3;
+
+        isApplyingRemoteSync = true;
+
+        try {
+            if (payload.playbackRate && Number.isFinite(Number(payload.playbackRate))) {
+                video.playbackRate = Number(payload.playbackRate);
+            }
+
+            if (shouldSeek) {
+                video.currentTime = targetTime;
+                showRemoteSeekHint();
+            }
+
+            const shouldPause = type === 'sync:pause'
+                || (type === 'sync:state' && payload.paused === true)
+                || (type === 'sync:seek' && payload.paused === true);
+            const shouldPlay = type === 'sync:play'
+                || (type === 'sync:state' && payload.paused === false)
+                || (type === 'sync:seek' && payload.paused === false);
+
+            if (shouldPause && !video.paused) {
+                video.pause();
+            } else if (shouldPlay && video.paused) {
+                video.play().catch(() => {});
+            }
+        } finally {
+            window.setTimeout(() => {
+                isApplyingRemoteSync = false;
+            }, REMOTE_SYNC_LOCK_MS);
+        }
+    }
+
+    function showRemoteSeekHint() {
+        const now = Date.now();
+        if (now - lastSeekSyncToastAt < 5000) return;
+        lastSeekSyncToastAt = now;
+        showMessage('正在同步房主进度', 'info');
     }
 
     async function createRoom() {
@@ -223,13 +598,15 @@
                 return;
             }
 
-            setActiveRoom({
+            const room = {
                 roomId: data.roomId,
                 role: 'host',
                 clientId: data.clientId,
                 participantCount: 1,
                 maxMembers: data.maxMembers || 10
-            });
+            };
+            setActiveRoom(room);
+            persistRoomSession(room);
             connectRoomSocket(data.roomId, 'host', data.clientId);
             renderWatchRoomPanel();
             ensureWatchRoomModal().classList.remove('hidden');
@@ -256,6 +633,29 @@
         return url.toString();
     }
 
+    async function ensureWatchBackendConfigured(roomId) {
+        const url = new URL('/api/watch/ws', window.location.origin);
+        url.searchParams.set('room', roomId);
+        url.searchParams.set('role', 'viewer');
+
+        try {
+            const response = await fetch(url.toString(), {
+                method: 'GET',
+                cache: 'no-store'
+            });
+
+            if (response.status === 503) {
+                showMessage('一起看后端尚未配置', 'warning');
+                return false;
+            }
+        } catch (error) {
+            showMessage('一起看连接失败', 'error');
+            return false;
+        }
+
+        return true;
+    }
+
     function connectRoomSocket(roomId, role, clientId = '') {
         closeSocket(false);
 
@@ -264,7 +664,7 @@
         socket.addEventListener('open', () => {
             startHeartbeat();
             if (role === 'viewer') {
-                showMessage('已加入一起看', 'success');
+                showMessage('已连接一起看房间', 'success');
             }
         });
 
@@ -277,6 +677,11 @@
         });
 
         socket.addEventListener('error', () => {
+            if (role === 'viewer') {
+                showMessage('房间不存在或已结束', 'error');
+                clearRoomState();
+                return;
+            }
             showMessage('一起看连接失败', 'error');
         });
     }
@@ -291,22 +696,42 @@
 
         if (message.type === 'room:state') {
             const payload = message.payload || {};
-            setActiveRoom({
+            const room = {
                 ...(activeRoom || {}),
                 roomId: message.roomId || payload.roomId || activeRoom?.roomId,
+                clientId: message.clientId || activeRoom?.clientId || '',
                 participantCount: payload.participantCount || payload.participants?.length || activeRoom?.participantCount || 1,
                 maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10
-            });
+            };
+            setActiveRoom(room);
+            persistRoomSession(room);
+
+            if (room.role === 'viewer' && room.pendingPlayerRedirect && !isPlayerPage()) {
+                enterHostPlayback(payload, message);
+            } else if (room.role === 'viewer' && isPlayerPage()) {
+                handleRemoteSyncMessage('sync:state', payload.playback || {}, message.clientId);
+            }
+            return;
+        }
+
+        if (['sync:play', 'sync:pause', 'sync:seek', 'sync:state'].includes(message.type)) {
+            handleRemoteSyncMessage(
+                message.type,
+                message.payload || {},
+                message.payload?.sourceClientId || message.clientId
+            );
             return;
         }
 
         if (message.type === 'room:participants') {
             const payload = message.payload || {};
-            setActiveRoom({
+            const room = {
                 ...(activeRoom || {}),
                 participantCount: payload.count || payload.participants?.length || 1,
                 maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10
-            });
+            };
+            setActiveRoom(room);
+            persistRoomSession(room);
             return;
         }
 
@@ -318,6 +743,9 @@
 
         if (message.type === 'room:error') {
             showMessage(getErrorMessage(message.payload?.code) || message.payload?.message || '一起看发生错误', 'error');
+            if (activeRoom?.role === 'viewer') {
+                clearRoomState();
+            }
         }
     }
 
@@ -388,27 +816,56 @@
 
     function clearRoomState() {
         closeSocket(false);
+        cleanupPlayerSync();
+        clearStoredRoomSession();
         activeRoom = null;
         updatePlayerWatchRoomButton();
         closeWatchRoomPanel();
     }
 
-    function joinRoomById(roomId) {
+    async function joinRoomById(roomId) {
         const cleaned = cleanRoomId(roomId);
         if (!isValidRoomId(cleaned)) {
             showMessage('请输入 8 位房间号', 'warning');
             return false;
         }
 
+        const backendReady = await ensureWatchBackendConfigured(cleaned);
+        if (!backendReady) return false;
+
         setActiveRoom({
             roomId: cleaned,
             role: 'viewer',
             clientId: '',
             participantCount: 1,
-            maxMembers: 10
+            maxMembers: 10,
+            pendingPlayerRedirect: !isPlayerPage()
         });
         connectRoomSocket(cleaned, 'viewer');
         return true;
+    }
+
+    function restoreActiveRoomFromSession() {
+        if (activeRoom) return;
+
+        const roomId = readSessionValue(SESSION_ROOM_ID_KEY);
+        const role = readSessionValue(SESSION_ROOM_ROLE_KEY);
+        const clientId = readSessionValue(SESSION_ROOM_CLIENT_ID_KEY);
+
+        if (!isValidRoomId(roomId) || !['host', 'viewer'].includes(role)) {
+            clearStoredRoomSession();
+            return;
+        }
+
+        setActiveRoom({
+            roomId,
+            role,
+            clientId,
+            participantCount: 1,
+            maxMembers: 10,
+            pendingPlayerRedirect: false
+        });
+        connectRoomSocket(roomId, role, clientId);
     }
 
     async function copyRoomId() {
@@ -433,8 +890,8 @@
 
     function getErrorMessage(code) {
         const messages = {
-            ROOM_NOT_FOUND: '房间不存在',
-            ROOM_ENDED: '房间已结束',
+            ROOM_NOT_FOUND: '房间不存在或已结束',
+            ROOM_ENDED: '房间不存在或已结束',
             ROOM_FULL: '房间人数已满',
             INVALID_ROOM_ID: '请输入 8 位房间号',
             HOST_DISCONNECTED: '房主暂时离线',
@@ -479,6 +936,7 @@
         if (!button) return;
 
         button.addEventListener('click', openWatchRoomPanel);
+        restoreActiveRoomFromSession();
         updatePlayerWatchRoomButton();
     }
 
@@ -487,6 +945,7 @@
         initPlayerWatchRoomUI();
     }
 
+    document.addEventListener('liberty:player-ready', setupPlayerSyncForRoom);
     document.addEventListener('DOMContentLoaded', initWatchRoomUI);
 
     window.LibertyWatchRoom.ui = {
@@ -496,9 +955,12 @@
         openWatchRoomPanel,
         closeWatchRoomPanel,
         createRoom,
+        createMockRoom: createRoom,
         endRoom,
+        endMockRoom: endRoom,
         leaveRoom,
         joinRoomById,
+        joinMockRoomById: joinRoomById,
         copyRoomId
     };
 })();

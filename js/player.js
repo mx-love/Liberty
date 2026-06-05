@@ -352,6 +352,9 @@ function cleanupResources() {
 
     // 清理全局变量
     art = null;
+    if (window.LibertyPlayer) {
+        window.LibertyPlayer.art = null;
+    }
     currentHls = null;
 
     // 清理弹幕缓存
@@ -3413,6 +3416,12 @@ function initPlayerInternal(videoUrl) {
             }
         }
     });
+
+    window.LibertyPlayer = window.LibertyPlayer || {};
+    window.LibertyPlayer.art = art;
+    document.dispatchEvent(new CustomEvent('liberty:player-ready', {
+        detail: { art }
+    }));
 
     // 🔥 绑定到 VideoPlayer 实例
     videoPlayer.art = art;
