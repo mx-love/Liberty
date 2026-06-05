@@ -4,6 +4,7 @@
     const SESSION_ROOM_ID_KEY = 'watchRoomId';
     const SESSION_ROOM_ROLE_KEY = 'watchRoomRole';
     const SESSION_ROOM_CLIENT_ID_KEY = 'watchRoomClientId';
+    const SESSION_REDIRECTING_KEY = 'watchRoomRedirecting';
 
     let activeRoom = null;
     let socket = null;
@@ -79,7 +80,8 @@
     }
 
     function isPlayerPage() {
-        return /(^|\/)player\.html$/i.test(window.location.pathname);
+        const path = window.location.pathname.toLowerCase();
+        return path.endsWith('/player.html') || path.endsWith('player.html');
     }
 
     function readSessionValue(key) {
@@ -278,9 +280,25 @@
         return `player.html?${params.toString()}`;
     }
 
+    function isCurrentPlayerUrl(playerUrl) {
+        try {
+            const currentUrl = new URL(window.location.href);
+            const targetUrl = new URL(playerUrl, window.location.origin);
+            return currentUrl.pathname === targetUrl.pathname && currentUrl.search === targetUrl.search;
+        } catch (error) {
+            return false;
+        }
+    }
+
     function enterHostPlayback(payload = {}, message = {}) {
+        console.log('[WatchRoom] isPlayerPage', isPlayerPage());
+        if (isPlayerPage()) {
+            console.log('[WatchRoom] skip redirect on player page');
+            return false;
+        }
+
         if (isRedirectingToPlayer) {
-            console.warn('[WatchRoom] cannot redirect, reason:', 'redirect already in progress');
+            console.warn('[WatchRoom] duplicate redirect skipped');
             return false;
         }
 
@@ -303,13 +321,19 @@
             maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10
         };
 
-        isRedirectingToPlayer = true;
         persistRoomSession(room);
         console.log('[WatchRoom] writing playback session');
         writePlaybackSessionForViewer(session);
+        const playerUrl = buildPlayerUrl(session, playback);
+        if (isCurrentPlayerUrl(playerUrl)) {
+            console.log('[WatchRoom] already at target player url, skip reload');
+            return false;
+        }
+
+        isRedirectingToPlayer = true;
+        writeSessionValue(SESSION_REDIRECTING_KEY, '1');
         closeSocket(false);
         showMessage('已加入一起看，正在进入播放页', 'success');
-        const playerUrl = buildPlayerUrl(session, playback);
         console.log('[WatchRoom] redirecting to player', playerUrl);
         window.location.href = playerUrl;
         return true;
@@ -750,10 +774,11 @@
             setActiveRoom(room);
             persistRoomSession(room);
 
-            if (room.role === 'viewer' && !isPlayerPage()) {
-                enterHostPlayback(payload, message);
-            } else if (room.role === 'viewer' && isPlayerPage()) {
+            if (room.role === 'viewer' && isPlayerPage()) {
+                console.log('[WatchRoom] skip redirect on player page');
                 handleRemoteSyncMessage('sync:state', payload.playback || {}, message.clientId);
+            } else if (room.role === 'viewer' && room.pendingPlayerRedirect) {
+                enterHostPlayback(payload, message);
             }
             return;
         }
@@ -892,6 +917,11 @@
     }
 
     function restoreActiveRoomFromSession() {
+        if (isPlayerPage()) {
+            removeSessionValue(SESSION_REDIRECTING_KEY);
+            isRedirectingToPlayer = false;
+        }
+
         if (activeRoom) return;
 
         const roomId = readSessionValue(SESSION_ROOM_ID_KEY);
