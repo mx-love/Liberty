@@ -13,6 +13,17 @@ function safeLocalStorageGet(key, fallback = '[]') {
 const selectedAPIs = safeLocalStorageGet('selectedAPIs');
 const customAPIs = safeLocalStorageGet('customAPIs');
 
+function isWatchRoomViewerLaunch() {
+    try {
+        return Boolean(
+            sessionStorage.getItem('watchRoomId') &&
+            sessionStorage.getItem('watchRoomRole') === 'viewer'
+        );
+    } catch (error) {
+        return false;
+    }
+}
+
 // 配置常量
 const MATCH_CONFIG = {
     minSimilarity: 0.5,
@@ -3100,9 +3111,14 @@ function initPlayerInternal(videoUrl) {
         return
     }
 
+    const shouldDisableAutoplayForWatchViewer = isWatchRoomViewerLaunch();
+    if (shouldDisableAutoplayForWatchViewer) {
+        console.log('[WatchRoom] viewer launch detected, disable initial autoplay');
+    }
+
     // ===== 🔥 创建新的 VideoPlayer 实例 =====
     videoPlayer = new VideoPlayer('player', {
-        autoplay: true,
+        autoplay: !shouldDisableAutoplayForWatchViewer,
         volume: 0.8
     });
 
@@ -3154,7 +3170,7 @@ function initPlayerInternal(videoUrl) {
         volume: 0.8,
         isLive: false,
         muted: false,
-        autoplay: true,
+        autoplay: !shouldDisableAutoplayForWatchViewer,
         pip: true,
         autoSize: false,
         autoMini: true,
