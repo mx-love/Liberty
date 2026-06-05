@@ -28,6 +28,10 @@
     let localTechnicalReady = false;
     let localUserReady = false;
     let lastPlaybackGateLogAt = 0;
+    let lastBlockedTimeupdateLogAt = 0;
+    let boundGateVideo = null;
+    let playbackGateRetryTimer = null;
+    let waitTargetTime = 0;
 
     const HOST_SYNC_INTERVAL = 5000;
     const HOST_SEEK_DEBOUNCE = 300;
@@ -91,8 +95,43 @@
     }
 
     function getWatchRoomVideoElement() {
+        return getActiveVideoElement();
+    }
+
+    function getVideoDebugInfo(video, index = 0) {
+        return {
+            index,
+            currentTime: video?.currentTime || 0,
+            paused: video?.paused,
+            readyState: video?.readyState,
+            src: video?.currentSrc || video?.src || '',
+            inPlayer: Boolean(video?.closest?.('#player')),
+        };
+    }
+
+    function logVideoCandidates() {
+        try {
+            console.log('[WatchRoomDebug] videos', [...document.querySelectorAll('video')].map(getVideoDebugInfo));
+        } catch (error) {}
+    }
+
+    function getActiveVideoElement() {
         const art = getCurrentArtInstance();
-        return art?.video || art?.template?.$video || getPlayerVideoElement();
+        const candidates = [
+            art?.video,
+            art?.template?.$video,
+            document.querySelector('#player video'),
+            ...document.querySelectorAll('video'),
+        ].filter(Boolean);
+        const uniqueCandidates = [...new Set(candidates)];
+
+        return uniqueCandidates.find((video) => Boolean(video.closest?.('#player')) && !video.paused)
+            || uniqueCandidates.find((video) => !video.paused)
+            || uniqueCandidates.find((video) => Boolean(video.closest?.('#player')) && Number(video.currentTime) > 0)
+            || uniqueCandidates
+                .slice()
+                .sort((a, b) => (Number(b.currentTime) || 0) - (Number(a.currentTime) || 0))[0]
+            || null;
     }
 
     function normalizePlaybackNumber(value, fallback = 0) {
@@ -652,6 +691,9 @@
         }
         updatePlayerWatchRoomButton();
         setupPlayerSyncForRoom();
+        if (isPlayerPage() && activeRoom) {
+            bindPlaybackGateToCurrentVideo();
+        }
         if (!document.getElementById('watchRoomModal')?.classList.contains('hidden')) {
             renderWatchRoomPanel();
         }
@@ -663,7 +705,7 @@
             return;
         }
 
-        const video = getWatchRoomVideoElement();
+        const video = getActiveVideoElement();
         if (!video) {
             if (!playerSyncSetupTimer) {
                 playerSyncSetupTimer = window.setTimeout(() => {
@@ -680,7 +722,7 @@
         playerSyncVideo = video;
         playerSyncRole = activeRoom.role;
 
-        setupPlaybackGate(video);
+        bindPlaybackGateToCurrentVideo();
         if (activeRoom.role === 'host') {
             setupHostPlaybackSync(video);
         } else if (activeRoom.role === 'viewer') {
@@ -705,6 +747,11 @@
             window.clearTimeout(hostSeekDebounceTimer);
             hostSeekDebounceTimer = null;
         }
+        if (playbackGateRetryTimer) {
+            window.clearTimeout(playbackGateRetryTimer);
+            playbackGateRetryTimer = null;
+        }
+        unbindPlaybackGate();
         playerSyncCleanupCallbacks.forEach((cleanup) => {
             try {
                 cleanup();
@@ -734,23 +781,103 @@
         playerSyncCleanupCallbacks.push(() => video.removeEventListener(eventName, handler));
     }
 
-    function shouldBlockLocalPlayback() {
-        if (!activeRoom?.roomId || !activeRoom?.role) return false;
-        if (activeRoom.status === 'waiting') return true;
-        if (activeRoom.status === 'starting') return true;
-        if (activeRoom.role === 'viewer' && !localUserReady && activeRoom.status !== 'playing') {
-            return true;
+    function unbindPlaybackGate() {
+        if (!boundGateVideo) return;
+        boundGateVideo.removeEventListener('play', handleLocalVideoPlay, true);
+        boundGateVideo.removeEventListener('playing', handleLocalVideoPlay, true);
+        boundGateVideo.removeEventListener('timeupdate', handleLocalVideoTimeUpdate, true);
+        boundGateVideo.removeEventListener('seeking', handleLocalVideoSeeking, true);
+        boundGateVideo = null;
+    }
+
+    function bindPlaybackGateToCurrentVideo(retryUntil = Date.now() + 5000) {
+        const currentVideo = getActiveVideoElement();
+        if (!currentVideo) {
+            if (Date.now() < retryUntil && !playbackGateRetryTimer) {
+                playbackGateRetryTimer = window.setTimeout(() => {
+                    playbackGateRetryTimer = null;
+                    bindPlaybackGateToCurrentVideo(retryUntil);
+                }, 300);
+            }
+            return;
         }
-        return false;
+
+        if (boundGateVideo === currentVideo) return;
+
+        const oldVideo = boundGateVideo;
+        if (oldVideo) {
+            console.log('[WatchRoomDebug] rebind playback gate video', {
+                old: getVideoDebugInfo(oldVideo),
+                current: getVideoDebugInfo(currentVideo),
+            });
+        }
+        unbindPlaybackGate();
+        boundGateVideo = currentVideo;
+        currentVideo.addEventListener('play', handleLocalVideoPlay, true);
+        currentVideo.addEventListener('playing', handleLocalVideoPlay, true);
+        currentVideo.addEventListener('timeupdate', handleLocalVideoTimeUpdate, true);
+        currentVideo.addEventListener('seeking', handleLocalVideoSeeking, true);
+        console.log('[WatchRoom] playback gate bound to video', getVideoDebugInfo(currentVideo));
+        logVideoCandidates();
+    }
+
+    function getPlaybackBlockReason() {
+        if (!activeRoom?.roomId) return '';
+        if (!activeRoom?.role) return '';
+        if (activeRoom.status === 'waiting') return 'room_waiting';
+        if (activeRoom.status === 'starting') return 'room_starting';
+        if (activeRoom.role === 'viewer' && !localUserReady && activeRoom.status !== 'playing') {
+            return 'viewer_not_user_ready';
+        }
+        return '';
+    }
+
+    function shouldBlockLocalPlayback() {
+        return Boolean(getPlaybackBlockReason());
+    }
+
+    function logPlaybackGateCheck(reason, result) {
+        console.log('[WatchRoomDebug] gate check', {
+            reason,
+            result,
+            roomId: activeRoom?.roomId,
+            role: activeRoom?.role,
+            roomStatus: activeRoom?.status,
+            localTechnicalReady,
+            localUserReady,
+            isApplyingRemoteSync,
+            socketReady: socket?.readyState,
+            blockReason: getPlaybackBlockReason(),
+        });
     }
 
     function enforceWatchRoomPause(reason) {
         const art = getCurrentArtInstance();
-        const video = getWatchRoomVideoElement();
+        bindPlaybackGateToCurrentVideo();
+        const video = getActiveVideoElement();
+        const targetTime = Number(waitTargetTime) || 0;
+
+        console.log('[WatchRoomDebug] pause before', {
+            reason,
+            currentTime: video?.currentTime,
+            paused: video?.paused,
+            readyState: video?.readyState,
+            src: video?.currentSrc || video?.src || '',
+        });
 
         isApplyingRemoteSync = true;
         try {
             if (video && !video.paused) video.pause();
+        } catch (error) {}
+
+        try {
+            if (
+                video
+                && ['waiting', 'starting'].includes(activeRoom?.status)
+                && Math.abs((Number(video.currentTime) || 0) - targetTime) > 1.5
+            ) {
+                video.currentTime = targetTime;
+            }
         } catch (error) {}
 
         try {
@@ -770,19 +897,50 @@
         }
 
         window.setTimeout(() => {
+            console.log('[WatchRoomDebug] pause after', {
+                reason,
+                currentTime: video?.currentTime,
+                paused: video?.paused,
+            });
+        }, 50);
+
+        window.setTimeout(() => {
             isApplyingRemoteSync = false;
         }, REMOTE_SYNC_LOCK_MS);
     }
 
     function handleLocalVideoPlay(event) {
-        if (!shouldBlockLocalPlayback()) return;
+        bindPlaybackGateToCurrentVideo();
+        const shouldBlock = shouldBlockLocalPlayback();
+        logPlaybackGateCheck(event?.type || 'play', shouldBlock);
+        if (!shouldBlock) return;
+        console.trace('[WatchRoomDebug] video play event while blocked');
         enforceWatchRoomPause(event?.type || 'play');
     }
 
     function handleLocalVideoTimeUpdate() {
-        const video = getWatchRoomVideoElement();
-        if (!shouldBlockLocalPlayback() || !video || video.paused) return;
+        bindPlaybackGateToCurrentVideo();
+        const video = getActiveVideoElement();
+        const shouldBlock = shouldBlockLocalPlayback();
+        if (!shouldBlock || !video || video.paused) return;
+        const now = Date.now();
+        if (now - lastBlockedTimeupdateLogAt > 1000) {
+            lastBlockedTimeupdateLogAt = now;
+            const targetTime = Number(waitTargetTime) || 0;
+            console.log('[WatchRoomDebug] blocked timeupdate', {
+                currentTime: video.currentTime,
+                paused: video.paused,
+                waitTargetTime: targetTime,
+                diff: Math.abs((Number(video.currentTime) || 0) - targetTime),
+            });
+            logPlaybackGateCheck('timeupdate', shouldBlock);
+        }
         enforceWatchRoomPause('timeupdate');
+    }
+
+    function handleLocalVideoSeeking() {
+        if (!shouldBlockLocalPlayback()) return;
+        bindPlaybackGateToCurrentVideo();
     }
 
     function setupPlaybackGate(video) {
@@ -933,6 +1091,8 @@
             const playback = pendingInitialPlayback || {};
             const status = pendingInitialStatus || activeRoom?.status || 'waiting';
             const targetTime = calculateTargetTime(playback);
+            waitTargetTime = targetTime;
+            bindPlaybackGateToCurrentVideo();
 
             isApplyingRemoteSync = true;
             try {
@@ -945,7 +1105,36 @@
                 }
             } catch (error) {}
 
+            let readyDone = false;
+            let retryCount = 0;
             const finishReady = () => {
+                if (readyDone) return;
+                const diff = Math.abs((Number(video.currentTime) || 0) - targetTime);
+                if (diff > 1.5 && retryCount < 1) {
+                    retryCount += 1;
+                    console.warn('[WatchRoom] viewer technical ready seek retry', {
+                        currentTime: Number(video.currentTime) || 0,
+                        waitTargetTime: targetTime,
+                        diff,
+                    });
+                    try {
+                        video.currentTime = targetTime;
+                        video.pause();
+                    } catch (error) {}
+                    window.setTimeout(finishReady, 700);
+                    return;
+                }
+                if (diff > 1.5) {
+                    console.warn('[WatchRoom] viewer technical ready with seek drift', {
+                        currentTime: Number(video.currentTime) || 0,
+                        waitTargetTime: targetTime,
+                        diff,
+                    });
+                }
+                readyDone = true;
+                try {
+                    video.pause();
+                } catch (error) {}
                 localTechnicalReady = true;
                 viewerInitialSyncComplete = true;
                 console.log('[WatchRoom] viewer technical ready', {
@@ -1047,6 +1236,8 @@
                 ...payload,
                 paused: true
             });
+            waitTargetTime = targetTime;
+            bindPlaybackGateToCurrentVideo();
 
             isApplyingRemoteSync = true;
             try {
