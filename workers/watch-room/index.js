@@ -114,6 +114,10 @@ export class WatchRoomDurableObject {
             return this.handleHttpEnd(request);
         }
 
+        if (request.method === 'GET' && url.pathname === '/state') {
+            return this.handleState(url);
+        }
+
         if (request.method === 'GET' && url.pathname === '/ws') {
             return this.handleWebSocket(request, url);
         }
@@ -122,7 +126,11 @@ export class WatchRoomDurableObject {
     }
 
     async readRoom() {
-        return this.state.storage.get('room');
+        const room = await this.state.storage.get('room');
+        if (room) {
+            console.log('[WatchRoomDO] load room from storage', room.roomId);
+        }
+        return room;
     }
 
     async writeRoom(room) {
@@ -164,6 +172,7 @@ export class WatchRoomDurableObject {
         };
 
         await this.writeRoom(room);
+        console.log('[WatchRoomDO] create room', roomId);
 
         return jsonResponse({
             success: true,
@@ -171,6 +180,41 @@ export class WatchRoomDurableObject {
             role: 'host',
             hostId: room.hostId,
             maxMembers: MAX_MEMBERS,
+        });
+    }
+
+    async handleState(url) {
+        const roomId = String(url.searchParams.get('room') || '');
+        console.log('[WatchRoomDO] state request', roomId);
+
+        if (!isValidRoomId(roomId)) {
+            return jsonResponse({ success: false, error: ERROR_CODE.INVALID_ROOM_ID }, 400);
+        }
+
+        const room = await this.readRoom();
+        if (!room || room.roomId !== roomId) {
+            console.log('[WatchRoomDO] room not found', roomId);
+            return jsonResponse({ success: false, error: ERROR_CODE.ROOM_NOT_FOUND }, 404);
+        }
+
+        if (room.status === ROOM_STATUS.ENDED) {
+            console.log('[WatchRoomDO] room ended', roomId);
+            return jsonResponse({ success: false, error: ERROR_CODE.ROOM_ENDED }, 410);
+        }
+
+        if (room.status !== ROOM_STATUS.ACTIVE) {
+            return jsonResponse({ success: false, error: ERROR_CODE.HOST_DISCONNECTED }, 409);
+        }
+
+        return jsonResponse({
+            success: true,
+            roomId: room.roomId,
+            status: room.status,
+            maxMembers: room.maxMembers,
+            participantsCount: Object.keys(room.participants || {}).length,
+            participantCount: Object.keys(room.participants || {}).length,
+            media: room.media || {},
+            playback: room.playback || {},
         });
     }
 
@@ -252,6 +296,7 @@ export class WatchRoomDurableObject {
 
     async addParticipant(socket, room, clientId, role) {
         const joinedAt = now();
+        this.closeExistingSession(clientId, socket);
         room.participants = room.participants || {};
         room.participants[clientId] = {
             id: clientId,
@@ -286,6 +331,17 @@ export class WatchRoomDurableObject {
 
         socket.send(buildMessage('room:state', room.roomId, clientId, this.getPublicRoomState(room)));
         await this.broadcastParticipants(room);
+    }
+
+    closeExistingSession(clientId, replacementSocket) {
+        for (const [socket, session] of this.sessions.entries()) {
+            if (socket === replacementSocket || session.clientId !== clientId) continue;
+
+            this.sessions.delete(socket);
+            try {
+                socket.close(1000, 'replaced');
+            } catch (error) {}
+        }
     }
 
     async handleSocketMessage(socket, rawData) {

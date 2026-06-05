@@ -107,7 +107,7 @@
 
         writeSessionValue(SESSION_ROOM_ID_KEY, room.roomId);
         writeSessionValue(SESSION_ROOM_ROLE_KEY, room.role);
-        if (room.clientId) {
+        if (room.clientId !== undefined) {
             writeSessionValue(SESSION_ROOM_CLIENT_ID_KEY, room.clientId);
         }
     }
@@ -656,27 +656,46 @@
         return url.toString();
     }
 
-    async function ensureWatchBackendConfigured(roomId) {
-        const url = new URL('/api/watch/ws', window.location.origin);
+    async function fetchRoomState(roomId) {
+        const url = new URL('/api/watch/state', window.location.origin);
         url.searchParams.set('room', roomId);
-        url.searchParams.set('role', 'viewer');
+        console.log('[WatchRoom] fetching room state', roomId);
 
         try {
             const response = await fetch(url.toString(), {
                 method: 'GET',
                 cache: 'no-store'
             });
+            const data = await response.json().catch(() => ({}));
 
             if (response.status === 503) {
                 showMessage('一起看后端尚未配置', 'warning');
-                return false;
+                console.warn('[WatchRoom] cannot redirect, reason:', 'WATCH_ROOM_DO is not configured');
+                return null;
             }
+
+            if (!response.ok || !data.success) {
+                const error = data.error || '';
+                if (response.status === 404 || error === 'ROOM_NOT_FOUND') {
+                    showMessage('房间不存在或已结束', 'error');
+                } else if (response.status === 410 || error === 'ROOM_ENDED') {
+                    showMessage('房间不存在或已结束', 'error');
+                } else if (error === 'HOST_DISCONNECTED') {
+                    showMessage('房主暂时离线', 'error');
+                } else {
+                    showMessage('一起看连接失败', 'error');
+                }
+                console.warn('[WatchRoom] cannot redirect, reason:', error || `HTTP ${response.status}`, data);
+                return null;
+            }
+
+            console.log('[WatchRoom] room state received', data);
+            return data;
         } catch (error) {
             showMessage('一起看连接失败', 'error');
-            return false;
+            console.warn('[WatchRoom] cannot redirect, reason:', error?.message || String(error));
+            return null;
         }
-
-        return true;
     }
 
     function connectRoomSocket(roomId, role, clientId = '') {
@@ -855,19 +874,21 @@
             return false;
         }
 
-        const backendReady = await ensureWatchBackendConfigured(cleaned);
-        if (!backendReady) return false;
+        const roomState = await fetchRoomState(cleaned);
+        if (!roomState) return false;
 
         setActiveRoom({
             roomId: cleaned,
             role: 'viewer',
             clientId: '',
-            participantCount: 1,
-            maxMembers: 10,
-            pendingPlayerRedirect: !isPlayerPage()
+            participantCount: roomState.participantCount || roomState.participantsCount || 1,
+            maxMembers: roomState.maxMembers || 10,
+            pendingPlayerRedirect: false
         });
-        connectRoomSocket(cleaned, 'viewer');
-        return true;
+        return enterHostPlayback(roomState, {
+            roomId: cleaned,
+            clientId: ''
+        });
     }
 
     function restoreActiveRoomFromSession() {

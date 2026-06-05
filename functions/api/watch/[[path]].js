@@ -102,6 +102,26 @@ async function createRoom(request, env) {
   );
 }
 
+async function getRoomState(request, env) {
+  const url = new URL(request.url);
+  const roomId = String(url.searchParams.get('room') || '');
+
+  if (!isValidRoomId(roomId)) {
+    return jsonResponse({ success: false, error: 'INVALID_ROOM_ID' }, 400);
+  }
+
+  const stub = getDurableObjectStub(env, roomId);
+  const stateUrl = new URL('https://watch-room.local/state');
+  stateUrl.searchParams.set('room', roomId);
+
+  const response = await stub.fetch(stateUrl.toString(), {
+    method: 'GET',
+  });
+
+  const data = await response.json().catch(() => ({}));
+  return jsonResponse(data, response.status);
+}
+
 function buildWebSocketUrl(roomId, clientId, role) {
   const url = new URL('https://watch-room.local/ws');
   url.searchParams.set('room', roomId);
@@ -174,6 +194,10 @@ export async function onRequest(context) {
   try {
     if (method === 'POST' && path === 'create') {
       return createRoom(request, env);
+    }
+
+    if (method === 'GET' && path === 'state') {
+      return getRoomState(request, env);
     }
 
     if (method === 'GET' && path === 'ws') {
