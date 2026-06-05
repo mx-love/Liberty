@@ -911,6 +911,46 @@
         }, REMOTE_SYNC_LOCK_MS);
     }
 
+    function enterHostWaitingMode(snapshot = {}) {
+        waitTargetTime = Math.max(0, Number(snapshot.currentTime) || 0);
+        console.log('[WatchRoom] host enter waiting mode', {
+            currentTime: waitTargetTime,
+            duration: snapshot.duration,
+            playbackRate: snapshot.playbackRate,
+        });
+
+        setActiveRoom({
+            ...(activeRoom || {}),
+            roomId: activeRoom?.roomId || 'pending',
+            role: 'host',
+            clientId: activeRoom?.clientId || '',
+            participantCount: activeRoom?.participantCount || 1,
+            maxMembers: activeRoom?.maxMembers || 10,
+            status: 'waiting',
+            participants: activeRoom?.participants || [{
+                id: activeRoom?.clientId || 'pending_host',
+                role: 'host',
+                name: '房主',
+                ready: true,
+            }]
+        });
+
+        bindPlaybackGateToCurrentVideo();
+        enforceWatchRoomPause('host_enter_waiting');
+        window.setTimeout(() => {
+            const video = getActiveVideoElement();
+            console.log('[WatchRoom] host waiting pause verify', {
+                paused: video?.paused,
+                currentTime: video?.currentTime,
+                roomStatus: activeRoom?.status,
+            });
+            if (video && !video.paused) {
+                console.warn('[WatchRoom] host waiting pause verify failed, retry pause');
+                enforceWatchRoomPause('host_enter_waiting_retry');
+            }
+        }, 50);
+    }
+
     function handleLocalVideoPlay(event) {
         bindPlaybackGateToCurrentVideo();
         const shouldBlock = shouldBlockLocalPlayback();
@@ -936,6 +976,17 @@
                 diff: Math.abs((Number(video.currentTime) || 0) - targetTime),
             });
             logPlaybackGateCheck('timeupdate', shouldBlock);
+        }
+        if (
+            activeRoom?.role === 'host'
+            && ['waiting', 'starting'].includes(activeRoom?.status)
+            && Math.abs((Number(video.currentTime) || 0) - (Number(waitTargetTime) || 0)) > 1
+        ) {
+            console.log('[WatchRoom] host playback drift blocked', {
+                currentTime: video.currentTime,
+                waitTargetTime,
+                roomStatus: activeRoom.status,
+            });
         }
         enforceWatchRoomPause('timeupdate');
     }
@@ -1015,11 +1066,11 @@
                 && ['waiting', 'starting'].includes(activeRoom?.status)
             ) {
                 console.log('[WatchRoom] host play blocked in waiting, use start button');
-                pauseLocalForWaiting();
+                enforceWatchRoomPause('host_play_waiting');
                 showMessage(
                     activeRoom.status === 'starting'
                         ? '准备开播中'
-                        : '请点击“开始一起看”统一开播',
+                        : '请等待观众准备后点击“开始一起看”',
                     'info'
                 );
                 return;
@@ -1418,11 +1469,13 @@
     }
 
     async function createRoom() {
+        console.log('[WatchRoom] host create room clicked');
         showMessage('正在创建房间...', 'info');
 
         try {
             const createPayload = buildCreatePayload();
-            pauseLocalForWaiting();
+            console.log('[WatchRoom] host playback snapshot before waiting', createPayload.playback);
+            enterHostWaitingMode(createPayload.playback);
             const response = await fetch('/api/watch/create', {
                 method: 'POST',
                 headers: {
@@ -1434,6 +1487,7 @@
 
             if (!response.ok || !data.success) {
                 handleCreateError(response.status, data);
+                clearRoomState();
                 return;
             }
 
@@ -1452,6 +1506,7 @@
             ensureWatchRoomModal().classList.remove('hidden');
         } catch (error) {
             showMessage('一起看房间创建失败，请稍后重试', 'error');
+            clearRoomState();
         }
     }
 
