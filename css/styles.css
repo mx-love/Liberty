@@ -343,6 +343,23 @@ body {
     box-shadow: 0 2px 4px rgba(0, 204, 255, 0.3);
 }
 
+/* 一起看设置卡片 */
+.watch-room-settings-card {
+    overflow: hidden;
+}
+
+.watch-room-id-input {
+    min-width: 0;
+}
+
+.watch-room-id-input::placeholder {
+    color: #6b7280;
+}
+
+.watch-room-join-btn {
+    min-height: 40px;
+}
+
 /* 添加API复选框样式 */
 .form-checkbox {
     appearance: none;

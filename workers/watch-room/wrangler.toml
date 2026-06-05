@@ -1,0 +1,11 @@
+name = "liberty-watch-room-worker"
+main = "index.js"
+compatibility_date = "2026-06-05"
+
+[[durable_objects.bindings]]
+name = "WATCH_ROOM_DO"
+class_name = "WatchRoomDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WatchRoomDurableObject"]

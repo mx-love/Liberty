@@ -968,6 +968,208 @@ textarea:focus {
 }
 
 /* ============================================
+   一起看 UI 壳
+   ============================================ */
+.watch-room-action-btn[aria-pressed="true"] {
+    border-color: rgba(96, 165, 250, 0.75);
+    background: rgba(37, 99, 235, 0.28);
+    color: #bfdbfe;
+}
+
+.watch-room-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 10001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+}
+
+.watch-room-modal.hidden {
+    display: none;
+}
+
+.watch-room-modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.68);
+}
+
+.watch-room-dialog {
+    position: relative;
+    width: min(440px, 96vw);
+    max-height: min(680px, 92vh);
+    overflow-y: auto;
+    border: 1px solid #333;
+    border-radius: 12px;
+    background: #151515;
+    color: #fff;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+.watch-room-dialog-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 18px 18px 12px;
+    border-bottom: 1px solid #2a2a2a;
+}
+
+.watch-room-title {
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.watch-room-subtitle {
+    margin-top: 4px;
+    color: #9ca3af;
+    font-size: 12px;
+}
+
+.watch-room-close {
+    flex: 0 0 auto;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    color: #9ca3af;
+    font-size: 24px;
+    line-height: 1;
+}
+
+.watch-room-close:hover {
+    color: #fff;
+    background: #242424;
+}
+
+.watch-room-dialog-body {
+    padding: 18px;
+}
+
+.watch-room-room-id {
+    padding: 14px 16px;
+    border: 1px solid rgba(96, 165, 250, 0.45);
+    border-radius: 10px;
+    background: rgba(37, 99, 235, 0.16);
+    color: #bfdbfe;
+    font-size: clamp(28px, 9vw, 40px);
+    font-weight: 800;
+    line-height: 1;
+    text-align: center;
+    letter-spacing: 0.08em;
+}
+
+.watch-room-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.watch-room-meta-grid > div,
+.watch-room-current {
+    border: 1px solid #2d2d2d;
+    border-radius: 10px;
+    background: #1b1b1b;
+}
+
+.watch-room-meta-grid > div {
+    padding: 12px;
+}
+
+.watch-room-meta-label,
+.watch-room-current-row span {
+    display: block;
+    color: #9ca3af;
+    font-size: 12px;
+}
+
+.watch-room-current {
+    margin-top: 14px;
+    padding: 12px;
+}
+
+.watch-room-current-row {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 10px;
+    align-items: baseline;
+    padding: 8px 0;
+}
+
+.watch-room-current-row + .watch-room-current-row {
+    border-top: 1px solid #2a2a2a;
+}
+
+.watch-room-current-row strong {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.watch-room-help {
+    margin-top: 14px;
+    color: #d1d5db;
+    font-size: 13px;
+    line-height: 1.7;
+}
+
+.watch-room-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.watch-room-actions button {
+    flex: 1 1 150px;
+    min-height: 42px;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 14px;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.watch-room-primary {
+    background: #2563eb;
+    color: #fff;
+}
+
+.watch-room-primary:hover {
+    background: #1d4ed8;
+}
+
+.watch-room-danger {
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    background: rgba(127, 29, 29, 0.28);
+    color: #fecaca;
+}
+
+.watch-room-danger:hover {
+    background: rgba(153, 27, 27, 0.45);
+}
+
+@media (max-width: 480px) {
+    .watch-room-dialog {
+        border-radius: 10px;
+    }
+
+    .watch-room-dialog-header,
+    .watch-room-dialog-body {
+        padding-left: 14px;
+        padding-right: 14px;
+    }
+
+    .watch-room-meta-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .watch-room-current-row {
+        grid-template-columns: 1fr;
+        gap: 4px;
+    }
+}
+
+/* ============================================
    弹幕源弹窗动画
    ============================================ */
 @keyframes modalFadeIn {
