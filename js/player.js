@@ -13,6 +13,20 @@ function safeLocalStorageGet(key, fallback = '[]') {
 const selectedAPIs = safeLocalStorageGet('selectedAPIs');
 const customAPIs = safeLocalStorageGet('customAPIs');
 
+function getWatchRoomLaunchRole() {
+    try {
+        return sessionStorage.getItem('watchRoomId')
+            ? (sessionStorage.getItem('watchRoomRole') || '')
+            : '';
+    } catch (error) {
+        return '';
+    }
+}
+
+function isWatchRoomLaunch() {
+    return ['host', 'viewer'].includes(getWatchRoomLaunchRole());
+}
+
 function isWatchRoomViewerLaunch() {
     try {
         return Boolean(
@@ -2532,7 +2546,7 @@ function initializePageContent() {
         currentEpisodeIndex = index;
 
         episodesReversed = localStorage.getItem('episodesReversed') === 'true';
-        if (isWatchRoomViewerLaunch()) {
+        if (isWatchRoomLaunch()) {
             console.log('[WatchRoomAudit] player init source', {
                 url: videoUrl,
                 episodes: currentEpisodes,
@@ -3118,14 +3132,16 @@ function initPlayerInternal(videoUrl) {
         return
     }
 
-    const shouldDisableAutoplayForWatchViewer = isWatchRoomViewerLaunch();
-    if (shouldDisableAutoplayForWatchViewer) {
-        console.log('[WatchRoom] viewer launch detected, disable initial autoplay');
+    const shouldDisableAutoplayForWatchRoom = isWatchRoomLaunch();
+    if (shouldDisableAutoplayForWatchRoom) {
+        console.log('[WatchRoom] watch room launch detected, disable initial autoplay', {
+            role: getWatchRoomLaunchRole()
+        });
     }
 
     // ===== 🔥 创建新的 VideoPlayer 实例 =====
     videoPlayer = new VideoPlayer('player', {
-        autoplay: !shouldDisableAutoplayForWatchViewer,
+        autoplay: !shouldDisableAutoplayForWatchRoom,
         volume: 0.8
     });
 
@@ -3177,7 +3193,7 @@ function initPlayerInternal(videoUrl) {
         volume: 0.8,
         isLive: false,
         muted: false,
-        autoplay: !shouldDisableAutoplayForWatchViewer,
+        autoplay: !shouldDisableAutoplayForWatchRoom,
         pip: true,
         autoSize: false,
         autoMini: true,
@@ -3384,8 +3400,10 @@ function initPlayerInternal(videoUrl) {
                 video.disableRemotePlayback = false;
 
                 hls.on(Hls.Events.MANIFEST_PARSED, function () {
-                    if (isWatchRoomViewerLaunch()) {
-                        console.log('[WatchRoomAudit] skip hls manifest autoplay for watch room viewer');
+                    if (isWatchRoomLaunch()) {
+                        console.log('[WatchRoomAudit] skip hls manifest autoplay for watch room mode', {
+                            role: getWatchRoomLaunchRole()
+                        });
                         return;
                     }
 
@@ -3730,13 +3748,13 @@ function initPlayerInternal(videoUrl) {
         videoHasEnded = false;
         const urlParams = new URLSearchParams(window.location.search);
         const savedPosition = parseInt(urlParams.get('position') || '0');
-        const watchRoomViewerLaunch = isWatchRoomViewerLaunch();
+        const watchRoomLaunch = isWatchRoomLaunch();
 
         // ✅ 优先尝试从临时保存的进度恢复（切换源时使用）
         // 一起看观众必须以房间 playback 为准，不能被本机历史进度覆盖。
         let restoredPosition = savedPosition;
         const tempProgressKey = `videoProgress_temp_${currentVideoTitle}_${currentEpisodeIndex}`;
-        if (!watchRoomViewerLaunch) {
+        if (!watchRoomLaunch) {
             try {
                 const tempProgress = localStorage.getItem(tempProgressKey);
                 if (tempProgress) {
@@ -3750,7 +3768,7 @@ function initPlayerInternal(videoUrl) {
                 console.error('读取临时进度失败:', e);
             }
         } else {
-            console.log('[WatchRoomAudit] watch room viewer mode', {
+            console.log('[WatchRoomAudit] watch room mode', {
                 roomId: sessionStorage.getItem('watchRoomId') || '',
                 role: sessionStorage.getItem('watchRoomRole') || '',
             });
@@ -3759,7 +3777,7 @@ function initPlayerInternal(videoUrl) {
         if (restoredPosition > 10 && restoredPosition < art.duration - 2) {
             art.currentTime = restoredPosition;
             showPositionRestoreHint(restoredPosition);
-        } else if (!watchRoomViewerLaunch) {
+        } else if (!watchRoomLaunch) {
             try {
                 const progressKey = 'videoProgress_' + getVideoId();
                 const progressStr = localStorage.getItem(progressKey);

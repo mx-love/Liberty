@@ -124,10 +124,12 @@
             ...document.querySelectorAll('video'),
         ].filter(Boolean);
         const uniqueCandidates = [...new Set(candidates)];
+        const playerCandidates = uniqueCandidates.filter((video) => Boolean(video.closest?.('#player')));
 
-        return uniqueCandidates.find((video) => Boolean(video.closest?.('#player')) && !video.paused)
+        return playerCandidates.find((video) => !video.paused)
+            || playerCandidates.find((video) => Number(video.currentTime) > 0)
+            || playerCandidates[0]
             || uniqueCandidates.find((video) => !video.paused)
-            || uniqueCandidates.find((video) => Boolean(video.closest?.('#player')) && Number(video.currentTime) > 0)
             || uniqueCandidates
                 .slice()
                 .sort((a, b) => (Number(b.currentTime) || 0) - (Number(a.currentTime) || 0))[0]
@@ -1153,14 +1155,14 @@
                     paused: video.paused
                 });
                 if (status === 'playing') {
-                    tryPlayVideo(video);
+                    console.log('[WatchRoomAudit] initial sync completed without playback; waiting for sync:start or host control');
                 } else {
                     showMessage('正在等待房主开始播放', 'info');
-                    setActiveRoom({
-                        ...(activeRoom || {}),
-                        status: activeRoom?.status || 'waiting'
-                    });
                 }
+                setActiveRoom({
+                    ...(activeRoom || {}),
+                    status: activeRoom?.status || status || 'waiting'
+                });
                 window.setTimeout(() => {
                     isApplyingRemoteSync = false;
                 }, REMOTE_SYNC_LOCK_MS);
