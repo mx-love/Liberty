@@ -15,6 +15,7 @@
     let playerSyncRole = '';
     let playerSyncCleanupCallbacks = [];
     let isApplyingRemoteSync = false;
+    let isRedirectingToPlayer = false;
     let lastSeekSyncToastAt = 0;
 
     const HOST_SYNC_INTERVAL = 5000;
@@ -217,6 +218,15 @@
         }
 
         if (!episodeUrl || !episodes.length) {
+            const reason = !episodeUrl
+                ? 'missing episodeUrl and no playable episode at episodeIndex'
+                : 'missing playable episodes';
+            console.warn('[WatchRoom] cannot redirect, reason:', reason, {
+                media,
+                episodeIndex,
+                episodeUrl,
+                episodes
+            });
             return null;
         }
 
@@ -269,6 +279,15 @@
     }
 
     function enterHostPlayback(payload = {}, message = {}) {
+        if (isRedirectingToPlayer) {
+            console.warn('[WatchRoom] cannot redirect, reason:', 'redirect already in progress');
+            return false;
+        }
+
+        const media = payload.media || {};
+        const playback = payload.playback || {};
+        console.log('[WatchRoom] viewer redirect check', { media, playback });
+
         const session = buildPlaybackSessionFromRoomState(payload);
         if (!session) {
             showMessage('房主当前播放信息不完整，无法进入播放页', 'error');
@@ -284,11 +303,15 @@
             maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10
         };
 
+        isRedirectingToPlayer = true;
         persistRoomSession(room);
+        console.log('[WatchRoom] writing playback session');
         writePlaybackSessionForViewer(session);
         closeSocket(false);
         showMessage('已加入一起看，正在进入播放页', 'success');
-        window.location.href = buildPlayerUrl(session, payload.playback || {});
+        const playerUrl = buildPlayerUrl(session, playback);
+        console.log('[WatchRoom] redirecting to player', playerUrl);
+        window.location.href = playerUrl;
         return true;
     }
 
@@ -664,6 +687,7 @@
         socket.addEventListener('open', () => {
             startHeartbeat();
             if (role === 'viewer') {
+                console.log('[WatchRoom] join room success', roomId);
                 showMessage('已连接一起看房间', 'success');
             }
         });
@@ -696,6 +720,7 @@
 
         if (message.type === 'room:state') {
             const payload = message.payload || {};
+            console.log('[WatchRoom] room:state received', payload);
             const room = {
                 ...(activeRoom || {}),
                 roomId: message.roomId || payload.roomId || activeRoom?.roomId,
@@ -706,7 +731,7 @@
             setActiveRoom(room);
             persistRoomSession(room);
 
-            if (room.role === 'viewer' && room.pendingPlayerRedirect && !isPlayerPage()) {
+            if (room.role === 'viewer' && !isPlayerPage()) {
                 enterHostPlayback(payload, message);
             } else if (room.role === 'viewer' && isPlayerPage()) {
                 handleRemoteSyncMessage('sync:state', payload.playback || {}, message.clientId);
