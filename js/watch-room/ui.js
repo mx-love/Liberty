@@ -17,11 +17,18 @@
     let playerSyncCleanupCallbacks = [];
     let isApplyingRemoteSync = false;
     let isRedirectingToPlayer = false;
+    let viewerInitialSyncComplete = false;
+    let viewerInitialSyncTimer = null;
+    let viewerReadySent = false;
+    let pendingInitialPlayback = null;
+    let pendingInitialMedia = null;
+    let pendingInitialStatus = 'waiting';
     let lastSeekSyncToastAt = 0;
 
     const HOST_SYNC_INTERVAL = 5000;
     const HOST_SEEK_DEBOUNCE = 300;
     const REMOTE_SYNC_LOCK_MS = 500;
+    const VIEWER_INITIAL_SYNC_DELAY = 900;
 
     function showMessage(message, type = 'info') {
         if (typeof window.showToast === 'function') {
@@ -150,6 +157,70 @@
         };
     }
 
+    function calculateTargetTime(playback) {
+        const currentTime = Number(playback?.currentTime || 0);
+        const duration = Number(playback?.duration || 0);
+        const updatedAt = Number(playback?.updatedAt || 0);
+        const paused = Boolean(playback?.paused);
+
+        let targetTime = currentTime;
+
+        if (!paused && updatedAt > 0) {
+            targetTime += Math.max(0, Date.now() - updatedAt) / 1000;
+        }
+
+        if (duration > 0) {
+            targetTime = Math.min(targetTime, Math.max(0, duration - 1));
+        }
+
+        return Math.max(0, targetTime);
+    }
+
+    function isVideoReady(video) {
+        return Boolean(video && video.readyState >= 1);
+    }
+
+    function waitForVideoReady(callback) {
+        const video = getWatchRoomVideoElement();
+        if (isVideoReady(video)) {
+            callback(video);
+            return;
+        }
+
+        if (!video) {
+            window.setTimeout(() => waitForVideoReady(callback), 300);
+            return;
+        }
+
+        let done = false;
+        const cleanup = () => {
+            video.removeEventListener('loadedmetadata', handleReady);
+            video.removeEventListener('canplay', handleReady);
+        };
+        const handleReady = () => {
+            if (done) return;
+            done = true;
+            cleanup();
+            callback(video);
+        };
+
+        video.addEventListener('loadedmetadata', handleReady);
+        video.addEventListener('canplay', handleReady);
+        window.setTimeout(handleReady, 3000);
+    }
+
+    function tryPlayVideo(video, warning = '请点击一次播放以加入同步') {
+        if (!video) return;
+
+        try {
+            Promise.resolve(video.play()).catch(() => {
+                showMessage(warning, 'warning');
+            });
+        } catch (error) {
+            showMessage(warning, 'warning');
+        }
+    }
+
     function getCurrentEpisodeUrl(episodes, episodeIndex) {
         const urlParams = new URLSearchParams(window.location.search);
         return urlParams.get('url') || episodes[episodeIndex] || '';
@@ -187,7 +258,7 @@
                 episodes
             },
             playback: {
-                paused: playbackInfo.paused,
+                paused: true,
                 currentTime: playbackInfo.currentTime,
                 duration: playbackInfo.duration,
                 playbackRate: playbackInfo.playbackRate,
@@ -318,7 +389,8 @@
             role: 'viewer',
             clientId: message.clientId || activeRoom?.clientId || '',
             participantCount: payload.participantCount || activeRoom?.participantCount || 1,
-            maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10
+            maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10,
+            status: payload.status || activeRoom?.status || 'waiting'
         };
 
         persistRoomSession(room);
@@ -352,7 +424,7 @@
                 <div class="watch-room-dialog-header">
                     <div>
                         <h3 id="watchRoomModalTitle" class="watch-room-title">一起看中</h3>
-                        <p class="watch-room-subtitle">已连接房间服务，本阶段仅同步房间与在线人数。</p>
+                        <p class="watch-room-subtitle">已连接房间服务，可等待房主开播并同步播放状态。</p>
                     </div>
                     <button type="button" class="watch-room-close" data-watch-room-close="true" aria-label="关闭一起看弹窗">&times;</button>
                 </div>
@@ -378,6 +450,12 @@
         return activeRoom?.maxMembers || 10;
     }
 
+    function getRoomStatusText() {
+        if (activeRoom?.status === 'waiting') return '等待开播';
+        if (activeRoom?.status === 'playing') return '一起看中';
+        return '已连接';
+    }
+
     function renderWatchRoomPanel() {
         const modal = ensureWatchRoomModal();
         const content = modal.querySelector('#watchRoomModalContent');
@@ -385,6 +463,7 @@
 
         const playbackInfo = getCurrentPlaybackInfo();
         const isHost = activeRoom.role === 'host';
+        const isWaitingHost = isHost && activeRoom.status === 'waiting';
         content.innerHTML = `
             <div class="watch-room-room-id" aria-label="房间号">${activeRoom.roomId}</div>
             <div class="watch-room-meta-grid">
@@ -395,6 +474,10 @@
                 <div>
                     <span class="watch-room-meta-label">身份</span>
                     <strong>${isHost ? '你是房主' : '你是观众'}</strong>
+                </div>
+                <div>
+                    <span class="watch-room-meta-label">状态</span>
+                    <strong>${getRoomStatusText()}</strong>
                 </div>
             </div>
             <div class="watch-room-current">
@@ -413,9 +496,12 @@
             </div>
             <p class="watch-room-help">${isHost
                 ? '把房间号发给好友，好友打开网站后在设置里输入房间号即可加入。'
-                : '已加入一起看。本阶段暂不做播放同步，只显示房间与在线人数。'}</p>
+                : activeRoom.status === 'waiting'
+                    ? '正在等待房主开始播放。'
+                    : '已加入一起看，正在跟随房主播放。'}</p>
             <div class="watch-room-actions">
                 ${isHost ? '<button type="button" class="watch-room-primary" id="copyWatchRoomIdBtn">复制房间号</button>' : ''}
+                ${isWaitingHost ? '<button type="button" class="watch-room-primary" id="startWatchRoomBtn">开始一起看</button>' : ''}
                 <button type="button" class="${isHost ? 'watch-room-danger' : 'watch-room-primary'}" id="${isHost ? 'endWatchRoomBtn' : 'leaveWatchRoomBtn'}">
                     ${isHost ? '结束房间' : '退出房间'}
                 </button>
@@ -423,6 +509,7 @@
         `;
 
         content.querySelector('#copyWatchRoomIdBtn')?.addEventListener('click', copyRoomId);
+        content.querySelector('#startWatchRoomBtn')?.addEventListener('click', startWatchRoom);
         content.querySelector('#endWatchRoomBtn')?.addEventListener('click', endRoom);
         content.querySelector('#leaveWatchRoomBtn')?.addEventListener('click', leaveRoom);
     }
@@ -447,7 +534,7 @@
 
         const label = button.querySelector('.watch-room-button-label');
         const text = activeRoom
-            ? `一起看中 · ${getParticipantCount()}/${getMaxMembers()}`
+            ? `${activeRoom.status === 'waiting' ? '等待开播' : '一起看中'} · ${getParticipantCount()}/${getMaxMembers()}`
             : '一起看';
 
         if (label) {
@@ -500,6 +587,10 @@
             window.clearTimeout(playerSyncSetupTimer);
             playerSyncSetupTimer = null;
         }
+        if (viewerInitialSyncTimer) {
+            window.clearTimeout(viewerInitialSyncTimer);
+            viewerInitialSyncTimer = null;
+        }
         if (hostSyncTimer) {
             window.clearInterval(hostSyncTimer);
             hostSyncTimer = null;
@@ -518,6 +609,18 @@
         playerSyncRole = '';
     }
 
+    function resetViewerInitialSync() {
+        if (viewerInitialSyncTimer) {
+            window.clearTimeout(viewerInitialSyncTimer);
+            viewerInitialSyncTimer = null;
+        }
+        viewerInitialSyncComplete = false;
+        viewerReadySent = false;
+        pendingInitialPlayback = null;
+        pendingInitialMedia = null;
+        pendingInitialStatus = 'waiting';
+    }
+
     function addVideoSyncListener(video, eventName, handler) {
         video.addEventListener(eventName, handler);
         playerSyncCleanupCallbacks.push(() => video.removeEventListener(eventName, handler));
@@ -526,6 +629,7 @@
     function canBroadcastHostSync() {
         return isPlayerPage()
             && activeRoom?.role === 'host'
+            && activeRoom?.status === 'playing'
             && !isApplyingRemoteSync
             && socket?.readyState === WebSocket.OPEN;
     }
@@ -569,9 +673,135 @@
         }, HOST_SYNC_INTERVAL);
     }
 
+    function handleViewerReady(payload = {}) {
+        if (activeRoom?.role === 'host') {
+            showMessage('观众已准备，等待房主开始。', 'info');
+        }
+    }
+
+    function scheduleViewerInitialSync(playback = {}, media = {}, status = '') {
+        if (!isPlayerPage() || activeRoom?.role !== 'viewer' || viewerInitialSyncComplete) return;
+
+        pendingInitialPlayback = playback || {};
+        pendingInitialMedia = media || pendingInitialMedia || {};
+        pendingInitialStatus = status || activeRoom?.status || pendingInitialStatus || 'waiting';
+
+        if (viewerInitialSyncTimer) {
+            window.clearTimeout(viewerInitialSyncTimer);
+        }
+
+        viewerInitialSyncTimer = window.setTimeout(() => {
+            viewerInitialSyncTimer = null;
+            applyViewerInitialSync();
+        }, pendingInitialStatus === 'playing' ? 100 : VIEWER_INITIAL_SYNC_DELAY);
+    }
+
+    function applyViewerInitialSync() {
+        if (!isPlayerPage() || activeRoom?.role !== 'viewer' || viewerInitialSyncComplete) return;
+
+        waitForVideoReady((video) => {
+            if (viewerInitialSyncComplete || !video) return;
+
+            const playback = pendingInitialPlayback || {};
+            const status = pendingInitialStatus || activeRoom?.status || 'waiting';
+            const targetTime = calculateTargetTime(playback);
+
+            isApplyingRemoteSync = true;
+            try {
+                if (status === 'waiting') {
+                    video.pause();
+                }
+                video.currentTime = targetTime;
+                if (playback.playbackRate && Number.isFinite(Number(playback.playbackRate))) {
+                    video.playbackRate = Number(playback.playbackRate);
+                }
+            } catch (error) {}
+
+            const finishReady = () => {
+                sendViewerReady(targetTime);
+                if (status === 'playing') {
+                    tryPlayVideo(video);
+                } else {
+                    showMessage('正在等待房主开始播放', 'info');
+                }
+                window.setTimeout(() => {
+                    isApplyingRemoteSync = false;
+                }, REMOTE_SYNC_LOCK_MS);
+            };
+
+            if (Math.abs((Number(video.currentTime) || 0) - targetTime) > 0.5) {
+                const onSeeked = () => {
+                    video.removeEventListener('seeked', onSeeked);
+                    finishReady();
+                };
+                video.addEventListener('seeked', onSeeked);
+                window.setTimeout(() => {
+                    video.removeEventListener('seeked', onSeeked);
+                    finishReady();
+                }, 1500);
+            } else {
+                finishReady();
+            }
+        });
+    }
+
+    function sendViewerReady(currentTime) {
+        if (viewerReadySent) return;
+
+        viewerReadySent = true;
+        viewerInitialSyncComplete = true;
+        sendSocketMessage({
+            type: 'viewer:ready',
+            payload: {
+                currentTime,
+                playbackRate: getWatchRoomVideoElement()?.playbackRate || 1,
+                readyAt: Date.now()
+            }
+        });
+    }
+
+    function handleSyncStart(payload = {}) {
+        if (!isPlayerPage() || !activeRoom) return;
+
+        setActiveRoom({
+            ...(activeRoom || {}),
+            status: 'playing'
+        });
+        viewerInitialSyncComplete = true;
+
+        waitForVideoReady((video) => {
+            if (!video) return;
+
+            const targetTime = calculateTargetTime({
+                ...payload,
+                paused: false
+            });
+
+            isApplyingRemoteSync = true;
+            try {
+                if (Math.abs((Number(video.currentTime) || 0) - targetTime) > 1) {
+                    video.currentTime = targetTime;
+                }
+                if (payload.playbackRate && Number.isFinite(Number(payload.playbackRate))) {
+                    video.playbackRate = Number(payload.playbackRate);
+                }
+            } catch (error) {}
+
+            tryPlayVideo(video);
+            window.setTimeout(() => {
+                isApplyingRemoteSync = false;
+            }, REMOTE_SYNC_LOCK_MS);
+        });
+    }
+
     function handleRemoteSyncMessage(type, payload = {}, sourceClientId = '') {
         if (!isPlayerPage() || activeRoom?.role !== 'viewer') return;
         if (sourceClientId && sourceClientId === activeRoom?.clientId) return;
+
+        if (!viewerInitialSyncComplete) {
+            scheduleViewerInitialSync(payload, pendingInitialMedia || {}, activeRoom?.status || pendingInitialStatus);
+            return;
+        }
 
         const video = getWatchRoomVideoElement();
         if (!video) {
@@ -650,8 +880,10 @@
                 role: 'host',
                 clientId: data.clientId,
                 participantCount: 1,
-                maxMembers: data.maxMembers || 10
+                maxMembers: data.maxMembers || 10,
+                status: data.status || 'waiting'
             };
+            pauseLocalForWaiting();
             setActiveRoom(room);
             persistRoomSession(room);
             connectRoomSocket(data.roomId, 'host', data.clientId);
@@ -669,6 +901,39 @@
         }
 
         showMessage(data.error || '创建房间失败', 'error');
+    }
+
+    function pauseLocalForWaiting() {
+        const video = getWatchRoomVideoElement();
+        if (!video || video.paused) return;
+
+        isApplyingRemoteSync = true;
+        try {
+            video.pause();
+        } catch (error) {}
+        window.setTimeout(() => {
+            isApplyingRemoteSync = false;
+        }, REMOTE_SYNC_LOCK_MS);
+    }
+
+    function startWatchRoom() {
+        if (activeRoom?.role !== 'host') return;
+
+        const sent = sendSocketMessage({
+            type: 'host:start',
+            payload: getPlaybackSyncPayload()
+        });
+
+        if (!sent) {
+            showMessage('一起看尚未连接，请稍后重试', 'warning');
+            return;
+        }
+
+        setActiveRoom({
+            ...(activeRoom || {}),
+            status: 'playing'
+        });
+        tryPlayVideo(getWatchRoomVideoElement());
     }
 
     function buildWebSocketUrl(roomId, role, clientId = '') {
@@ -769,17 +1034,35 @@
                 roomId: message.roomId || payload.roomId || activeRoom?.roomId,
                 clientId: message.clientId || activeRoom?.clientId || '',
                 participantCount: payload.participantCount || payload.participants?.length || activeRoom?.participantCount || 1,
-                maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10
+                maxMembers: payload.maxMembers || activeRoom?.maxMembers || 10,
+                status: payload.status || activeRoom?.status || 'waiting'
             };
             setActiveRoom(room);
             persistRoomSession(room);
 
             if (room.role === 'viewer' && isPlayerPage()) {
                 console.log('[WatchRoom] skip redirect on player page');
+                scheduleViewerInitialSync(payload.playback || {}, payload.media || {}, room.status);
                 handleRemoteSyncMessage('sync:state', payload.playback || {}, message.clientId);
             } else if (room.role === 'viewer' && room.pendingPlayerRedirect) {
                 enterHostPlayback(payload, message);
             }
+            return;
+        }
+
+        if (message.type === 'sync:prepare') {
+            const payload = message.payload || {};
+            scheduleViewerInitialSync(payload.playback || {}, payload.media || {}, payload.status || activeRoom?.status || 'waiting');
+            return;
+        }
+
+        if (message.type === 'viewer:ready') {
+            handleViewerReady(message.payload || {});
+            return;
+        }
+
+        if (message.type === 'sync:start') {
+            handleSyncStart(message.payload || {});
             return;
         }
 
@@ -886,6 +1169,7 @@
     function clearRoomState() {
         closeSocket(false);
         cleanupPlayerSync();
+        resetViewerInitialSync();
         clearStoredRoomSession();
         activeRoom = null;
         updatePlayerWatchRoomButton();
@@ -908,6 +1192,7 @@
             clientId: '',
             participantCount: roomState.participantCount || roomState.participantsCount || 1,
             maxMembers: roomState.maxMembers || 10,
+            status: roomState.status || 'waiting',
             pendingPlayerRedirect: false
         });
         return enterHostPlayback(roomState, {
@@ -933,12 +1218,17 @@
             return;
         }
 
+        if (role === 'viewer') {
+            resetViewerInitialSync();
+        }
+
         setActiveRoom({
             roomId,
             role,
             clientId,
             participantCount: 1,
             maxMembers: 10,
+            status: 'waiting',
             pendingPlayerRedirect: false
         });
         connectRoomSocket(roomId, role, clientId);
@@ -1032,6 +1322,7 @@
         closeWatchRoomPanel,
         createRoom,
         createMockRoom: createRoom,
+        startWatchRoom,
         endRoom,
         endMockRoom: endRoom,
         leaveRoom,

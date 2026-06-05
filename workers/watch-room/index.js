@@ -1,6 +1,7 @@
 const MAX_MEMBERS = 10;
 const ROOM_STATUS = {
-    ACTIVE: 'active',
+    WAITING: 'waiting',
+    PLAYING: 'playing',
     ENDED: 'ended',
     HOST_DISCONNECTED: 'host_disconnected',
 };
@@ -96,6 +97,26 @@ function normalizePlaybackPayload(type, payload = {}, previousPlayback = {}) {
     };
 }
 
+function normalizeInitialPlayback(playback = {}) {
+    return {
+        paused: true,
+        currentTime: Math.max(0, normalizeNumber(playback.currentTime, 0)),
+        duration: Math.max(0, normalizeNumber(playback.duration, 0)),
+        playbackRate: normalizeNumber(playback.playbackRate, 1) || 1,
+        updatedAt: now(),
+    };
+}
+
+function normalizeStartPlayback(payload = {}, previousPlayback = {}) {
+    return {
+        paused: false,
+        currentTime: Math.max(0, normalizeNumber(payload.currentTime, previousPlayback.currentTime || 0)),
+        duration: Math.max(0, normalizeNumber(payload.duration, previousPlayback.duration || 0)),
+        playbackRate: normalizeNumber(payload.playbackRate, previousPlayback.playbackRate || 1) || 1,
+        updatedAt: normalizeNumber(payload.updatedAt, now()),
+    };
+}
+
 export class WatchRoomDurableObject {
     constructor(state, env) {
         this.state = state;
@@ -160,12 +181,12 @@ export class WatchRoomDurableObject {
         const createdAt = now();
         const room = {
             roomId,
-            status: ROOM_STATUS.ACTIVE,
+            status: ROOM_STATUS.WAITING,
             hostId: body.hostId || `host_${crypto.randomUUID()}`,
             maxMembers: MAX_MEMBERS,
             participants: {},
             media: body.media || {},
-            playback: body.playback || {},
+            playback: normalizeInitialPlayback(body.playback || {}),
             createdAt,
             updatedAt: createdAt,
             hostDisconnectedAt: null,
@@ -177,6 +198,7 @@ export class WatchRoomDurableObject {
         return jsonResponse({
             success: true,
             roomId,
+            status: room.status,
             role: 'host',
             hostId: room.hostId,
             maxMembers: MAX_MEMBERS,
@@ -202,7 +224,7 @@ export class WatchRoomDurableObject {
             return jsonResponse({ success: false, error: ERROR_CODE.ROOM_ENDED }, 410);
         }
 
-        if (room.status !== ROOM_STATUS.ACTIVE) {
+        if (![ROOM_STATUS.WAITING, ROOM_STATUS.PLAYING].includes(room.status)) {
             return jsonResponse({ success: false, error: ERROR_CODE.HOST_DISCONNECTED }, 409);
         }
 
@@ -307,7 +329,9 @@ export class WatchRoomDurableObject {
         };
 
         if (role === 'host') {
-            room.status = ROOM_STATUS.ACTIVE;
+            if (room.status === ROOM_STATUS.HOST_DISCONNECTED) {
+                room.status = ROOM_STATUS.WAITING;
+            }
             room.hostDisconnectedAt = null;
         }
 
@@ -331,6 +355,15 @@ export class WatchRoomDurableObject {
 
         socket.send(buildMessage('room:state', room.roomId, clientId, this.getPublicRoomState(room)));
         await this.broadcastParticipants(room);
+
+        if (role === 'viewer') {
+            socket.send(buildMessage('sync:prepare', room.roomId, clientId, {
+                viewerId: clientId,
+                status: room.status,
+                media: room.media || {},
+                playback: room.playback || {},
+            }));
+        }
     }
 
     closeExistingSession(clientId, replacementSocket) {
@@ -386,6 +419,16 @@ export class WatchRoomDurableObject {
             return;
         }
 
+        if (message.type === 'viewer:ready') {
+            await this.handleViewerReady(room, session, message);
+            return;
+        }
+
+        if (message.type === 'host:start') {
+            await this.handleHostStart(socket, room, session, message);
+            return;
+        }
+
         if (isHostControlEvent(message.type)) {
             await this.handleHostControl(socket, room, session, message);
             return;
@@ -400,6 +443,11 @@ export class WatchRoomDurableObject {
             return;
         }
 
+        if (room.status !== ROOM_STATUS.PLAYING) {
+            this.sendError(socket, ERROR_CODE.UNAUTHORIZED_ACTION, 'Room has not started');
+            return;
+        }
+
         const playback = normalizePlaybackPayload(
             message.type,
             message.payload || {},
@@ -409,6 +457,39 @@ export class WatchRoomDurableObject {
         room.playback = playback;
         await this.writeRoom(room);
         await this.broadcastPlaybackSync(room, session.clientId, getSyncEventType(message.type), playback);
+    }
+
+    async handleHostStart(socket, room, session, message) {
+        if (session.role !== 'host' || session.clientId !== room.hostId) {
+            this.sendError(socket, ERROR_CODE.UNAUTHORIZED_ACTION, 'Only host can start room');
+            return;
+        }
+
+        const playback = normalizeStartPlayback(message.payload || {}, room.playback || {});
+        room.status = ROOM_STATUS.PLAYING;
+        room.playback = playback;
+        await this.writeRoom(room);
+        this.broadcastToAll(buildMessage('sync:start', room.roomId, session.clientId, {
+            ...playback,
+            sourceClientId: session.clientId,
+        }));
+    }
+
+    async handleViewerReady(room, session, message) {
+        if (session.role !== 'viewer') {
+            this.sendErrorByClientId(session.clientId, ERROR_CODE.UNAUTHORIZED_ACTION, 'Only viewer can become ready');
+            return;
+        }
+
+        if (room.status !== ROOM_STATUS.WAITING) return;
+
+        const currentTime = Math.max(0, normalizeNumber(message.payload?.currentTime, room.playback?.currentTime || 0));
+        const readyPayload = {
+            viewerId: session.clientId,
+            currentTime,
+            readyAt: message.payload?.readyAt || now(),
+        };
+        this.broadcastToAll(buildMessage('viewer:ready', room.roomId, session.clientId, readyPayload));
     }
 
     async touchParticipant(room, clientId) {
@@ -491,6 +572,24 @@ export class WatchRoomDurableObject {
         }
     }
 
+    broadcastToRole(role, message) {
+        for (const [socket, session] of this.sessions.entries()) {
+            if (session.role !== role) continue;
+
+            try {
+                socket.send(message);
+            } catch (error) {}
+        }
+    }
+
+    broadcastToAll(message) {
+        for (const socket of this.sessions.keys()) {
+            try {
+                socket.send(message);
+            } catch (error) {}
+        }
+    }
+
     sendError(socket, code, message) {
         const session = this.sessions.get(socket) || {};
         try {
@@ -499,6 +598,13 @@ export class WatchRoomDurableObject {
                 message,
             }));
         } catch (error) {}
+    }
+
+    sendErrorByClientId(clientId, code, message) {
+        for (const [socket, session] of this.sessions.entries()) {
+            if (session.clientId !== clientId) continue;
+            this.sendError(socket, code, message);
+        }
     }
 
     getPublicRoomState(room) {
