@@ -593,12 +593,20 @@
         const isViewer = activeRoom.role === 'viewer';
         const isWaitingHost = isHost && activeRoom.status === 'waiting';
         const canStart = isWaitingHost && areAllViewersReady();
+        const viewerReadyButtonText = isViewer ? getViewerReadyButtonText() : '';
         console.log('[WatchRoom] watch room modal render', {
             localTechnicalReady,
             localUserReady,
             roomStatus: activeRoom.status,
             role: activeRoom.role
         });
+        if (isViewer) {
+            console.log('[WatchRoom] ready button render state', {
+                localTechnicalReady,
+                localUserReady,
+                buttonText: viewerReadyButtonText
+            });
+        }
         content.innerHTML = `
             <div class="watch-room-room-id" aria-label="房间号">${activeRoom.roomId}</div>
             <div class="watch-room-meta-grid">
@@ -646,7 +654,7 @@
             <div class="watch-room-actions">
                 ${isHost ? '<button type="button" class="watch-room-primary" id="copyWatchRoomIdBtn">复制房间号</button>' : ''}
                 ${isWaitingHost ? `<button type="button" class="watch-room-primary" id="startWatchRoomBtn" ${canStart ? '' : 'disabled'}>${canStart ? '开始一起看' : '等待观众准备'}</button>` : ''}
-                ${isViewer && activeRoom.status === 'waiting' ? `<button type="button" class="watch-room-primary" id="viewerReadyBtn" ${localTechnicalReady && !localUserReady && !getLocalParticipant()?.ready ? '' : 'disabled'}>${getViewerReadyButtonText()}</button>` : ''}
+                ${isViewer && activeRoom.status === 'waiting' ? `<button type="button" class="watch-room-primary" id="viewerReadyBtn" ${localTechnicalReady && !localUserReady && !getLocalParticipant()?.ready ? '' : 'disabled'}>${viewerReadyButtonText}</button>` : ''}
                 <button type="button" class="${isHost ? 'watch-room-danger' : 'watch-room-primary'}" id="${isHost ? 'endWatchRoomBtn' : 'leaveWatchRoomBtn'}">
                     ${isHost ? '结束房间' : '退出房间'}
                 </button>
@@ -1148,6 +1156,36 @@
             viewerInitialSyncTimer = null;
             applyViewerInitialSync();
         }, pendingInitialStatus === 'playing' ? 100 : VIEWER_INITIAL_SYNC_DELAY);
+        if ((pendingInitialStatus || activeRoom?.status) === 'waiting') {
+            window.setTimeout(() => {
+                if (
+                    viewerInitialSyncComplete
+                    || !isPlayerPage()
+                    || activeRoom?.role !== 'viewer'
+                    || activeRoom?.status !== 'waiting'
+                ) {
+                    return;
+                }
+
+                const video = getWatchRoomVideoElement();
+                console.log('[WatchRoom] viewer technical ready fallback check', {
+                    role: activeRoom?.role,
+                    roomStatus: activeRoom?.status,
+                    hasActiveRoom: Boolean(activeRoom),
+                    hasVideo: Boolean(video),
+                    readyState: video?.readyState,
+                    currentTime: video?.currentTime,
+                    paused: video?.paused,
+                    waitTargetTime,
+                    localTechnicalReady,
+                    localUserReady
+                });
+
+                if (video) {
+                    finalizeViewerTechnicalReady(video, waitTargetTime, activeRoom.status, true);
+                }
+            }, 3000);
+        }
     }
 
     function applyViewerInitialSync() {
@@ -1173,21 +1211,24 @@
                 }
             } catch (error) {}
 
-            let readyDone = false;
             let retryCount = 0;
-            const finishReady = () => {
-                if (readyDone) return;
+            const finishReady = (allowFallback = false) => {
+                if (viewerInitialSyncComplete) return;
                 const diff = Math.abs((Number(video.currentTime) || 0) - targetTime);
                 console.log('[WatchRoom] viewer technical ready check', {
-                    roomStatus: status,
                     role: activeRoom?.role,
+                    roomStatus: status,
+                    hasActiveRoom: Boolean(activeRoom),
+                    hasVideo: Boolean(video),
                     readyState: video?.readyState,
                     currentTime: Number(video.currentTime) || 0,
                     paused: video.paused,
                     waitTargetTime: targetTime,
+                    localTechnicalReady,
+                    localUserReady,
                     diff
                 });
-                if (diff > 1.5 && retryCount < 1) {
+                if (!allowFallback && diff > 1.5 && retryCount < 1) {
                     retryCount += 1;
                     console.warn('[WatchRoom] viewer technical ready seek retry', {
                         currentTime: Number(video.currentTime) || 0,
@@ -1208,34 +1249,7 @@
                         diff,
                     });
                 }
-                readyDone = true;
-                try {
-                    video.pause();
-                } catch (error) {}
-                localTechnicalReady = true;
-                viewerInitialSyncComplete = true;
-                console.log('[WatchRoom] viewer technical ready true');
-                console.log('[WatchRoomAudit] user ready state', {
-                    localTechnicalReady,
-                    localUserReady
-                });
-                console.log('[WatchRoom] viewer technical ready', {
-                    currentTime: Number(video.currentTime) || 0,
-                    waitTargetTime: targetTime,
-                    paused: video.paused
-                });
-                if (status === 'playing') {
-                    console.log('[WatchRoomAudit] initial sync completed without playback; waiting for sync:start or host control');
-                } else {
-                    showMessage('正在等待房主开始播放', 'info');
-                }
-                setActiveRoom({
-                    ...(activeRoom || {}),
-                    status: activeRoom?.status || status || 'waiting'
-                });
-                window.setTimeout(() => {
-                    isApplyingRemoteSync = false;
-                }, REMOTE_SYNC_LOCK_MS);
+                finalizeViewerTechnicalReady(video, targetTime, status, allowFallback);
             };
 
             if (Math.abs((Number(video.currentTime) || 0) - targetTime) > 0.5) {
@@ -1246,12 +1260,48 @@
                 video.addEventListener('seeked', onSeeked);
                 window.setTimeout(() => {
                     video.removeEventListener('seeked', onSeeked);
-                    finishReady();
+                    finishReady(true);
                 }, 1500);
             } else {
                 finishReady();
             }
         });
+    }
+
+    function finalizeViewerTechnicalReady(video, targetTime = 0, status = 'waiting', fallback = false) {
+        if (viewerInitialSyncComplete || activeRoom?.role !== 'viewer') return;
+
+        try {
+            if (video && !video.paused) video.pause();
+        } catch (error) {}
+
+        localTechnicalReady = true;
+        viewerInitialSyncComplete = true;
+        console.log('[WatchRoom] viewer technical ready true');
+        console.log('[WatchRoom] viewer technical ready true, render ready button', {
+            localTechnicalReady,
+            localUserReady,
+            roomStatus: activeRoom?.status || status,
+            role: activeRoom?.role,
+            fallback
+        });
+        console.log('[WatchRoom] viewer technical ready', {
+            currentTime: Number(video?.currentTime) || 0,
+            waitTargetTime: targetTime,
+            paused: video?.paused
+        });
+        if (status === 'playing') {
+            console.log('[WatchRoomAudit] initial sync completed without playback; waiting for sync:start or host control');
+        } else {
+            showMessage('正在等待房主开始播放', 'info');
+        }
+        setActiveRoom({
+            ...(activeRoom || {}),
+            status: activeRoom?.status || status || 'waiting'
+        });
+        window.setTimeout(() => {
+            isApplyingRemoteSync = false;
+        }, REMOTE_SYNC_LOCK_MS);
     }
 
     function sendViewerReady(currentTime) {
