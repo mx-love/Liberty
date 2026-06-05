@@ -593,6 +593,12 @@
         const isViewer = activeRoom.role === 'viewer';
         const isWaitingHost = isHost && activeRoom.status === 'waiting';
         const canStart = isWaitingHost && areAllViewersReady();
+        console.log('[WatchRoom] watch room modal render', {
+            localTechnicalReady,
+            localUserReady,
+            roomStatus: activeRoom.status,
+            role: activeRoom.role
+        });
         content.innerHTML = `
             <div class="watch-room-room-id" aria-label="房间号">${activeRoom.roomId}</div>
             <div class="watch-room-meta-grid">
@@ -696,6 +702,19 @@
         if (isPlayerPage() && activeRoom) {
             bindPlaybackGateToCurrentVideo();
         }
+        if (
+            isPlayerPage()
+            && activeRoom?.role === 'viewer'
+            && !viewerInitialSyncComplete
+            && pendingInitialPlayback
+            && !viewerInitialSyncTimer
+        ) {
+            scheduleViewerInitialSync(
+                pendingInitialPlayback,
+                pendingInitialMedia || {},
+                pendingInitialStatus || activeRoom.status || 'waiting'
+            );
+        }
         if (!document.getElementById('watchRoomModal')?.classList.contains('hidden')) {
             renderWatchRoomPanel();
         }
@@ -736,10 +755,6 @@
         if (playerSyncSetupTimer) {
             window.clearTimeout(playerSyncSetupTimer);
             playerSyncSetupTimer = null;
-        }
-        if (viewerInitialSyncTimer) {
-            window.clearTimeout(viewerInitialSyncTimer);
-            viewerInitialSyncTimer = null;
         }
         if (hostSyncTimer) {
             window.clearInterval(hostSyncTimer);
@@ -1163,11 +1178,14 @@
             const finishReady = () => {
                 if (readyDone) return;
                 const diff = Math.abs((Number(video.currentTime) || 0) - targetTime);
-                console.log('[WatchRoomAudit] technical ready check', {
-                    targetTime,
+                console.log('[WatchRoom] viewer technical ready check', {
+                    roomStatus: status,
+                    role: activeRoom?.role,
+                    readyState: video?.readyState,
                     currentTime: Number(video.currentTime) || 0,
                     paused: video.paused,
-                    resourceMatched: true
+                    waitTargetTime: targetTime,
+                    diff
                 });
                 if (diff > 1.5 && retryCount < 1) {
                     retryCount += 1;
@@ -1196,6 +1214,7 @@
                 } catch (error) {}
                 localTechnicalReady = true;
                 viewerInitialSyncComplete = true;
+                console.log('[WatchRoom] viewer technical ready true');
                 console.log('[WatchRoomAudit] user ready state', {
                     localTechnicalReady,
                     localUserReady
