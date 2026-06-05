@@ -491,6 +491,7 @@ export class WatchRoomDurableObject {
             roomId: room.roomId,
             clientId: session.clientId,
             role: session.role,
+            payload: message.payload || {},
         });
 
         if (session.role !== 'host' || session.clientId !== room.hostId) {
@@ -509,9 +510,13 @@ export class WatchRoomDurableObject {
         room.status = ROOM_STATUS.PLAYING;
         room.playback = playback;
         await this.writeRoom(room);
-        console.log('[WatchRoomDO] broadcast sync event', {
-            type: 'sync:start',
+        console.log('[WatchRoomDO] room status changed to playing', {
             roomId: room.roomId,
+            playback,
+        });
+        console.log('[WatchRoomDO] broadcast sync:start', {
+            roomId: room.roomId,
+            payload: playback,
         });
         this.broadcastToAll(buildMessage('sync:start', room.roomId, session.clientId, {
             ...playback,

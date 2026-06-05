@@ -24,6 +24,7 @@
     let pendingInitialMedia = null;
     let pendingInitialStatus = 'waiting';
     let lastSeekSyncToastAt = 0;
+    let isStartingWatchRoom = false;
 
     const HOST_SYNC_INTERVAL = 5000;
     const HOST_SEEK_DEBOUNCE = 300;
@@ -79,11 +80,53 @@
     }
 
     function getPlayerVideoElement() {
-        return document.querySelector('video');
+        return document.querySelector('#player video') || document.querySelector('video');
+    }
+
+    function getCurrentArtInstance() {
+        return window.LibertyPlayer?.art || window.art || window.artPlayer || null;
     }
 
     function getWatchRoomVideoElement() {
-        return window.LibertyPlayer?.art?.video || getPlayerVideoElement();
+        const art = getCurrentArtInstance();
+        return art?.video || art?.template?.$video || getPlayerVideoElement();
+    }
+
+    function normalizePlaybackNumber(value, fallback = 0) {
+        const number = Number(value);
+        return Number.isFinite(number) ? number : fallback;
+    }
+
+    function getCurrentPlaybackSnapshot() {
+        const art = getCurrentArtInstance();
+        const video = getWatchRoomVideoElement();
+        const currentTime = normalizePlaybackNumber(
+            video?.currentTime ?? art?.currentTime,
+            0
+        );
+        const duration = normalizePlaybackNumber(
+            video?.duration ?? art?.duration,
+            0
+        );
+        const playbackRate = normalizePlaybackNumber(
+            video?.playbackRate ?? art?.playbackRate,
+            1
+        ) || 1;
+        const paused = video
+            ? video.paused
+            : art?.paused !== undefined
+                ? Boolean(art.paused)
+                : true;
+
+        const snapshot = {
+            paused,
+            currentTime,
+            duration: duration > 0 ? duration : 0,
+            playbackRate,
+            updatedAt: Date.now()
+        };
+        console.log('[WatchRoom] playback snapshot', snapshot);
+        return snapshot;
     }
 
     function isPlayerPage() {
@@ -129,7 +172,7 @@
 
     function getCurrentPlaybackInfo() {
         const urlParams = new URLSearchParams(window.location.search);
-        const video = getWatchRoomVideoElement();
+        const snapshot = getCurrentPlaybackSnapshot();
         const titleElement = document.getElementById('videoTitle');
         const episodeElement = document.getElementById('episodeInfo');
         const playbackState = getPlaybackState();
@@ -138,23 +181,16 @@
         return {
             title: (titleElement?.textContent || urlParams.get('title') || session.title || localStorage.getItem('currentVideoTitle') || '未知视频').trim(),
             episode: (episodeElement?.textContent || `第 ${(Number(urlParams.get('index')) || 0) + 1} 集`).trim(),
-            currentTime: video ? video.currentTime : 0,
-            duration: video ? video.duration || 0 : 0,
-            paused: video ? video.paused : true,
-            playbackRate: video ? video.playbackRate || 1 : 1,
+            currentTime: snapshot.currentTime,
+            duration: snapshot.duration,
+            paused: snapshot.paused,
+            playbackRate: snapshot.playbackRate,
             session
         };
     }
 
     function getPlaybackSyncPayload() {
-        const video = getWatchRoomVideoElement();
-        return {
-            paused: video ? video.paused : true,
-            currentTime: video ? video.currentTime || 0 : 0,
-            duration: video ? video.duration || 0 : 0,
-            playbackRate: video ? video.playbackRate || 1 : 1,
-            updatedAt: Date.now()
-        };
+        return getCurrentPlaybackSnapshot();
     }
 
     function calculateTargetTime(playback) {
@@ -583,6 +619,8 @@
 
         if (activeRoom.role === 'host') {
             setupHostPlaybackSync(video);
+        } else if (activeRoom.role === 'viewer') {
+            setupViewerWaitingGuard(video);
         }
     }
 
@@ -689,6 +727,12 @@
 
     function setupHostPlaybackSync(video) {
         addVideoSyncListener(video, 'play', () => {
+            if (activeRoom?.role === 'host' && activeRoom?.status === 'waiting') {
+                console.log('[WatchRoom] host play in waiting, start together');
+                pauseLocalForWaiting();
+                sendHostStartFromCurrentPlayback('play');
+                return;
+            }
             sendHostPlaybackEvent('host:play');
         });
         addVideoSyncListener(video, 'pause', () => {
@@ -704,6 +748,22 @@
             if (document.hidden) return;
             sendHostPlaybackEvent('host:sync');
         }, HOST_SYNC_INTERVAL);
+    }
+
+    function setupViewerWaitingGuard(video) {
+        addVideoSyncListener(video, 'play', () => {
+            if (activeRoom?.role !== 'viewer' || activeRoom?.status !== 'waiting' || isApplyingRemoteSync) return;
+
+            console.log('[WatchRoom] viewer play blocked in waiting');
+            isApplyingRemoteSync = true;
+            try {
+                video.pause();
+            } catch (error) {}
+            showMessage('正在等待房主开始播放', 'info');
+            window.setTimeout(() => {
+                isApplyingRemoteSync = false;
+            }, REMOTE_SYNC_LOCK_MS);
+        });
     }
 
     function handleViewerReady(payload = {}) {
@@ -982,14 +1042,26 @@
             roomStatus: activeRoom?.status
         });
 
+        sendHostStartFromCurrentPlayback('button');
+    }
+
+    function sendHostStartFromCurrentPlayback(trigger = 'button') {
+        if (activeRoom?.role !== 'host') return false;
+        if (isStartingWatchRoom) return false;
+
+        isStartingWatchRoom = true;
+        const payload = getPlaybackSyncPayload();
+        console.log('[WatchRoom] send host:start', payload);
+
         const sent = sendSocketMessage({
             type: 'host:start',
-            payload: getPlaybackSyncPayload()
+            payload
         });
 
         if (!sent) {
+            isStartingWatchRoom = false;
             showMessage('一起看尚未连接，请稍后重试', 'warning');
-            return;
+            return false;
         }
 
         setActiveRoom({
@@ -997,6 +1069,10 @@
             status: 'playing'
         });
         tryPlayVideo(getWatchRoomVideoElement());
+        window.setTimeout(() => {
+            isStartingWatchRoom = false;
+        }, 1000);
+        return true;
     }
 
     function buildWebSocketUrl(roomId, role, clientId = '') {
