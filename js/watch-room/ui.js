@@ -1110,6 +1110,12 @@
             const finishReady = () => {
                 if (readyDone) return;
                 const diff = Math.abs((Number(video.currentTime) || 0) - targetTime);
+                console.log('[WatchRoomAudit] technical ready check', {
+                    targetTime,
+                    currentTime: Number(video.currentTime) || 0,
+                    paused: video.paused,
+                    resourceMatched: true
+                });
                 if (diff > 1.5 && retryCount < 1) {
                     retryCount += 1;
                     console.warn('[WatchRoom] viewer technical ready seek retry', {
@@ -1137,6 +1143,10 @@
                 } catch (error) {}
                 localTechnicalReady = true;
                 viewerInitialSyncComplete = true;
+                console.log('[WatchRoomAudit] user ready state', {
+                    localTechnicalReady,
+                    localUserReady
+                });
                 console.log('[WatchRoom] viewer technical ready', {
                     currentTime: Number(video.currentTime) || 0,
                     waitTargetTime: targetTime,

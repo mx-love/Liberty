@@ -2532,6 +2532,13 @@ function initializePageContent() {
         currentEpisodeIndex = index;
 
         episodesReversed = localStorage.getItem('episodesReversed') === 'true';
+        if (isWatchRoomViewerLaunch()) {
+            console.log('[WatchRoomAudit] player init source', {
+                url: videoUrl,
+                episodes: currentEpisodes,
+                episodeIndex: currentEpisodeIndex
+            });
+        }
     } catch (e) {
         currentEpisodes = [];
         currentEpisodeIndex = 0;
@@ -3377,6 +3384,11 @@ function initPlayerInternal(videoUrl) {
                 video.disableRemotePlayback = false;
 
                 hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                    if (isWatchRoomViewerLaunch()) {
+                        console.log('[WatchRoomAudit] skip hls manifest autoplay for watch room viewer');
+                        return;
+                    }
+
                     video.play().catch(e => {
                     });
                 });
@@ -3718,27 +3730,36 @@ function initPlayerInternal(videoUrl) {
         videoHasEnded = false;
         const urlParams = new URLSearchParams(window.location.search);
         const savedPosition = parseInt(urlParams.get('position') || '0');
+        const watchRoomViewerLaunch = isWatchRoomViewerLaunch();
 
         // ✅ 优先尝试从临时保存的进度恢复（切换源时使用）
+        // 一起看观众必须以房间 playback 为准，不能被本机历史进度覆盖。
         let restoredPosition = savedPosition;
         const tempProgressKey = `videoProgress_temp_${currentVideoTitle}_${currentEpisodeIndex}`;
-        try {
-            const tempProgress = localStorage.getItem(tempProgressKey);
-            if (tempProgress) {
-                const progress = JSON.parse(tempProgress);
-                if (progress.position > 10 && Date.now() - progress.timestamp < 60000) {
-                    restoredPosition = Math.max(restoredPosition, progress.position);
+        if (!watchRoomViewerLaunch) {
+            try {
+                const tempProgress = localStorage.getItem(tempProgressKey);
+                if (tempProgress) {
+                    const progress = JSON.parse(tempProgress);
+                    if (progress.position > 10 && Date.now() - progress.timestamp < 60000) {
+                        restoredPosition = Math.max(restoredPosition, progress.position);
+                    }
+                    localStorage.removeItem(tempProgressKey);
                 }
-                localStorage.removeItem(tempProgressKey);
+            } catch (e) {
+                console.error('读取临时进度失败:', e);
             }
-        } catch (e) {
-            console.error('读取临时进度失败:', e);
+        } else {
+            console.log('[WatchRoomAudit] watch room viewer mode', {
+                roomId: sessionStorage.getItem('watchRoomId') || '',
+                role: sessionStorage.getItem('watchRoomRole') || '',
+            });
         }
 
         if (restoredPosition > 10 && restoredPosition < art.duration - 2) {
             art.currentTime = restoredPosition;
             showPositionRestoreHint(restoredPosition);
-        } else {
+        } else if (!watchRoomViewerLaunch) {
             try {
                 const progressKey = 'videoProgress_' + getVideoId();
                 const progressStr = localStorage.getItem(progressKey);
@@ -3758,6 +3779,11 @@ function initPlayerInternal(videoUrl) {
             } catch (e) {
                 console.error('恢复播放进度失败:', e);
             }
+        } else {
+            console.log('[WatchRoomAudit] skip local progress restore for watch room viewer', {
+                savedPosition,
+                restoredPosition
+            });
         }
 
         // 加载弹幕
