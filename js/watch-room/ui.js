@@ -546,7 +546,11 @@
     }
 
     function setActiveRoom(room) {
+        const previousStatus = activeRoom?.status;
         activeRoom = room;
+        if (previousStatus !== activeRoom?.status) {
+            console.log('[WatchRoom] room status updated', activeRoom?.status);
+        }
         updatePlayerWatchRoomButton();
         setupPlayerSyncForRoom();
         if (!document.getElementById('watchRoomModal')?.classList.contains('hidden')) {
@@ -634,12 +638,41 @@
             && socket?.readyState === WebSocket.OPEN;
     }
 
+    function getHostSyncBlockReason() {
+        if (!isPlayerPage()) return 'not_player_page';
+        if (activeRoom?.role !== 'host') return 'not_host';
+        if (activeRoom?.status !== 'playing') return 'room_not_playing';
+        if (isApplyingRemoteSync) return 'applying_remote_sync';
+        if (socket?.readyState !== WebSocket.OPEN) return 'socket_not_open';
+        return '';
+    }
+
     function sendHostPlaybackEvent(type) {
-        if (!canBroadcastHostSync()) return false;
+        if (!canBroadcastHostSync()) {
+            if (type !== 'host:sync') {
+                console.warn('[WatchRoom] host event blocked', {
+                    reason: getHostSyncBlockReason(),
+                    role: activeRoom?.role,
+                    socketReady: socket?.readyState === WebSocket.OPEN,
+                    roomStatus: activeRoom?.status,
+                    isApplyingRemoteSync
+                });
+            }
+            return false;
+        }
+
+        const payload = getPlaybackSyncPayload();
+        if (type !== 'host:sync') {
+            console.log('[WatchRoom] send host event', {
+                type,
+                currentTime: payload.currentTime,
+                roomStatus: activeRoom?.status
+            });
+        }
 
         return sendSocketMessage({
             type,
-            payload: getPlaybackSyncPayload()
+            payload
         });
     }
 
@@ -795,8 +828,22 @@
     }
 
     function handleRemoteSyncMessage(type, payload = {}, sourceClientId = '') {
-        if (!isPlayerPage() || activeRoom?.role !== 'viewer') return;
-        if (sourceClientId && sourceClientId === activeRoom?.clientId) return;
+        if (!isPlayerPage() || activeRoom?.role !== 'viewer') {
+            console.warn('[WatchRoom] cannot apply sync', {
+                reason: !isPlayerPage() ? 'not_player_page' : 'not_viewer',
+                type,
+                role: activeRoom?.role
+            });
+            return;
+        }
+        if (sourceClientId && sourceClientId === activeRoom?.clientId) {
+            console.warn('[WatchRoom] cannot apply sync', {
+                reason: 'self_event',
+                type,
+                sourceClientId
+            });
+            return;
+        }
 
         if (!viewerInitialSyncComplete) {
             scheduleViewerInitialSync(payload, pendingInitialMedia || {}, activeRoom?.status || pendingInitialStatus);
@@ -805,6 +852,10 @@
 
         const video = getWatchRoomVideoElement();
         if (!video) {
+            console.warn('[WatchRoom] cannot apply sync', {
+                reason: 'video_not_ready',
+                type
+            });
             window.setTimeout(() => handleRemoteSyncMessage(type, payload, sourceClientId), 500);
             return;
         }
@@ -820,6 +871,11 @@
         const shouldSeek = isSeekEvent || diff > 3;
 
         isApplyingRemoteSync = true;
+        console.log('[WatchRoom] applying remote sync', {
+            type,
+            currentTime: targetTime,
+            paused: payload.paused
+        });
 
         try {
             if (payload.playbackRate && Number.isFinite(Number(payload.playbackRate))) {
@@ -919,6 +975,13 @@
     function startWatchRoom() {
         if (activeRoom?.role !== 'host') return;
 
+        console.log('[WatchRoom] host start clicked', {
+            roomId: activeRoom?.roomId,
+            role: activeRoom?.role,
+            clientId: activeRoom?.clientId,
+            roomStatus: activeRoom?.status
+        });
+
         const sent = sendSocketMessage({
             type: 'host:start',
             payload: getPlaybackSyncPayload()
@@ -995,6 +1058,11 @@
         socket.addEventListener('open', () => {
             startHeartbeat();
             if (role === 'viewer') {
+                console.log('[WatchRoom] viewer socket connected', {
+                    roomId,
+                    role,
+                    clientId: clientId || '(server-generated)'
+                });
                 console.log('[WatchRoom] join room success', roomId);
                 showMessage('已连接一起看房间', 'success');
             }
@@ -1062,11 +1130,19 @@
         }
 
         if (message.type === 'sync:start') {
+            console.log('[WatchRoom] received sync event', {
+                type: message.type,
+                payload: message.payload || {}
+            });
             handleSyncStart(message.payload || {});
             return;
         }
 
         if (['sync:play', 'sync:pause', 'sync:seek', 'sync:state'].includes(message.type)) {
+            console.log('[WatchRoom] received sync event', {
+                type: message.type,
+                payload: message.payload || {}
+            });
             handleRemoteSyncMessage(
                 message.type,
                 message.payload || {},

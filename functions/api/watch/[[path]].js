@@ -85,6 +85,7 @@ async function createRoom(request, env) {
       return jsonResponse({
         success: true,
         roomId: data.roomId,
+        status: data.status || 'waiting',
         role: data.role || 'host',
         clientId: data.hostId || hostId,
         maxMembers: data.maxMembers || 10,

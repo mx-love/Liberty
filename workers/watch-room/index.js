@@ -438,12 +438,39 @@ export class WatchRoomDurableObject {
     }
 
     async handleHostControl(socket, room, session, message) {
+        if (message.type !== 'host:sync') {
+            console.log('[WatchRoomDO] host event received', {
+                type: message.type,
+                roomId: room.roomId,
+                clientId: session.clientId,
+                role: session.role,
+                status: room.status,
+            });
+        }
+
         if (session.role !== 'host' || session.clientId !== room.hostId) {
+            console.warn('[WatchRoomDO] host event rejected', {
+                type: message.type,
+                reason: 'unauthorized_host',
+                clientId: session.clientId,
+                hostId: room.hostId,
+                role: session.role,
+            });
             this.sendError(socket, ERROR_CODE.UNAUTHORIZED_ACTION, 'Only host can control playback');
             return;
         }
 
         if (room.status !== ROOM_STATUS.PLAYING) {
+            if (message.type !== 'host:sync') {
+                console.warn('[WatchRoomDO] host event rejected', {
+                    type: message.type,
+                    reason: 'room_not_playing',
+                    clientId: session.clientId,
+                    hostId: room.hostId,
+                    role: session.role,
+                    status: room.status,
+                });
+            }
             this.sendError(socket, ERROR_CODE.UNAUTHORIZED_ACTION, 'Room has not started');
             return;
         }
@@ -460,7 +487,20 @@ export class WatchRoomDurableObject {
     }
 
     async handleHostStart(socket, room, session, message) {
+        console.log('[WatchRoomDO] host:start received', {
+            roomId: room.roomId,
+            clientId: session.clientId,
+            role: session.role,
+        });
+
         if (session.role !== 'host' || session.clientId !== room.hostId) {
+            console.warn('[WatchRoomDO] host event rejected', {
+                type: message.type,
+                reason: 'unauthorized_host',
+                clientId: session.clientId,
+                hostId: room.hostId,
+                role: session.role,
+            });
             this.sendError(socket, ERROR_CODE.UNAUTHORIZED_ACTION, 'Only host can start room');
             return;
         }
@@ -469,6 +509,10 @@ export class WatchRoomDurableObject {
         room.status = ROOM_STATUS.PLAYING;
         room.playback = playback;
         await this.writeRoom(room);
+        console.log('[WatchRoomDO] broadcast sync event', {
+            type: 'sync:start',
+            roomId: room.roomId,
+        });
         this.broadcastToAll(buildMessage('sync:start', room.roomId, session.clientId, {
             ...playback,
             sourceClientId: session.clientId,
@@ -558,6 +602,13 @@ export class WatchRoomDurableObject {
     }
 
     async broadcastPlaybackSync(room, sourceClientId, type, playback) {
+        if (type !== 'sync:state') {
+            console.log('[WatchRoomDO] broadcast sync event', {
+                type,
+                roomId: room.roomId,
+            });
+        }
+
         const message = buildMessage(type, room.roomId, sourceClientId, {
             ...playback,
             sourceClientId,
