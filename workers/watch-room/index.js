@@ -462,6 +462,11 @@ export class WatchRoomDurableObject {
 
         if (room.status !== ROOM_STATUS.PLAYING) {
             if (message.type !== 'host:sync') {
+                if (room.status === ROOM_STATUS.WAITING) {
+                    console.log('[WatchRoomDO] host event rejected in waiting', {
+                        type: message.type,
+                    });
+                }
                 console.warn('[WatchRoomDO] host event rejected', {
                     type: message.type,
                     reason: 'room_not_playing',

@@ -728,9 +728,9 @@
     function setupHostPlaybackSync(video) {
         addVideoSyncListener(video, 'play', () => {
             if (activeRoom?.role === 'host' && activeRoom?.status === 'waiting') {
-                console.log('[WatchRoom] host play in waiting, start together');
+                console.log('[WatchRoom] host play blocked in waiting, use start button');
                 pauseLocalForWaiting();
-                sendHostStartFromCurrentPlayback('play');
+                showMessage('请点击“开始一起看”统一开播', 'info');
                 return;
             }
             sendHostPlaybackEvent('host:play');
@@ -1035,10 +1035,9 @@
     function startWatchRoom() {
         if (activeRoom?.role !== 'host') return;
 
-        console.log('[WatchRoom] host start clicked', {
+        console.log('[WatchRoom] start together button clicked', {
             roomId: activeRoom?.roomId,
             role: activeRoom?.role,
-            clientId: activeRoom?.clientId,
             roomStatus: activeRoom?.status
         });
 
