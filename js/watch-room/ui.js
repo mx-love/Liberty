@@ -556,7 +556,6 @@
     }
 
     function getViewerReadyButtonText() {
-        if (!localTechnicalReady) return '视频准备中';
         if (localUserReady || getLocalParticipant()?.ready) return '已准备';
         return '我已准备';
     }
@@ -654,7 +653,7 @@
             <div class="watch-room-actions">
                 ${isHost ? '<button type="button" class="watch-room-primary" id="copyWatchRoomIdBtn">复制房间号</button>' : ''}
                 ${isWaitingHost ? `<button type="button" class="watch-room-primary" id="startWatchRoomBtn" ${canStart ? '' : 'disabled'}>${canStart ? '开始一起看' : '等待观众准备'}</button>` : ''}
-                ${isViewer && activeRoom.status === 'waiting' ? `<button type="button" class="watch-room-primary" id="viewerReadyBtn" ${localTechnicalReady && !localUserReady && !getLocalParticipant()?.ready ? '' : 'disabled'}>${viewerReadyButtonText}</button>` : ''}
+                ${isViewer && activeRoom.status === 'waiting' ? `<button type="button" class="watch-room-primary" id="viewerReadyBtn" ${!localUserReady && !getLocalParticipant()?.ready ? '' : 'disabled'}>${viewerReadyButtonText}</button>` : ''}
                 <button type="button" class="${isHost ? 'watch-room-danger' : 'watch-room-primary'}" id="${isHost ? 'endWatchRoomBtn' : 'leaveWatchRoomBtn'}">
                     ${isHost ? '结束房间' : '退出房间'}
                 </button>
@@ -1328,10 +1327,6 @@
         if (activeRoom?.role !== 'viewer' || activeRoom?.status !== 'waiting') return;
 
         console.log('[WatchRoom] viewer manual ready clicked');
-        if (!localTechnicalReady) {
-            showMessage('视频还在准备中，请稍等', 'warning');
-            return;
-        }
 
         const video = getWatchRoomVideoElement();
         if (video && !video.paused) {
