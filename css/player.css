@@ -148,6 +148,21 @@ div.player-loading-text {
     height: 60vh;
 }
 
+.player-actions-panel {
+    align-items: stretch;
+}
+
+.player-action-group {
+    align-items: stretch;
+}
+
+.player-actions-panel button,
+.player-actions-panel .autoplay-control {
+    min-width: 124px;
+    min-height: 40px;
+    justify-content: center;
+}
+
 .loading-container {
     position: absolute;
     top: 0;
@@ -596,43 +611,19 @@ button:disabled::before {
         font-size: 0.875rem;
     }
 
-    .player-container:has(#autoplayToggle) > .flex {
+    .player-actions-panel {
+        display: grid !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.5rem;
         align-items: stretch;
-        gap: 0.5rem;
     }
 
-    .player-container:has(#autoplayToggle) > .flex > .flex:first-child {
-        width: 100%;
-        margin-right: 0;
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 0.5rem;
-        align-items: center;
+    .player-action-group {
+        display: contents !important;
     }
 
-    .player-container:has(#autoplayToggle) > .flex > .flex:first-child .watch-room-action-btn {
-        width: 100%;
-        min-height: 44px;
-        justify-content: center;
-    }
-
-    .player-container:has(#autoplayToggle) > .flex > .flex:first-child .autoplay-control {
-        min-height: 44px;
-        justify-content: center;
-        background: #222;
-        border: 1px solid #333;
-        border-radius: 0.5rem;
-        padding: 0 0.75rem;
-    }
-
-    .player-container:has(#autoplayToggle) > .flex > .flex:last-child {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        width: 100%;
-        gap: 0.5rem;
-    }
-
-    .player-container:has(#autoplayToggle) > .flex > .flex:last-child button {
+    .player-actions-panel button,
+    .player-actions-panel .autoplay-control {
         width: 100%;
         min-width: 0;
         min-height: 44px;
@@ -641,11 +632,6 @@ button:disabled::before {
         padding-right: 0.75rem;
         overflow: hidden;
         text-overflow: ellipsis;
-    }
-
-    .player-container:has(#autoplayToggle) button[onclick="copyLinks()"],
-    .player-container:has(#autoplayToggle) #lockToggle {
-        display: none !important;
     }
 
     .art-video-player.art-mini,

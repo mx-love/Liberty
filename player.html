@@ -106,9 +106,9 @@
 
         <!-- 添加自动播放开关和排序按钮 -->
         <div class="player-container mb-2">
-            <div class="flex flex-wrap justify-end items-center gap-2">
+            <div class="player-actions-panel flex flex-wrap justify-end items-center gap-2">
                 <!-- 自动连播开关 - 分组到左边 -->
-                <div class="flex items-center gap-1 flex-shrink-0 mr-auto">
+                <div class="player-action-group flex items-center gap-2 flex-shrink-0 mr-auto">
                     <div class="autoplay-control flex items-center gap-1">
                         <span class="text-gray-400 text-sm whitespace-nowrap">自动连播</span>
                         <label class="switch">
@@ -125,7 +125,7 @@
                 </div>
 
                 <!-- 把各种功能按钮放在右侧 - 在小屏幕上各自占一行 -->
-                <div class="flex flex-wrap justify-end gap-2">
+                <div class="player-action-group flex flex-wrap justify-end gap-2">
                     <!-- 倒序排列按钮 -->
                     <button onclick="toggleEpisodeOrder()" class="px-3 py-1 bg-[#222] hover:bg-[#333] border border-[#333] rounded-lg transition-colors flex items-center space-x-1 flex-shrink-0">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" id="orderIcon" viewBox="0 0 20 20" fill="currentColor">
@@ -141,25 +141,6 @@
 					</svg>
 					<span>弹幕源</span>
 				</button>
-                    
-                    <!-- 复制链接按钮 -->
-                    <button title="复制播放链接" onclick="copyLinks()" class="px-3 py-1 bg-[#222] hover:bg-[#333] border border-[#333] text-white rounded-lg transition flex items-center space-x-1 flex-shrink-0">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 012-2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-                        </svg>
-                        <span>复制</span>
-                    </button>
-
-                    <!-- 锁定控制按钮 - 始终显示在最右侧 -->
-                    <button id="lockToggle" onclick="toggleControlsLock()" title="锁定控制" 
-                            class="px-3 py-1 bg-[#222] hover:bg-[#333] border border-[#333] text-white rounded-lg transition flex items-center space-x-1 flex-shrink-0">
-                        <svg id="lockIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <!-- 默认状态：未锁图标 -->
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                d="M15 11V7a3 3 0 00-6 0v4m-3 4h12v6H6v-6z" />
-                        </svg>
-                        <span>锁定</span>
-                    </button>
                 </div>
             </div>
         </div>
