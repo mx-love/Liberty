@@ -691,8 +691,6 @@ const DEFAULT_DANMU_CONFIG = {
         enableMatchApi: true,
         enableDurationScale: true,
         offsetSeconds: 0,
-        mobileMaxDanmu: 2500,
-        desktopMaxDanmu: 4500,
         mobileMaxPerSecond: 1,
         desktopMaxPerSecond: 2,
         segmentDuration: 360,
