@@ -580,6 +580,50 @@ const isIOSDevice = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 const isAndroidDevice = /Android/i.test(navigator.userAgent);
 // ===== 【结束】移动端设备检测 =====
 
+let playerViewportRefreshBound = false;
+let playerViewportRefreshTimer = null;
+
+function applyInlineVideoAttributes(video) {
+    if (!video) return;
+
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
+    video.setAttribute('x5-playsinline', '');
+    video.setAttribute('x5-video-player-type', 'h5');
+    video.playsInline = true;
+}
+
+function refreshPlayerViewport(reason = 'resize') {
+    clearTimeout(playerViewportRefreshTimer);
+    playerViewportRefreshTimer = setTimeout(() => {
+        requestAnimationFrame(() => {
+            try {
+                applyInlineVideoAttributes(art?.video);
+                if (art && typeof art.resize === 'function') {
+                    art.resize();
+                }
+            } catch (error) {
+                console.warn('播放器尺寸刷新失败:', reason, error);
+            }
+        });
+    }, 120);
+}
+
+function bindPlayerViewportRefresh() {
+    if (playerViewportRefreshBound) return;
+    playerViewportRefreshBound = true;
+
+    window.addEventListener('resize', () => refreshPlayerViewport('resize'));
+    window.addEventListener('orientationchange', () => refreshPlayerViewport('orientationchange'));
+    document.addEventListener('fullscreenchange', () => refreshPlayerViewport('fullscreenchange'));
+    document.addEventListener('webkitfullscreenchange', () => refreshPlayerViewport('webkitfullscreenchange'));
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            refreshPlayerViewport('visibilitychange');
+        }
+    });
+}
+
 let saveProgressTimer = null; // 用于防抖保存进度
 
 // ===== 【新增】统一的定时器管理 =====
@@ -1978,9 +2022,6 @@ async function fetchDanmaku(episodeId, episodeIndex) {
     }
 
     const offsetSeconds = Number(DANMU_CONFIG.adaptive.offsetSeconds || 0);
-    const maxTextLength = DANMU_CONFIG.adaptive.maxTextLength || 50;
-    const minTextLength = DANMU_CONFIG.adaptive.minTextLength || 2;
-
     const parsedComments = rawComments.map(c => {
         const params = c.p ? c.p.split(',') : [];
         const rawTime = parseFloat(params[0] || 0);
@@ -1994,96 +2035,18 @@ async function fetchDanmaku(episodeId, episodeIndex) {
         };
     }).filter(item => {
         if (!item.text) return false;
-        if (item.text.length < minTextLength) return false;
-        if (item.text.length > maxTextLength) return false;
-        if (/^(.)\1{8,}$/.test(item.text)) return false;
         return true;
     });
 
     parsedComments.sort((a, b) => a.time - b.time);
 
-    const SEGMENT_DURATION = DANMU_CONFIG.adaptive.segmentDuration || 360;
-    const MAX_PER_SEGMENT = isMobileDevice
-        ? DANMU_CONFIG.adaptive.mobileMaxPerSegment
-        : DANMU_CONFIG.adaptive.desktopMaxPerSegment;
-    const MAX_PER_SECOND = isMobileDevice
-        ? DANMU_CONFIG.adaptive.mobileMaxPerSecond
-        : DANMU_CONFIG.adaptive.desktopMaxPerSecond;
-    const HARD_LIMIT = isMobileDevice
-        ? DANMU_CONFIG.adaptive.mobileMaxDanmu
-        : DANMU_CONFIG.adaptive.desktopMaxDanmu;
-
     const lastTime = parsedComments[parsedComments.length - 1]?.time || 0;
-    const totalSegments = Math.ceil(lastTime / SEGMENT_DURATION) || 1;
+    console.log(`📐 弹幕时长: ${Math.floor(lastTime / 60)}分${Math.floor(lastTime % 60)}秒`);
 
-    console.log(`📐 弹幕时长: ${Math.floor(lastTime / 60)}分${Math.floor(lastTime % 60)}秒, 分为 ${totalSegments} 段`);
+    const finalDanmaku = [];
+    parsedComments.forEach(item => processDanmakuOptimized(item, finalDanmaku));
 
-    const segments = new Array(totalSegments).fill(0).map(() => []);
-    for (const item of parsedComments) {
-        const segIndex = Math.floor(item.time / SEGMENT_DURATION);
-        if (segIndex < totalSegments) {
-            segments[segIndex].push(item);
-        }
-    }
-
-    const danmakuPool = [];
-
-    segments.forEach((segmentItems, segIndex) => {
-        if (segmentItems.length === 0) return;
-
-        let processedItems = [];
-
-        if (segmentItems.length <= MAX_PER_SEGMENT) {
-            processedItems = processSegmentWithDensityControl(segmentItems, MAX_PER_SECOND);
-        } else {
-            const uniqueMap = new Map();
-
-            segmentItems.forEach(item => {
-                const timeKey = Math.floor(item.time * 10) / 10;
-                const key = `${timeKey}_${item.text.slice(0, 40)}`;
-                if (!uniqueMap.has(key)) uniqueMap.set(key, item);
-            });
-
-            const uniqueItems = Array.from(uniqueMap.values());
-
-            let sampled = uniqueItems;
-            if (uniqueItems.length > MAX_PER_SEGMENT) {
-                const segStart = segIndex * SEGMENT_DURATION;
-                sampled = uniformDensitySampling(
-                    uniqueItems,
-                    MAX_PER_SEGMENT,
-                    segStart,
-                    segStart + SEGMENT_DURATION
-                );
-            }
-
-            processedItems = processSegmentWithDensityControl(sampled, MAX_PER_SECOND);
-        }
-
-        processedItems.forEach(item => processDanmakuOptimized(item, danmakuPool));
-    });
-
-    const finalMap = new Map();
-
-    danmakuPool.forEach(d => {
-        const timeKey = Math.floor(d.time * 10) / 10;
-        const key = `${timeKey}_${d.text.slice(0, 30)}`;
-        if (!finalMap.has(key)) finalMap.set(key, d);
-    });
-
-    let finalDanmaku = Array.from(finalMap.values()).sort((a, b) => a.time - b.time);
-
-    if (finalDanmaku.length > HARD_LIMIT) {
-        const step = finalDanmaku.length / HARD_LIMIT;
-        finalDanmaku = Array.from({ length: HARD_LIMIT }, (_, i) => finalDanmaku[Math.floor(i * step)]);
-        console.log(`🎚️ 弹幕总量限制: ${finalMap.size} → ${finalDanmaku.length}`);
-    }
-
-    const totalReduction = totalComments > 0
-        ? ((1 - finalDanmaku.length / totalComments) * 100).toFixed(1)
-        : '0.0';
-
-    console.log(`✅ 弹幕优化: ${totalComments} → ${finalDanmaku.length}条 (节省${totalReduction}%)`);
+    console.log(`✅ 弹幕解析完成: ${totalComments} → ${finalDanmaku.length}条（未做数量裁剪）`);
 
     const cacheData = {
         episodeIndex,
@@ -2187,7 +2150,7 @@ function processDanmakuOptimized(item, pool) {
     else mode = 0;
 
     const text = item.text.slice(0, 100);
-    if (!text || /^(.)\1{9,}$/.test(text)) return;
+    if (!text) return;
 
     pool.push({
         text: text,
@@ -3217,6 +3180,10 @@ function initPlayerInternal(videoUrl) {
         lang: navigator.language.toLowerCase(),
         moreVideoAttr: {
             crossOrigin: 'anonymous',
+            playsInline: true,
+            'webkit-playsinline': 'true',
+            'x5-playsinline': 'true',
+            'x5-video-player-type': 'h5',
         },
         plugins: [
 			// 修改后
@@ -3232,7 +3199,7 @@ function initPlayerInternal(videoUrl) {
 				antiOverlap: true,
 				useWorker: true,
 				synchronousPlayback: true,
-				filter: (danmu) => danmu.text.length <= 50,
+				filter: () => true,
 				lockTime: 5,
 				maxLength: 100,
 				theme: 'light',
@@ -3240,6 +3207,7 @@ function initPlayerInternal(videoUrl) {
 		],
         customType: {
 			m3u8: function (video, url) {
+				applyInlineVideoAttributes(video);
 				// ===== 🔥 增强 HLS 销毁 =====
 				if (currentHls) {
 					try {
@@ -3465,6 +3433,8 @@ function initPlayerInternal(videoUrl) {
 
     window.LibertyPlayer = window.LibertyPlayer || {};
     window.LibertyPlayer.art = art;
+    applyInlineVideoAttributes(art.video);
+    bindPlayerViewportRefresh();
     document.dispatchEvent(new CustomEvent('liberty:player-ready', {
         detail: { art }
     }));
@@ -3531,6 +3501,8 @@ function initPlayerInternal(videoUrl) {
 
 	art.on('ready', () => {
 		hideControls();
+		applyInlineVideoAttributes(art.video);
+		refreshPlayerViewport('art-ready');
 
 		// ✅ 监听弹幕插件配置变更，持久化用户设置
 		// ArtPlayer 弹幕插件会在用户通过设置面板修改时触发 artplayerPluginDanmuku:config

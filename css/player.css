@@ -616,11 +616,16 @@ button:disabled::before {
     .player-container:has(#autoplayToggle) > .flex > .flex:last-child button {
         width: 100%;
         min-width: 0;
+        min-height: 44px;
         justify-content: center;
         padding-left: 0.75rem;
         padding-right: 0.75rem;
         overflow: hidden;
         text-overflow: ellipsis;
+    }
+
+    .player-container:has(#autoplayToggle) #lockToggle {
+        grid-column: 1 / -1;
     }
 
     #episodesList {
