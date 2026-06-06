@@ -1188,16 +1188,169 @@ function getCurrentVideoYearValue() {
     }
 }
 
+function sanitizeDanmuBindingPart(value) {
+    return encodeURIComponent(String(value || '').trim() || 'unknown');
+}
+
+function getVideoIdentity(title = currentVideoTitle) {
+    const params = new URLSearchParams(window.location.search);
+    const normalizedTitle = sanitizeTitle(title || currentVideoTitle || '');
+    const year =
+        params.get('year') ||
+        localStorage.getItem('currentVideoYear') ||
+        advancedCleanTitle(title || currentVideoTitle || '').year ||
+        '';
+    const sourceCode =
+        params.get('source') ||
+        params.get('source_code') ||
+        localStorage.getItem('currentSourceCode') ||
+        localStorage.getItem('currentPlayingSource') ||
+        '';
+    const vodId =
+        params.get('id') ||
+        params.get('vod_id') ||
+        localStorage.getItem('currentVideoId') ||
+        '';
+    const episodeCount = Array.isArray(currentEpisodes) ? currentEpisodes.length : 0;
+
+    return {
+        title: title || currentVideoTitle || '',
+        year: String(year || ''),
+        sourceCode: String(sourceCode || ''),
+        vodId: String(vodId || ''),
+        episodeCount,
+        normalizedTitle
+    };
+}
+
+function getDanmuBindingKey(videoIdentity = getVideoIdentity()) {
+    const sourceCode = videoIdentity.sourceCode || 'unknown-source';
+    const parts = [
+        'danmuBinding',
+        sanitizeDanmuBindingPart(sourceCode),
+    ];
+
+    if (videoIdentity.vodId) {
+        parts.push(sanitizeDanmuBindingPart(videoIdentity.vodId));
+    }
+
+    parts.push(
+        sanitizeDanmuBindingPart(videoIdentity.normalizedTitle),
+        sanitizeDanmuBindingPart(videoIdentity.year),
+        sanitizeDanmuBindingPart(videoIdentity.episodeCount)
+    );
+
+    return parts.join(':');
+}
+
+function getDanmuIdentityRisk(videoIdentity = getVideoIdentity()) {
+    return {
+        missingSourceCode: !videoIdentity.sourceCode,
+        missingVodId: !videoIdentity.vodId,
+        missingYear: !videoIdentity.year,
+        missingEpisodeCount: !videoIdentity.episodeCount,
+    };
+}
+
+function adjustAutoDanmuConfidence(confidence, videoIdentity = getVideoIdentity()) {
+    const risk = getDanmuIdentityRisk(videoIdentity);
+    let adjusted = Number(confidence || 0);
+    if (risk.missingSourceCode) adjusted -= 10;
+    if (risk.missingVodId) adjusted -= 10;
+    if (risk.missingYear) adjusted -= 20;
+    if (risk.missingEpisodeCount) adjusted -= 25;
+    return Math.max(0, Math.min(100, Math.round(adjusted)));
+}
+
+function loadDanmuBinding(videoIdentity = getVideoIdentity()) {
+    const bindingKey = getDanmuBindingKey(videoIdentity);
+    try {
+        const raw = localStorage.getItem(bindingKey);
+        if (!raw) return null;
+        const data = JSON.parse(raw);
+        if (!data || data.version !== 1 || !data.animeId) return null;
+
+        danmuDebugLog('[DanmuDebug] binding used', {
+            bindingKey,
+            binding: data,
+            videoIdentity
+        });
+        return {
+            ...data,
+            bindingKey
+        };
+    } catch (error) {
+        danmuDebugWarn('[DanmuDebug] load danmu binding failed', {
+            bindingKey,
+            error: error?.message || String(error)
+        });
+        return null;
+    }
+}
+
+function saveDanmuBinding(videoIdentity, binding) {
+    if (!binding?.animeId) return null;
+
+    const bindingKey = getDanmuBindingKey(videoIdentity);
+    const selectedBy = binding.selectedBy || 'auto';
+    const confidence = selectedBy === 'manual'
+        ? Number(binding.confidence || 100)
+        : adjustAutoDanmuConfidence(binding.confidence || 0, videoIdentity);
+
+    if (selectedBy !== 'manual' && confidence < 80) {
+        danmuDebugWarn('[DanmuDebug] skip auto binding save due to identity risk or low confidence', {
+            bindingKey,
+            videoIdentity,
+            identityRisk: getDanmuIdentityRisk(videoIdentity),
+            originalConfidence: Number(binding.confidence || 0),
+            adjustedConfidence: confidence
+        });
+        return null;
+    }
+
+    const data = {
+        version: 1,
+        animeId: binding.animeId,
+        animeTitle: binding.animeTitle || binding.sourceName || '',
+        sourceName: binding.sourceName || binding.animeTitle || '',
+        episodeCount: Number(binding.episodeCount || 0),
+        confidence,
+        selectedBy,
+        updatedAt: Date.now()
+    };
+
+    try {
+        localStorage.setItem(bindingKey, JSON.stringify(data));
+        danmuDebugLog('[DanmuDebug] danmu binding saved', {
+            bindingKey,
+            videoIdentity,
+            binding: data
+        });
+        return {
+            ...data,
+            bindingKey
+        };
+    } catch (error) {
+        danmuDebugWarn('[DanmuDebug] save danmu binding failed', {
+            bindingKey,
+            error: error?.message || String(error)
+        });
+        return null;
+    }
+}
+
 function updateLastDanmuMatchInfo(info = {}) {
     lastDanmuMatchInfo = {
         ...(lastDanmuMatchInfo || {}),
         videoTitle: currentVideoTitle,
         year: getCurrentVideoYearValue(),
+        bindingKey: getDanmuBindingKey(getVideoIdentity()),
         episodeIndex: currentEpisodeIndex,
         displayEpisode: currentEpisodeIndex + 1,
         totalEpisodes: Array.isArray(currentEpisodes) ? currentEpisodes.length : 0,
         currentEpisodeName: getCurrentEpisodeName(currentEpisodeIndex),
         currentVideoUrl,
+        videoIdentity: getVideoIdentity(),
         updatedAt: Date.now(),
         ...info
     };
@@ -1220,12 +1373,16 @@ function buildDanmuEpisodeSummary(reason, overrides = {}) {
         totalEpisodes: Array.isArray(currentEpisodes) ? currentEpisodes.length : 0,
         currentEpisodeName: getCurrentEpisodeName(episodeIndex),
         currentVideoUrl,
+        bindingKey: info.bindingKey || getDanmuBindingKey(getVideoIdentity()),
+        bindingAnimeId: info.bindingAnimeId || info.animeId || currentDanmuAnimeId || '',
+        bindingSelectedBy: info.bindingSelectedBy || '',
         matchedAnimeId: info.animeId || currentDanmuAnimeId || '',
         matchedAnimeTitle: info.animeTitle || '',
         matchedEpisodeId: info.episodeId || stats.episodeId || '',
         matchedEpisodeTitle: info.episodeTitle || '',
         matchedSourceName: info.sourceName || currentDanmuSourceName || '',
         matchMode: info.matchMode || 'none',
+        confidence: Number(info.confidence || 0),
         fallbackUsed: Boolean(info.fallbackUsed),
         manualSourceUsed: Boolean(info.manualSourceUsed),
         rawCount: Number.isFinite(stats.rawCount) ? stats.rawCount : 0,
@@ -1254,6 +1411,9 @@ window.debugDanmuState = function () {
         totalEpisodes: Array.isArray(currentEpisodes) ? currentEpisodes.length : 0,
         currentEpisodeName: getCurrentEpisodeName(currentEpisodeIndex),
         currentVideoUrl,
+        videoIdentity: getVideoIdentity(),
+        bindingKey: getDanmuBindingKey(getVideoIdentity()),
+        danmuBinding: loadDanmuBinding(getVideoIdentity()),
         currentDanmuAnimeId,
         currentDanmuSourceName,
         danmuCached: Boolean(currentDanmuCache?.danmuList),
@@ -1694,36 +1854,77 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
 	return topMatch.anime;
 }
 
-function rankDanmuSourceCandidates(animes, cleanTitle) {
-    const normalizedTitle = normalizeDanmuTitle(String(cleanTitle || '').replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim());
+function rankDanmuSourceCandidates(animes, cleanTitle, videoIdentity = getVideoIdentity()) {
+    const normalizedTitle = normalizeDanmuTitle(String(cleanTitle || videoIdentity.normalizedTitle || '').replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim());
+    const targetInfo = advancedCleanTitle(videoIdentity.title || normalizedTitle);
+    const targetYear = String(videoIdentity.year || targetInfo.year || '');
+    const targetEpisodeCount = Number(videoIdentity.episodeCount || 0);
+    const displayEpisode = currentEpisodeIndex + 1;
 
     return (animes || []).map(anime => {
         const animeTitle = anime.animeTitle || '';
         const title = normalizeDanmuTitle(animeTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim());
+        const animeInfo = advancedCleanTitle(animeTitle);
+        const episodeCount = Number(anime.episodeCount || 0);
         let score = 0;
 
+        const similarity = calculateSimilarity(title, normalizedTitle);
+        score += Math.round(similarity * 40);
+
+        if (title === normalizedTitle) {
+            score += 25;
+        } else if (title.includes(normalizedTitle) || normalizedTitle.includes(title)) {
+            score += 15;
+        }
+
+        const animeYear = String(anime.year || animeInfo.year || '');
+        if (targetYear && animeYear) {
+            const diff = Math.abs(Number(targetYear) - Number(animeYear));
+            if (diff === 0) score += 15;
+            else if (diff <= 1) score += 8;
+        }
+
+        if (targetEpisodeCount > 0 && episodeCount > 0) {
+            const diff = Math.abs(targetEpisodeCount - episodeCount);
+            if (diff === 0) score += 15;
+            else if (diff <= 2) score += 10;
+            else if (episodeCount >= targetEpisodeCount) score += 6;
+            else score -= 10;
+        }
+
+        if (displayEpisode === 1 && episodeCount === 1) {
+            score += 5;
+        } else if (displayEpisode > 1 && episodeCount >= displayEpisode) {
+            score += 10;
+        } else if (displayEpisode > 1 && episodeCount > 0 && episodeCount < displayEpisode) {
+            score -= 30;
+        }
+
+        const targetType = targetEpisodeCount <= 1 ? 'single' : 'series';
+        const candidateType = episodeCount <= 1 || /电影|剧场版|movie/i.test(anime.typeDescription || '')
+            ? 'single'
+            : 'series';
+        if (targetType === candidateType) score += 8;
+
         if (currentDanmuAnimeId && String(anime.animeId) === String(currentDanmuAnimeId)) {
-            score += 10000;
+            score += 5;
         }
-        if (title === currentVideoTitle || title === normalizedTitle) {
-            score += 1000;
-        }
-        if (title.includes(normalizedTitle)) {
-            score += 500;
-        }
-        if (normalizedTitle.includes(title)) {
-            score += 300;
-        }
-        score += calculateSimilarity(title, normalizedTitle) * 200;
-        score += Math.min(anime.episodeCount || 0, 50);
+
+        if (!targetYear) score -= 20;
+        if (!targetEpisodeCount) score -= 25;
+        if (!videoIdentity.sourceCode) score -= 10;
+        if (!videoIdentity.vodId) score -= 10;
+
+        score = Math.max(0, Math.min(100, Math.round(score)));
 
         return {
             animeId: anime.animeId,
             animeTitle,
             type: anime.type || '未知类型',
-            episodeCount: anime.episodeCount || 0,
+            episodeCount,
             typeDescription: anime.typeDescription || '',
             score,
+            confidence: score,
             raw: anime
         };
     }).sort((a, b) => b.score - a.score);
@@ -2343,6 +2544,7 @@ async function getAnimeEpisodesWithCache(animeId, cleanTitle) {
 
 async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, title, episodeIndex, controller, reason, meta = {}) {
     if (!animeId) return null;
+    const videoIdentity = meta.videoIdentity || getVideoIdentity(title);
 
     danmuDebugLog('[DanmuDebug] try anime candidate for current episode', {
         animeId,
@@ -2371,6 +2573,18 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
         return null;
     }
 
+    const episodeResolveResult = {
+        animeId,
+        animeTitle: sourceName || '',
+        episodeId: matchedEpisode.episodeId,
+        episodeTitle: matchedEpisode.episodeTitle || matchedEpisode.title || matchedEpisode.name || '',
+        episodeIndex,
+        displayEpisode: episodeIndex + 1,
+        matchMode: meta.matchMode || 'binding',
+        confidence: Number(meta.confidence || meta.score || matchedEpisode.confidence || 0)
+    };
+
+    danmuDebugLog('[DanmuDebug] episode resolved', episodeResolveResult);
     danmuDebugLog(meta.matchMode === 'fallback'
         ? '[DanmuDebug] fallback match selected'
         : '[DanmuDebug] match success', {
@@ -2390,11 +2604,25 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
     if (result && result.length > 0) {
         currentDanmuAnimeId = animeId;
         currentDanmuSourceName = sourceName || currentDanmuSourceName || '';
+        let savedBinding = meta.binding || null;
+        if (meta.saveBinding) {
+            savedBinding = saveDanmuBinding(videoIdentity, {
+                animeId,
+                animeTitle: sourceName || '',
+                sourceName: sourceName || '',
+                episodeCount: meta.episodeCount || episodes.length,
+                confidence: Number(meta.confidence || meta.score || matchedEpisode.confidence || 0),
+                selectedBy: meta.selectedBy || 'auto'
+            });
+        }
         updateLastDanmuMatchInfo({
             reason,
             matchMode: meta.matchMode || 'manual-source',
             episodeIndex,
             displayEpisode: episodeIndex + 1,
+            bindingKey: savedBinding?.bindingKey || meta.bindingKey || getDanmuBindingKey(videoIdentity),
+            bindingAnimeId: savedBinding?.animeId || animeId,
+            bindingSelectedBy: savedBinding?.selectedBy || meta.selectedBy || '',
             animeId,
             animeTitle: sourceName || '',
             episodeId: matchedEpisode.episodeId,
@@ -2402,7 +2630,19 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
             sourceName: sourceName || '',
             fallbackUsed: Boolean(meta.fallbackUsed),
             manualSourceUsed: Boolean(meta.manualSourceUsed),
+            confidence: Number(meta.confidence || meta.score || matchedEpisode.confidence || 0),
             loadedCount: result.length
+        });
+        danmuDebugLog('[DanmuDebug] danmaku loaded', {
+            reason,
+            matchMode: meta.matchMode || 'manual-source',
+            animeId,
+            animeTitle: sourceName,
+            episodeId: matchedEpisode.episodeId,
+            episodeTitle: matchedEpisode.episodeTitle || matchedEpisode.title || matchedEpisode.name || '',
+            displayEpisode: episodeIndex + 1,
+            loadedCount: result.length,
+            bindingKey: savedBinding?.bindingKey || meta.bindingKey || ''
         });
         danmuDebugLog('[DanmuDebug] candidate fallback loaded danmaku', {
             animeId,
@@ -2427,6 +2667,7 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
 
 async function fallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIndex, controller) {
     try {
+        const videoIdentity = getVideoIdentity(title);
         const searchUrl = `${getDanmuBaseUrl()}/api/v2/search/anime?keyword=${encodeURIComponent(cleanTitle)}`;
         const authedSearchUrl = await addDanmuAuth(searchUrl);
         const response = await fetchWithRetry(authedSearchUrl, {}, 2, 12000);
@@ -2452,38 +2693,61 @@ async function fallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIndex,
             score: item.score
         })));
 
-        const bestMatch = findBestAnimeMatch(
-            ranked.map(item => item.raw),
-            cleanTitle,
-            Array.isArray(currentEpisodes) ? currentEpisodes.length : 0
-        );
+        const highConfidenceCandidates = ranked.filter(item => item.score >= 80).slice(0, 5);
 
-        if (!bestMatch) {
+        if (highConfidenceCandidates.length === 0) {
+            const bestCandidate = ranked[0];
             danmuDebugWarn('[DanmuDebug] fallback match failed', {
                 cleanTitle,
                 candidateCount: candidates.length,
                 displayEpisode: episodeIndex + 1,
-                reason: 'no-high-confidence-anime'
+                reason: bestCandidate ? 'low-confidence-candidate' : 'no-high-confidence-anime',
+                bestScore: bestCandidate?.score || 0,
+                recommended: ranked.slice(0, 5).map(item => ({
+                    animeId: item.animeId,
+                    animeTitle: item.animeTitle,
+                    score: item.score
+                }))
             });
             return null;
         }
 
-        const rankedBest = ranked.find(item => String(item.animeId) === String(bestMatch.animeId));
+        for (const candidate of highConfidenceCandidates) {
+            const result = await loadDanmakuFromAnimeCandidate(
+                candidate.animeId,
+                candidate.animeTitle,
+                cleanTitle,
+                title,
+                episodeIndex,
+                controller,
+                'strict-search-fallback',
+                {
+                    matchMode: 'fallback',
+                    fallbackUsed: true,
+                    score: candidate.score,
+                    confidence: candidate.score,
+                    episodeCount: candidate.episodeCount,
+                    selectedBy: 'auto',
+                    saveBinding: true,
+                    videoIdentity
+                }
+            );
+            if (controller?.cancelled) return [];
+            if (result && result.length > 0) return result;
+        }
 
-        return loadDanmakuFromAnimeCandidate(
-            bestMatch.animeId,
-            bestMatch.animeTitle,
+        danmuDebugWarn('[DanmuDebug] fallback match failed', {
             cleanTitle,
-            title,
-            episodeIndex,
-            controller,
-            'strict-search-fallback',
-            {
-                matchMode: 'fallback',
-                fallbackUsed: true,
-                score: rankedBest?.score
-            }
-        );
+            candidateCount: candidates.length,
+            displayEpisode: episodeIndex + 1,
+            reason: 'high-confidence-candidates-no-current-episode',
+            tried: highConfidenceCandidates.map(item => ({
+                animeId: item.animeId,
+                animeTitle: item.animeTitle,
+                score: item.score
+            }))
+        });
+        return null;
     } catch (error) {
         danmuDebugWarn('[DanmuDebug] fallback match failed', {
             cleanTitle,
@@ -2528,8 +2792,11 @@ async function getDanmukuForVideo(title, episodeIndex) {
 
         const cleanTitle = sanitizeTitle(title);
         const context = getDanmuPlaybackContext(title, episodeIndex);
+        const videoIdentity = getVideoIdentity(title);
+        const binding = loadDanmuBinding(videoIdentity);
         const manualMapping = getDanmuManualMapping(context.videoKey);
         let animeId = null;
+        let bindingTriedAnimeId = null;
 
         danmuDebugLog('[DanmuDebug] match params', {
             cleanTitle,
@@ -2539,7 +2806,10 @@ async function getDanmukuForVideo(title, episodeIndex) {
             episodeName: context.episodeName,
             sourceCode: context.sourceCode,
             currentVideoUrl,
-            duration: context.duration
+            duration: context.duration,
+            videoIdentity,
+            bindingKey: getDanmuBindingKey(videoIdentity),
+            hasBinding: Boolean(binding)
         });
 
         updateLastDanmuMatchInfo({
@@ -2549,6 +2819,44 @@ async function getDanmukuForVideo(title, episodeIndex) {
             displayEpisode: episodeIndex + 1,
             loadedCount: 0
         });
+
+        if (binding?.animeId) {
+            currentDanmuAnimeId = binding.animeId;
+            currentDanmuSourceName = binding.sourceName || binding.animeTitle || '';
+            bindingTriedAnimeId = binding.animeId;
+
+            const bindingResult = await loadDanmakuFromAnimeCandidate(
+                binding.animeId,
+                binding.animeTitle || binding.sourceName || '',
+                cleanTitle,
+                title,
+                episodeIndex,
+                controller,
+                'binding',
+                {
+                    matchMode: 'binding',
+                    binding,
+                    bindingKey: binding.bindingKey,
+                    bindingSelectedBy: binding.selectedBy,
+                    confidence: binding.confidence || 90,
+                    episodeCount: binding.episodeCount,
+                    selectedBy: binding.selectedBy || 'auto',
+                    manualSourceUsed: binding.selectedBy === 'manual',
+                    fallbackUsed: false,
+                    videoIdentity
+                }
+            );
+            if (controller.cancelled) return [];
+            if (bindingResult && bindingResult.length > 0) {
+                return bindingResult;
+            }
+
+            danmuDebugWarn('[DanmuDebug] binding failed for current episode, fallback to match/search', {
+                bindingKey: binding.bindingKey,
+                animeId: binding.animeId,
+                displayEpisode: episodeIndex + 1
+            });
+        }
 
         if (manualMapping) {
             danmuDebugLog('🎯 使用本地保存的弹幕手动映射:', manualMapping);
@@ -2591,7 +2899,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
         }
 
         // ② 路径 A：用户手动选择了弹幕源（优先级最高）
-        if (currentDanmuAnimeId) {
+        if (currentDanmuAnimeId && String(currentDanmuAnimeId) !== String(bindingTriedAnimeId || '')) {
             danmuDebugLog(`🎯 使用用户选定的弹幕源: ${currentDanmuAnimeId}`);
 
             // 先用带兜底的缓存函数获取剧集（即使缓存过期也会重试）
@@ -2659,11 +2967,22 @@ async function getDanmukuForVideo(title, episodeIndex) {
 		        if (controller.cancelled) return [];
 
 		        if (result && result.length > 0) {
+                    const savedBinding = saveDanmuBinding(videoIdentity, {
+                        animeId: matchedByApi.animeId || '',
+                        animeTitle: matchedByApi.animeTitle || '',
+                        sourceName: matchedByApi.animeTitle || '',
+                        episodeCount: matchedByApi.episodeCount || videoIdentity.episodeCount,
+                        confidence: matchedByApi.confidence || 90,
+                        selectedBy: 'auto'
+                    });
                     updateLastDanmuMatchInfo({
                         reason: 'strict-match',
                         matchMode: 'strict',
                         episodeIndex,
                         displayEpisode: episodeIndex + 1,
+                        bindingKey: savedBinding?.bindingKey || getDanmuBindingKey(videoIdentity),
+                        bindingAnimeId: savedBinding?.animeId || matchedByApi.animeId || '',
+                        bindingSelectedBy: savedBinding?.selectedBy || 'auto',
                         animeId: matchedByApi.animeId || '',
                         animeTitle: matchedByApi.animeTitle || '',
                         episodeId: matchedByApi.episodeId,
@@ -2671,6 +2990,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                         sourceName: matchedByApi.animeTitle || '',
                         fallbackUsed: false,
                         manualSourceUsed: false,
+                        confidence: matchedByApi.confidence || 90,
                         loadedCount: result.length
                     });
                     danmuDebugLog('[DanmuDebug] match success', {
@@ -2744,14 +3064,25 @@ async function getDanmukuForVideo(title, episodeIndex) {
             return [];
         }
 
-        const result = await fetchDanmaku(matchedEpisode.episodeId, episodeIndex);
+		const result = await fetchDanmaku(matchedEpisode.episodeId, episodeIndex);
 		if (controller.cancelled) return [];
 		if (result && result.length > 0) {
+            const savedBinding = saveDanmuBinding(videoIdentity, {
+                animeId,
+                animeTitle: currentDanmuSourceName || '',
+                sourceName: currentDanmuSourceName || '',
+                episodeCount: episodes.length,
+                confidence: 80,
+                selectedBy: 'auto'
+            });
             updateLastDanmuMatchInfo({
                 reason: 'legacy-search',
                 matchMode: 'fallback',
                 episodeIndex,
                 displayEpisode: episodeIndex + 1,
+                bindingKey: savedBinding?.bindingKey || getDanmuBindingKey(videoIdentity),
+                bindingAnimeId: savedBinding?.animeId || animeId,
+                bindingSelectedBy: savedBinding?.selectedBy || 'auto',
                 animeId,
                 animeTitle: currentDanmuSourceName || '',
                 episodeId: matchedEpisode.episodeId,
@@ -2759,6 +3090,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                 sourceName: currentDanmuSourceName || '',
                 fallbackUsed: true,
                 manualSourceUsed: false,
+                confidence: 80,
                 loadedCount: result.length
             });
 			danmuDebugLog(`✅ 自动搜索成功加载第${episodeIndex + 1}集弹幕: ${result.length} 条`);
@@ -5958,19 +6290,12 @@ async function switchDanmuSource(animeId, encodedSourceName) {
         if (!episodes || episodes.length === 0) {
             showToast('该弹幕源暂无剧集信息', 'warning');
 
-            const titleHash = simpleHash(cleanTitle);
             const context = getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex);
             saveDanmuManualMapping(context.videoKey, {
                 animeId,
                 sourceName,
                 title: cleanTitle,
             });
-            localStorage.setItem(`danmuSource_${titleHash}`, JSON.stringify({
-                animeId,
-                sourceName,
-                title: cleanTitle,
-                timestamp: Date.now()
-            }));
             
 
             return;
@@ -5993,6 +6318,15 @@ async function switchDanmuSource(animeId, encodedSourceName) {
         }
 
         const context = getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex);
+        const videoIdentity = getVideoIdentity(currentVideoTitle);
+        const savedBinding = saveDanmuBinding(videoIdentity, {
+            animeId,
+            animeTitle: sourceName,
+            sourceName,
+            episodeCount: episodes.length,
+            confidence: 100,
+            selectedBy: 'manual'
+        });
         saveDanmuManualMapping(context.videoKey, {
             animeId,
             sourceName,
@@ -6008,6 +6342,9 @@ async function switchDanmuSource(animeId, encodedSourceName) {
             updateLastDanmuMatchInfo({
                 reason: 'manual-source',
                 matchMode: 'manual-source',
+                bindingKey: savedBinding?.bindingKey || getDanmuBindingKey(videoIdentity),
+                bindingAnimeId: animeId,
+                bindingSelectedBy: 'manual',
                 animeId,
                 animeTitle: sourceName,
                 episodeId: matchedEpisode.episodeId,
@@ -6015,6 +6352,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
                 sourceName,
                 fallbackUsed: false,
                 manualSourceUsed: true,
+                confidence: 100,
                 loadedCount: 0
             });
             logDanmuEpisodeSummary('manual-source', {
@@ -6026,6 +6364,9 @@ async function switchDanmuSource(animeId, encodedSourceName) {
             updateLastDanmuMatchInfo({
                 reason: 'manual-source',
                 matchMode: 'manual-source',
+                bindingKey: savedBinding?.bindingKey || getDanmuBindingKey(videoIdentity),
+                bindingAnimeId: animeId,
+                bindingSelectedBy: 'manual',
                 animeId,
                 animeTitle: sourceName,
                 episodeId: matchedEpisode.episodeId,
@@ -6033,6 +6374,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
                 sourceName,
                 fallbackUsed: false,
                 manualSourceUsed: true,
+                confidence: 100,
                 loadedCount: newDanmuku.length
             });
             danmuDebugLog('[DanmuDebug] match success', {
@@ -6079,14 +6421,6 @@ async function switchDanmuSource(animeId, encodedSourceName) {
                 pluginApplied: true
             });
         }
-
-        const titleHash = simpleHash(cleanTitle);
-        localStorage.setItem(`danmuSource_${titleHash}`, JSON.stringify({
-            animeId,
-            sourceName,
-            title: cleanTitle,
-            timestamp: Date.now()
-        }));
 
     } catch (error) {
         console.error('切换弹幕源失败:', error);
