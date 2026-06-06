@@ -619,6 +619,9 @@ function refreshPlayerViewport(reason = 'resize') {
         requestAnimationFrame(() => {
             try {
                 applyInlineVideoAttributes(art?.video);
+                if (isMobileDevice && art && 'mini' in art) {
+                    art.mini = false;
+                }
                 if (art && typeof art.resize === 'function') {
                     art.resize();
                 }
@@ -642,6 +645,7 @@ function bindPlayerViewportRefresh() {
             refreshPlayerViewport('visibilitychange');
         }
     });
+    window.addEventListener('pageshow', () => refreshPlayerViewport('pageshow'));
 }
 
 let saveProgressTimer = null; // 用于防抖保存进度
@@ -1146,6 +1150,7 @@ let currentDanmuCache = {
     danmuList: null,
     timestamp: 0
 };
+let danmuReloadToken = 0;
 
 // ✅ 恢复弹幕源追踪
 let currentDanmuAnimeId = null;
@@ -2399,6 +2404,99 @@ function getDanmukuUrl() {
     return getDanmukuForVideo(currentVideoTitle, currentEpisodeIndex);
 }
 
+function clearCurrentDanmukuPlugin() {
+    const danmukuPlugin = art?.plugins?.artplayerPluginDanmuku;
+    if (!danmukuPlugin) return;
+
+    if (typeof danmukuPlugin.clear === 'function') {
+        danmukuPlugin.clear();
+    }
+
+    if (typeof danmukuPlugin.config === 'function') {
+        danmukuPlugin.config({
+            danmuku: [],
+            synchronousPlayback: true
+        });
+    }
+}
+
+function waitForCurrentVideoReady(maxWait = 10000) {
+    return new Promise((resolve) => {
+        const start = Date.now();
+
+        const checkReady = () => {
+            const video = art?.video;
+            if (!art || !video) {
+                if (Date.now() - start >= maxWait) {
+                    resolve(false);
+                    return;
+                }
+                setTimeout(checkReady, 80);
+                return;
+            }
+
+            if (video.readyState >= 1 || Date.now() - start >= maxWait) {
+                resolve(video.readyState >= 1);
+                return;
+            }
+
+            setTimeout(checkReady, 80);
+        };
+
+        checkReady();
+    });
+}
+
+async function reloadDanmakuForCurrentEpisode(reason = 'episode-switch') {
+    if (!isDanmuServiceEnabled()) return;
+
+    const reloadToken = ++danmuReloadToken;
+    const episodeIndex = currentEpisodeIndex;
+    const title = currentVideoTitle;
+
+    clearCurrentDanmukuPlugin();
+
+    const videoReady = await waitForCurrentVideoReady();
+    if (reloadToken !== danmuReloadToken || episodeIndex !== currentEpisodeIndex) return;
+
+    if (!videoReady) {
+        console.warn('⚠️ 切集后视频未就绪，仍尝试加载弹幕');
+    }
+
+    const danmukuPlugin = art?.plugins?.artplayerPluginDanmuku;
+    if (!danmukuPlugin) return;
+
+    const danmuku = await getDanmukuForVideo(title, episodeIndex);
+    if (reloadToken !== danmuReloadToken || episodeIndex !== currentEpisodeIndex) return;
+
+    clearCurrentDanmukuPlugin();
+
+    if (!danmuku || danmuku.length === 0) {
+        window.LibertyDebug.log(`⚠️ 第${episodeIndex + 1}集未匹配到弹幕`, { reason });
+        return;
+    }
+
+    danmukuPlugin.config({
+        danmuku,
+        synchronousPlayback: true
+    });
+    danmukuPlugin.load();
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (reloadToken !== danmuReloadToken || episodeIndex !== currentEpisodeIndex) return;
+
+    const currentTime = art?.video?.currentTime || 0;
+    if (currentTime > 0 && typeof danmukuPlugin.seek === 'function') {
+        danmukuPlugin.seek(currentTime);
+    }
+
+    if (typeof danmukuPlugin.show === 'function') {
+        danmukuPlugin.show();
+    }
+
+    window.LibertyDebug.log(`✅ 切集后已重新加载第${episodeIndex + 1}集弹幕: ${danmuku.length}条`, { reason });
+}
+
 // 页面加载
 document.addEventListener('DOMContentLoaded', function () {
     // 先检查用户是否已通过密码验证
@@ -3179,7 +3277,7 @@ function initPlayerInternal(videoUrl) {
         autoplay: !shouldDisableAutoplayForWatchRoom,
         pip: true,
         autoSize: false,
-        autoMini: true,
+        autoMini: !isMobileDevice,
         screenshot: true,
         setting: true,
         loop: false,
@@ -4222,6 +4320,7 @@ function playEpisode(index) {
     updateEpisodeInfo();
     updateButtonStates();
     renderEpisodes();
+    reloadDanmakuForCurrentEpisode('episode-switch');
 
     // 重置用户点击位置记录
     if (typeof userClickedPosition !== 'undefined') {

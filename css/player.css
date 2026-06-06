@@ -604,6 +604,25 @@ button:disabled::before {
     .player-container:has(#autoplayToggle) > .flex > .flex:first-child {
         width: 100%;
         margin-right: 0;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.5rem;
+        align-items: center;
+    }
+
+    .player-container:has(#autoplayToggle) > .flex > .flex:first-child .watch-room-action-btn {
+        width: 100%;
+        min-height: 44px;
+        justify-content: center;
+    }
+
+    .player-container:has(#autoplayToggle) > .flex > .flex:first-child .autoplay-control {
+        min-height: 44px;
+        justify-content: center;
+        background: #222;
+        border: 1px solid #333;
+        border-radius: 0.5rem;
+        padding: 0 0.75rem;
     }
 
     .player-container:has(#autoplayToggle) > .flex > .flex:last-child {
@@ -624,8 +643,20 @@ button:disabled::before {
         text-overflow: ellipsis;
     }
 
+    .player-container:has(#autoplayToggle) button[onclick="copyLinks()"],
     .player-container:has(#autoplayToggle) #lockToggle {
-        grid-column: 1 / -1;
+        display: none !important;
+    }
+
+    .art-video-player.art-mini,
+    .art-video-player.art-fixed,
+    .art-mini {
+        position: relative !important;
+        inset: auto !important;
+        width: 100% !important;
+        height: 100% !important;
+        transform: none !important;
+        z-index: auto !important;
     }
 
     #episodesList {
