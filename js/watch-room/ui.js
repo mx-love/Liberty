@@ -561,6 +561,8 @@
     }
 
     function getViewerReadyStatusText() {
+        if (activeRoom?.status === 'playing') return '一起看中';
+        if (activeRoom?.status === 'starting') return '准备开播中';
         if (!localTechnicalReady) return '视频准备中';
         if (localUserReady || getLocalParticipant()?.ready) return '已准备';
         return '未准备';
@@ -1446,6 +1448,57 @@
         });
     }
 
+    function recoverPlayingFromRoomState(payload = {}, room = activeRoom || {}) {
+        if (!isPlayerPage() || !room?.roomId || room.status !== 'playing') return;
+
+        const playback = payload.playback || {};
+        console.log('[WatchRoom] room state playing recovery', {
+            roomId: room.roomId,
+            role: room.role,
+            playback
+        });
+
+        localTechnicalReady = true;
+        viewerInitialSyncComplete = true;
+        console.log('[WatchRoom] playback gate released by playing recovery');
+
+        waitForVideoReady((video) => {
+            if (!video) return;
+
+            const targetTime = calculateTargetTime(playback);
+            const currentTime = Number(video.currentTime) || 0;
+            const diff = Math.abs(currentTime - targetTime);
+
+            isApplyingRemoteSync = true;
+            try {
+                if (diff > 3) {
+                    video.currentTime = targetTime;
+                }
+                if (playback.playbackRate && Number.isFinite(Number(playback.playbackRate))) {
+                    video.playbackRate = Number(playback.playbackRate);
+                }
+                if (playback.paused === true) {
+                    if (!video.paused) video.pause();
+                } else {
+                    console.log('[WatchRoom] try play from room state playing', {
+                        targetTime,
+                        paused: playback?.paused
+                    });
+                    Promise.resolve(video.play()).catch((error) => {
+                        console.warn('[WatchRoom] try play from room state failed', error);
+                        showMessage('请点击一次播放以加入同步', 'warning');
+                    });
+                }
+            } catch (error) {
+                console.warn('[WatchRoom] try play from room state failed', error);
+            } finally {
+                window.setTimeout(() => {
+                    isApplyingRemoteSync = false;
+                }, REMOTE_SYNC_LOCK_MS);
+            }
+        });
+    }
+
     function handleRemoteSyncMessage(type, payload = {}, sourceClientId = '') {
         if (!isPlayerPage() || activeRoom?.role !== 'viewer') {
             console.warn('[WatchRoom] cannot apply sync', {
@@ -1759,8 +1812,14 @@
 
             if (room.role === 'viewer' && isPlayerPage()) {
                 console.log('[WatchRoom] skip redirect on player page');
-                scheduleViewerInitialSync(payload.playback || {}, payload.media || {}, room.status);
-                handleRemoteSyncMessage('sync:state', payload.playback || {}, message.clientId);
+                if (room.status === 'playing') {
+                    recoverPlayingFromRoomState(payload, room);
+                } else {
+                    scheduleViewerInitialSync(payload.playback || {}, payload.media || {}, room.status);
+                    handleRemoteSyncMessage('sync:state', payload.playback || {}, message.clientId);
+                }
+            } else if (room.role === 'host' && isPlayerPage() && room.status === 'playing') {
+                recoverPlayingFromRoomState(payload, room);
             } else if (room.role === 'viewer' && room.pendingPlayerRedirect) {
                 enterHostPlayback(payload, message);
             }
