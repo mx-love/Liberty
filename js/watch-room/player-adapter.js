@@ -45,6 +45,10 @@
             return this.addLocalListener('pause', callback);
         }
 
+        onLocalSeeking(callback) {
+            return this.addLocalListener('seeking', callback);
+        }
+
         onLocalSeek(callback) {
             return this.addLocalListener('seeked', callback);
         }
@@ -176,12 +180,15 @@
             const currentTime = Number(video.currentTime) || 0;
             const diff = Math.abs(currentTime - targetTime);
 
-            if (diff > (Number(options.seekThreshold) || 1)) {
+            const seekThreshold = Number.isFinite(Number(options.seekThreshold))
+                ? Number(options.seekThreshold)
+                : 1;
+            if (options.forceSeek || diff > seekThreshold) {
                 const seekResult = await this.seek(targetTime);
                 if (seekResult?.success === false) return seekResult;
             }
 
-            if (playback.playbackRate && Number.isFinite(Number(playback.playbackRate))) {
+            if (Number.isFinite(Number(playback.playbackRate))) {
                 try {
                     video.playbackRate = Number(playback.playbackRate);
                 } catch (error) {}

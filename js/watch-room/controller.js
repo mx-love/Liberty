@@ -2,8 +2,9 @@
     window.LibertyWatchRoom = window.LibertyWatchRoom || {};
 
     const HOST_SYNC_INTERVAL = 5000;
-    const HOST_SEEK_DEBOUNCE = 300;
+    const HOST_SEEK_THROTTLE = 100;
     const REMOTE_SYNC_LOCK_MS = 500;
+    const VIEWER_READONLY_TOAST_INTERVAL = 4000;
 
     const DEFAULT_STATE = {
         roomId: '',
@@ -34,9 +35,16 @@
             this.state = { ...DEFAULT_STATE };
             this.isApplyingRemoteSync = false;
             this.hostControlsAttached = false;
+            this.viewerReadonlyAttached = false;
             this.hostSyncTimer = null;
             this.hostSeekTimer = null;
+            this.hostSeekingThrottleTimer = null;
             this.hostControlRetryTimer = null;
+            this.viewerReadonlyRetryTimer = null;
+            this.hostBoundVideo = null;
+            this.viewerBoundVideo = null;
+            this.lastViewerReadonlyToastAt = 0;
+            this.lastHostPlayback = null;
         }
 
         setContext(context = {}) {
@@ -47,7 +55,7 @@
             };
             this.updatePlayerReady();
             this.render(this.getViewModel());
-            this.reconcileHostPlaybackControls();
+            this.reconcilePlaybackControls();
         }
 
         dispatch(message = {}) {
@@ -94,7 +102,7 @@
             console.log('[WatchRoomController] state changed', this.state.status);
             this.updatePlayerReady();
             this.render(this.getViewModel());
-            this.reconcileHostPlaybackControls();
+            this.reconcilePlaybackControls();
 
             if (this.state.status === 'waiting') {
                 this.player?.pause?.();
@@ -127,7 +135,7 @@
                     : this.state.userReady,
             };
             this.render(this.getViewModel());
-            this.reconcileHostPlaybackControls();
+            this.reconcilePlaybackControls();
         }
 
         handleSyncPrepare(payload = {}) {
@@ -140,7 +148,7 @@
                 };
                 console.log('[WatchRoomController] state changed', this.state.status);
                 this.render(this.getViewModel());
-                this.reconcileHostPlaybackControls();
+                this.reconcilePlaybackControls();
                 this.player?.applyPlayback?.(payload.playback || {}, { shouldPlay: false, seekThreshold: 0.5 })
                     ?.catch?.(() => {});
                 return null;
@@ -154,7 +162,7 @@
                 startingReady: false,
             };
             this.render(this.getViewModel());
-            this.reconcileHostPlaybackControls();
+            this.reconcilePlaybackControls();
 
             this.player?.pause?.();
             const targetTime = this.player?.calculateTargetTime
@@ -187,33 +195,38 @@
                 playerReady: true,
                 lastSyncStartAt: Date.now(),
             };
+            this.setLastHostPlayback(payload);
             this.render(this.getViewModel());
-            this.reconcileHostPlaybackControls();
-            return this.applyPlaybackWithLock(payload, { shouldPlay: true, seekThreshold: 1 }, true);
+            this.reconcilePlaybackControls();
+            return this.applyPlaybackWithLock(payload, { shouldPlay: true, forceSeek: true }, true);
         }
 
         handleSyncPlay(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
+            this.setLastHostPlayback(payload);
             console.log('[WatchRoomController] apply host sync', 'sync:play');
-            return this.applyPlaybackWithLock({ ...payload, paused: false }, { shouldPlay: true, seekThreshold: 3 }, true);
+            return this.applyPlaybackWithLock({ ...payload, paused: false }, { shouldPlay: true, seekThreshold: 1 }, true);
         }
 
         handleSyncPause(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
+            this.setLastHostPlayback(payload);
             console.log('[WatchRoomController] apply host sync', 'sync:pause');
-            return this.applyPlaybackWithLock({ ...payload, paused: true }, { shouldPlay: false, seekThreshold: 3 }, false);
+            return this.applyPlaybackWithLock({ ...payload, paused: true }, { shouldPlay: false, seekThreshold: 1 }, false);
         }
 
         handleSyncSeek(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             const shouldPlay = payload.paused === false;
+            this.setLastHostPlayback(payload);
             console.log('[WatchRoomController] apply host sync', 'sync:seek');
-            return this.applyPlaybackWithLock(payload, { shouldPlay, seekThreshold: 0.5 }, shouldPlay);
+            return this.applyPlaybackWithLock(payload, { shouldPlay, forceSeek: true }, shouldPlay);
         }
 
         handleSyncState(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             const shouldPlay = payload.paused === false;
+            this.setLastHostPlayback(payload);
             console.log('[WatchRoomController] apply host sync', 'sync:state');
             return this.applyPlaybackWithLock(payload, { shouldPlay, seekThreshold: 3 }, shouldPlay);
         }
@@ -227,6 +240,7 @@
             this.player?.pause?.();
             this.render(this.getViewModel());
             this.detachHostPlaybackControls();
+            this.detachViewerReadonlyControls();
             if (this.onEnded) {
                 this.onEnded(payload);
             }
@@ -275,6 +289,7 @@
 
         applyPlayingRecovery(playback = {}) {
             const shouldPlay = playback.paused !== true;
+            this.setLastHostPlayback(playback);
             console.log('[WatchRoomController] room state playing recovery', playback);
             return this.applyPlaybackWithLock(playback, { shouldPlay, seekThreshold: 3 }, shouldPlay);
         }
@@ -306,6 +321,13 @@
             this.toast('请点击一次播放以加入同步', 'warning');
         }
 
+        setLastHostPlayback(playback = {}) {
+            this.lastHostPlayback = {
+                ...playback,
+                updatedAt: Number(playback.updatedAt) || Date.now(),
+            };
+        }
+
         canSendHostPlaybackEvent(type) {
             if (this.state.role !== 'host') return 'not_host';
             if (this.state.status !== 'playing') return 'room_not_playing';
@@ -330,8 +352,12 @@
         }
 
         attachHostPlaybackControls() {
-            if (this.hostControlsAttached) return;
             if (this.state.role !== 'host' || this.state.status !== 'playing') return;
+            const currentVideo = this.player?.getVideo?.();
+            if (this.hostControlsAttached && currentVideo && currentVideo === this.hostBoundVideo) return;
+            if (this.hostControlsAttached && currentVideo && currentVideo !== this.hostBoundVideo) {
+                this.detachHostPlaybackControls();
+            }
             if (!this.player?.isReady?.()) {
                 if (!this.hostControlRetryTimer) {
                     this.hostControlRetryTimer = window.setTimeout(() => {
@@ -351,9 +377,13 @@
                     console.log('[WatchRoomController] host local pause');
                     this.sendHostPlaybackEvent('host:pause');
                 }),
+                this.player.onLocalSeeking?.(() => {
+                    console.log('[WatchRoomController] host local seeking');
+                    this.throttleHostSeeking();
+                }),
                 this.player.onLocalSeek?.(() => {
-                    console.log('[WatchRoomController] host local seek');
-                    this.debounceHostSeek();
+                    console.log('[WatchRoomController] host local seeked');
+                    this.sendFinalHostSeek();
                 }),
                 this.player.onLocalRateChange?.(() => {
                     console.log('[WatchRoomController] host local ratechange');
@@ -366,6 +396,7 @@
             }
 
             this.hostControlsAttached = true;
+            this.hostBoundVideo = this.player?.getVideo?.() || null;
             this.startHostSyncTimer();
         }
 
@@ -378,27 +409,47 @@
                 window.clearTimeout(this.hostSeekTimer);
                 this.hostSeekTimer = null;
             }
-            this.stopHostSyncTimer();
-            this.player?.offLocalListeners?.();
-            this.hostControlsAttached = false;
-        }
-
-        reconcileHostPlaybackControls() {
-            if (this.state.role === 'host' && this.state.status === 'playing') {
-                this.attachHostPlaybackControls();
-            } else {
-                this.detachHostPlaybackControls();
+            if (this.hostSeekingThrottleTimer) {
+                window.clearTimeout(this.hostSeekingThrottleTimer);
+                this.hostSeekingThrottleTimer = null;
             }
+            this.stopHostSyncTimer();
+            if (this.hostControlsAttached) {
+                this.player?.offLocalListeners?.();
+            }
+            this.hostControlsAttached = false;
+            this.hostBoundVideo = null;
         }
 
-        debounceHostSeek() {
+        reconcilePlaybackControls() {
+            if (this.state.role === 'host' && this.state.status === 'playing') {
+                this.detachViewerReadonlyControls();
+                this.attachHostPlaybackControls();
+                return;
+            }
+            if (this.state.role === 'viewer' && this.state.status === 'playing') {
+                this.detachHostPlaybackControls();
+                this.attachViewerReadonlyControls();
+                return;
+            }
+            this.detachHostPlaybackControls();
+            this.detachViewerReadonlyControls();
+        }
+
+        throttleHostSeeking() {
+            if (this.hostSeekingThrottleTimer) return;
+            this.sendHostPlaybackEvent('host:seek');
+            this.hostSeekingThrottleTimer = window.setTimeout(() => {
+                this.hostSeekingThrottleTimer = null;
+            }, HOST_SEEK_THROTTLE);
+        }
+
+        sendFinalHostSeek() {
             if (this.hostSeekTimer) {
                 window.clearTimeout(this.hostSeekTimer);
-            }
-            this.hostSeekTimer = window.setTimeout(() => {
                 this.hostSeekTimer = null;
-                this.sendHostPlaybackEvent('host:seek');
-            }, HOST_SEEK_DEBOUNCE);
+            }
+            this.sendHostPlaybackEvent('host:seek');
         }
 
         startHostSyncTimer() {
@@ -414,6 +465,74 @@
                 window.clearInterval(this.hostSyncTimer);
                 this.hostSyncTimer = null;
             }
+        }
+
+        attachViewerReadonlyControls() {
+            if (this.state.role !== 'viewer' || this.state.status !== 'playing') return;
+            const currentVideo = this.player?.getVideo?.();
+            if (this.viewerReadonlyAttached && currentVideo && currentVideo === this.viewerBoundVideo) return;
+            if (this.viewerReadonlyAttached && currentVideo && currentVideo !== this.viewerBoundVideo) {
+                this.detachViewerReadonlyControls();
+            }
+            if (!this.player?.isReady?.()) {
+                if (!this.viewerReadonlyRetryTimer) {
+                    this.viewerReadonlyRetryTimer = window.setTimeout(() => {
+                        this.viewerReadonlyRetryTimer = null;
+                        this.attachViewerReadonlyControls();
+                    }, 500);
+                }
+                return;
+            }
+
+            const listeners = [
+                this.player.onLocalPlay?.(() => this.handleViewerReadonlyControl('play')),
+                this.player.onLocalPause?.(() => this.handleViewerReadonlyControl('pause')),
+                this.player.onLocalSeeking?.(() => this.handleViewerReadonlyControl('seeking')),
+                this.player.onLocalSeek?.(() => this.handleViewerReadonlyControl('seeked')),
+                this.player.onLocalRateChange?.(() => this.handleViewerReadonlyControl('ratechange')),
+            ].filter(Boolean);
+
+            if (!listeners.length) return;
+            this.viewerReadonlyAttached = true;
+            this.viewerBoundVideo = this.player?.getVideo?.() || null;
+        }
+
+        detachViewerReadonlyControls() {
+            if (this.viewerReadonlyRetryTimer) {
+                window.clearTimeout(this.viewerReadonlyRetryTimer);
+                this.viewerReadonlyRetryTimer = null;
+            }
+            if (this.viewerReadonlyAttached) {
+                this.player?.offLocalListeners?.();
+            }
+            this.viewerReadonlyAttached = false;
+            this.viewerBoundVideo = null;
+        }
+
+        handleViewerReadonlyControl(reason) {
+            if (this.state.role !== 'viewer' || this.state.status !== 'playing') return;
+            if (this.isApplyingRemoteSync) return;
+            this.notifyViewerReadonlyControl(reason);
+            this.restoreViewerToHostState(reason);
+        }
+
+        notifyViewerReadonlyControl(reason) {
+            const now = Date.now();
+            if (now - this.lastViewerReadonlyToastAt < VIEWER_READONLY_TOAST_INTERVAL) return;
+            this.lastViewerReadonlyToastAt = now;
+            this.toast('播放控制已由房主托管', 'info');
+            console.log('[WatchRoomController] viewer readonly control blocked', { reason });
+        }
+
+        restoreViewerToHostState(reason) {
+            if (!this.lastHostPlayback) return null;
+            const shouldPlay = this.lastHostPlayback.paused !== true;
+            console.log('[WatchRoomController] restore viewer to host state', { reason });
+            return this.applyPlaybackWithLock(
+                this.lastHostPlayback,
+                { shouldPlay, forceSeek: true },
+                shouldPlay
+            );
         }
 
         updatePlayerReady() {
