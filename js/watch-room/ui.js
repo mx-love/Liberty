@@ -84,6 +84,7 @@
         watchRoomController = new Controller({
             player: watchRoomPlayerAdapter,
             socketSend: sendSocketMessage,
+            socketClose: closeSocket,
             render: syncLegacyStateFromController,
             toast: showMessage,
             onEnded: handleControllerRoomEnded,
@@ -313,6 +314,8 @@
         removeSessionValue(SESSION_ROOM_ID_KEY);
         removeSessionValue(SESSION_ROOM_ROLE_KEY);
         removeSessionValue(SESSION_ROOM_CLIENT_ID_KEY);
+        removeSessionValue('watchRoomMediaSnapshot');
+        removeSessionValue('watchRoomPlaybackSnapshot');
     }
 
     function getCurrentPlaybackInfo() {
@@ -1944,6 +1947,13 @@
             return;
         }
 
+        if (
+            !activeRoom
+            && !['room:error', 'room:ended'].includes(message.type)
+        ) {
+            return;
+        }
+
         const controller = getWatchRoomController();
         const controllerHandledTypes = [
             'room:state',
@@ -2139,18 +2149,30 @@
     }
 
     function leaveRoom() {
-        closeSocket(true);
+        if (watchRoomController?.leaveRoom) {
+            watchRoomController.leaveRoom('viewer_leave');
+        } else {
+            closeSocket(true);
+        }
         clearRoomState();
         showMessage('已退出一起看', 'info');
     }
 
     function clearRoomState() {
+        if (watchRoomController?.cleanupLocalState) {
+            watchRoomController.cleanupLocalState('clear_room_state');
+        }
         closeSocket(false);
         cleanupPlayerSync();
         resetViewerInitialSync();
         clearStoredRoomSession();
         activeRoom = null;
         watchRoomController = null;
+        isApplyingRemoteSync = false;
+        viewerInitialSyncComplete = false;
+        localTechnicalReady = false;
+        localUserReady = false;
+        waitTargetTime = 0;
         updatePlayerWatchRoomButton();
         closeWatchRoomPanel();
     }

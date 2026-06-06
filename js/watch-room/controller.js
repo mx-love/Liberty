@@ -25,9 +25,10 @@
     };
 
     class WatchRoomController {
-        constructor({ player, socketSend, render, toast, onEnded, onError } = {}) {
+        constructor({ player, socketSend, socketClose, render, toast, onEnded, onError } = {}) {
             this.player = player || null;
             this.socketSend = typeof socketSend === 'function' ? socketSend : () => false;
+            this.socketClose = typeof socketClose === 'function' ? socketClose : null;
             this.render = typeof render === 'function' ? render : () => {};
             this.toast = typeof toast === 'function' ? toast : () => {};
             this.onEnded = typeof onEnded === 'function' ? onEnded : null;
@@ -59,6 +60,13 @@
         }
 
         dispatch(message = {}) {
+            if (!this.isActive() && message.type !== 'room:state') {
+                return null;
+            }
+            if (this.state.status === 'ended' && message.type !== 'room:state') {
+                return null;
+            }
+
             const type = message.type || '';
             const payload = message.payload || {};
             if (type) {
@@ -285,6 +293,49 @@
 
         endRoom() {
             return this.socketSend({ type: 'room:end' });
+        }
+
+        leaveRoom(reason = 'user_leave') {
+            console.log('[WatchRoomController] leave room', { reason });
+            this.cleanupLocalState(reason);
+            if (this.socketClose) {
+                this.socketClose(true);
+            }
+            this.render(this.getViewModel());
+        }
+
+        cleanupLocalState(reason = 'cleanup') {
+            this.detachHostPlaybackControls();
+            this.detachViewerReadonlyControls();
+            this.stopHostSyncTimer();
+            this.player?.offLocalListeners?.();
+            this.isApplyingRemoteSync = false;
+            this.lastHostPlayback = null;
+            this.lastViewerReadonlyToastAt = 0;
+            this.state = {
+                ...DEFAULT_STATE,
+                status: 'ended',
+                connected: false,
+            };
+            this.clearSessionStorage();
+            console.log('[WatchRoomController] local state cleaned', { reason });
+        }
+
+        clearSessionStorage() {
+            try {
+                [
+                    'watchRoomId',
+                    'watchRoomRole',
+                    'watchRoomClientId',
+                    'watchRoomRedirecting',
+                    'watchRoomMediaSnapshot',
+                    'watchRoomPlaybackSnapshot',
+                ].forEach((key) => sessionStorage.removeItem(key));
+            } catch (error) {}
+        }
+
+        isActive() {
+            return Boolean(this.state.roomId && this.state.connected);
         }
 
         applyPlayingRecovery(playback = {}) {
