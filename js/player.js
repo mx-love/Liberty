@@ -1213,7 +1213,7 @@ const sessionDanmuBangumiNegativeCache = new Set();
 
 function getCurrentVideoYearValue() {
     try {
-        return localStorage.getItem('currentVideoYear') || new URLSearchParams(window.location.search).get('year') || '';
+        return new URLSearchParams(window.location.search).get('year') || localStorage.getItem('currentVideoYear') || '';
     } catch (error) {
         return '';
     }
@@ -1315,7 +1315,9 @@ function buildDanmuEpisodeSummary(reason, overrides = {}) {
         rejectReason: info.rejectReason || lastDanmuAutoFallbackStats?.rejectReason || '',
         hardRejected: Boolean(info.hardRejected),
         verifiedScore: Number.isFinite(info.verifiedScore) ? info.verifiedScore : 0,
-        validCandidateCount: Number.isFinite(info.validCandidateCount) ? info.validCandidateCount : 0,
+        validCandidateCount: Number.isFinite(info.validCandidateCount)
+            ? info.validCandidateCount
+            : (Number.isFinite(lastDanmuAutoFallbackStats?.validCandidateCount) ? lastDanmuAutoFallbackStats.validCandidateCount : 0),
         selectedCandidateReason: info.selectedCandidateReason || '',
         commentCount: Number.isFinite(info.commentCount) ? info.commentCount : 0,
         rawCount: Number.isFinite(stats.rawCount) ? stats.rawCount : 0,
@@ -2396,6 +2398,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
         lastDanmuAutoFallbackStats = {
             candidateCount: candidates.length,
             triedCandidateCount: 0,
+            validCandidateCount: 0,
             candidateScore: 0,
             rejectReason: '',
             autoApplied: false
@@ -2517,6 +2520,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
                 fetchStats: { ...(lastDanmuFetchStats || {}) }
             };
             validCandidates.push(validCandidate);
+            lastDanmuAutoFallbackStats.validCandidateCount = validCandidates.length;
 
             danmuDebugLog('[DanmuDebug] auto fallback candidate verified', {
                 animeId: candidate.animeId,
@@ -2549,6 +2553,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
             loadedCount: item.danmuku.length,
             episodeId: item.matchedEpisode.episodeId
         })));
+        lastDanmuAutoFallbackStats.validCandidateCount = validCandidates.length;
 
         if (validCandidates.length) {
             validCandidates.sort((a, b) => b.verifiedScore - a.verifiedScore);
@@ -2631,8 +2636,14 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
             displayEpisode: episodeIndex + 1,
             candidateCount: candidates.length,
             triedCandidateCount: lastDanmuAutoFallbackStats.triedCandidateCount,
+            validCandidateCount: validCandidates.length,
             topScore: ranked[0]?.score || 0
         });
+        if (!lastDanmuAutoFallbackStats.rejectReason) {
+            lastDanmuAutoFallbackStats.rejectReason = validCandidates.length
+                ? 'no_best_candidate'
+                : 'no_valid_candidate';
+        }
         return null;
     } catch (error) {
         lastDanmuAutoFallbackStats = {
