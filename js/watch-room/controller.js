@@ -1,6 +1,10 @@
 (function () {
     window.LibertyWatchRoom = window.LibertyWatchRoom || {};
 
+    const HOST_SYNC_INTERVAL = 5000;
+    const HOST_SEEK_DEBOUNCE = 300;
+    const REMOTE_SYNC_LOCK_MS = 500;
+
     const DEFAULT_STATE = {
         roomId: '',
         clientId: '',
@@ -28,6 +32,11 @@
             this.onEnded = typeof onEnded === 'function' ? onEnded : null;
             this.onError = typeof onError === 'function' ? onError : null;
             this.state = { ...DEFAULT_STATE };
+            this.isApplyingRemoteSync = false;
+            this.hostControlsAttached = false;
+            this.hostSyncTimer = null;
+            this.hostSeekTimer = null;
+            this.hostControlRetryTimer = null;
         }
 
         setContext(context = {}) {
@@ -38,6 +47,7 @@
             };
             this.updatePlayerReady();
             this.render(this.getViewModel());
+            this.reconcileHostPlaybackControls();
         }
 
         dispatch(message = {}) {
@@ -84,6 +94,7 @@
             console.log('[WatchRoomController] state changed', this.state.status);
             this.updatePlayerReady();
             this.render(this.getViewModel());
+            this.reconcileHostPlaybackControls();
 
             if (this.state.status === 'waiting') {
                 this.player?.pause?.();
@@ -116,6 +127,7 @@
                     : this.state.userReady,
             };
             this.render(this.getViewModel());
+            this.reconcileHostPlaybackControls();
         }
 
         handleSyncPrepare(payload = {}) {
@@ -128,6 +140,7 @@
                 };
                 console.log('[WatchRoomController] state changed', this.state.status);
                 this.render(this.getViewModel());
+                this.reconcileHostPlaybackControls();
                 this.player?.applyPlayback?.(payload.playback || {}, { shouldPlay: false, seekThreshold: 0.5 })
                     ?.catch?.(() => {});
                 return null;
@@ -141,6 +154,7 @@
                 startingReady: false,
             };
             this.render(this.getViewModel());
+            this.reconcileHostPlaybackControls();
 
             this.player?.pause?.();
             const targetTime = this.player?.calculateTargetTime
@@ -174,41 +188,34 @@
                 lastSyncStartAt: Date.now(),
             };
             this.render(this.getViewModel());
-            return this.player?.applyPlayback?.(payload, { shouldPlay: true, seekThreshold: 1 })
-                ?.then?.((result) => this.handlePlaybackResult(result, true))
-                ?.catch?.((error) => this.handlePlayError(error));
+            this.reconcileHostPlaybackControls();
+            return this.applyPlaybackWithLock(payload, { shouldPlay: true, seekThreshold: 1 }, true);
         }
 
         handleSyncPlay(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             console.log('[WatchRoomController] apply host sync', 'sync:play');
-            return this.player?.applyPlayback?.({ ...payload, paused: false }, { shouldPlay: true, seekThreshold: 3 })
-                ?.then?.((result) => this.handlePlaybackResult(result, true))
-                ?.catch?.((error) => this.handlePlayError(error));
+            return this.applyPlaybackWithLock({ ...payload, paused: false }, { shouldPlay: true, seekThreshold: 3 }, true);
         }
 
         handleSyncPause(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             console.log('[WatchRoomController] apply host sync', 'sync:pause');
-            return this.player?.applyPlayback?.({ ...payload, paused: true }, { shouldPlay: false, seekThreshold: 3 });
+            return this.applyPlaybackWithLock({ ...payload, paused: true }, { shouldPlay: false, seekThreshold: 3 }, false);
         }
 
         handleSyncSeek(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             const shouldPlay = payload.paused === false;
             console.log('[WatchRoomController] apply host sync', 'sync:seek');
-            return this.player?.applyPlayback?.(payload, { shouldPlay, seekThreshold: 0.5 })
-                ?.then?.((result) => this.handlePlaybackResult(result, shouldPlay))
-                ?.catch?.((error) => this.handlePlayError(error));
+            return this.applyPlaybackWithLock(payload, { shouldPlay, seekThreshold: 0.5 }, shouldPlay);
         }
 
         handleSyncState(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             const shouldPlay = payload.paused === false;
             console.log('[WatchRoomController] apply host sync', 'sync:state');
-            return this.player?.applyPlayback?.(payload, { shouldPlay, seekThreshold: 3 })
-                ?.then?.((result) => this.handlePlaybackResult(result, shouldPlay))
-                ?.catch?.((error) => this.handlePlayError(error));
+            return this.applyPlaybackWithLock(payload, { shouldPlay, seekThreshold: 3 }, shouldPlay);
         }
 
         handleRoomEnded(payload = {}) {
@@ -219,6 +226,7 @@
             };
             this.player?.pause?.();
             this.render(this.getViewModel());
+            this.detachHostPlaybackControls();
             if (this.onEnded) {
                 this.onEnded(payload);
             }
@@ -268,9 +276,22 @@
         applyPlayingRecovery(playback = {}) {
             const shouldPlay = playback.paused !== true;
             console.log('[WatchRoomController] room state playing recovery', playback);
-            return this.player?.applyPlayback?.(playback, { shouldPlay, seekThreshold: 3 })
-                ?.then?.((result) => this.handlePlaybackResult(result, shouldPlay))
-                ?.catch?.((error) => this.handlePlayError(error));
+            return this.applyPlaybackWithLock(playback, { shouldPlay, seekThreshold: 3 }, shouldPlay);
+        }
+
+        async applyPlaybackWithLock(playback = {}, options = {}, shouldWarn = false) {
+            this.isApplyingRemoteSync = true;
+            try {
+                const result = await this.player?.applyPlayback?.(playback, options);
+                return this.handlePlaybackResult(result, shouldWarn);
+            } catch (error) {
+                this.handlePlayError(error);
+                return { success: false, error };
+            } finally {
+                window.setTimeout(() => {
+                    this.isApplyingRemoteSync = false;
+                }, REMOTE_SYNC_LOCK_MS);
+            }
         }
 
         handlePlaybackResult(result, shouldWarn = false) {
@@ -283,6 +304,116 @@
         handlePlayError(error) {
             console.warn('[WatchRoomController] play failed', error);
             this.toast('请点击一次播放以加入同步', 'warning');
+        }
+
+        canSendHostPlaybackEvent(type) {
+            if (this.state.role !== 'host') return 'not_host';
+            if (this.state.status !== 'playing') return 'room_not_playing';
+            if (!this.state.connected) return 'not_connected';
+            if (this.isApplyingRemoteSync) return 'applying_remote_sync';
+            if (!this.player?.getSnapshot) return 'player_not_ready';
+            return '';
+        }
+
+        sendHostPlaybackEvent(type) {
+            const blockReason = this.canSendHostPlaybackEvent(type);
+            if (blockReason) {
+                if (type !== 'host:sync') {
+                    console.warn('[WatchRoomController] host event ignored', { reason: blockReason, type });
+                }
+                return false;
+            }
+
+            const payload = this.player.getSnapshot();
+            console.log('[WatchRoomController] send host event', { type, payload });
+            return this.socketSend({ type, payload });
+        }
+
+        attachHostPlaybackControls() {
+            if (this.hostControlsAttached) return;
+            if (this.state.role !== 'host' || this.state.status !== 'playing') return;
+            if (!this.player?.isReady?.()) {
+                if (!this.hostControlRetryTimer) {
+                    this.hostControlRetryTimer = window.setTimeout(() => {
+                        this.hostControlRetryTimer = null;
+                        this.attachHostPlaybackControls();
+                    }, 500);
+                }
+                return;
+            }
+
+            const listeners = [
+                this.player.onLocalPlay?.(() => {
+                    console.log('[WatchRoomController] host local play');
+                    this.sendHostPlaybackEvent('host:play');
+                }),
+                this.player.onLocalPause?.(() => {
+                    console.log('[WatchRoomController] host local pause');
+                    this.sendHostPlaybackEvent('host:pause');
+                }),
+                this.player.onLocalSeek?.(() => {
+                    console.log('[WatchRoomController] host local seek');
+                    this.debounceHostSeek();
+                }),
+                this.player.onLocalRateChange?.(() => {
+                    console.log('[WatchRoomController] host local ratechange');
+                    this.sendHostPlaybackEvent('host:sync');
+                }),
+            ].filter(Boolean);
+
+            if (!listeners.length) {
+                return;
+            }
+
+            this.hostControlsAttached = true;
+            this.startHostSyncTimer();
+        }
+
+        detachHostPlaybackControls() {
+            if (this.hostControlRetryTimer) {
+                window.clearTimeout(this.hostControlRetryTimer);
+                this.hostControlRetryTimer = null;
+            }
+            if (this.hostSeekTimer) {
+                window.clearTimeout(this.hostSeekTimer);
+                this.hostSeekTimer = null;
+            }
+            this.stopHostSyncTimer();
+            this.player?.offLocalListeners?.();
+            this.hostControlsAttached = false;
+        }
+
+        reconcileHostPlaybackControls() {
+            if (this.state.role === 'host' && this.state.status === 'playing') {
+                this.attachHostPlaybackControls();
+            } else {
+                this.detachHostPlaybackControls();
+            }
+        }
+
+        debounceHostSeek() {
+            if (this.hostSeekTimer) {
+                window.clearTimeout(this.hostSeekTimer);
+            }
+            this.hostSeekTimer = window.setTimeout(() => {
+                this.hostSeekTimer = null;
+                this.sendHostPlaybackEvent('host:seek');
+            }, HOST_SEEK_DEBOUNCE);
+        }
+
+        startHostSyncTimer() {
+            this.stopHostSyncTimer();
+            this.hostSyncTimer = window.setInterval(() => {
+                if (document.hidden) return;
+                this.sendHostPlaybackEvent('host:sync');
+            }, HOST_SYNC_INTERVAL);
+        }
+
+        stopHostSyncTimer() {
+            if (this.hostSyncTimer) {
+                window.clearInterval(this.hostSyncTimer);
+                this.hostSyncTimer = null;
+            }
         }
 
         updatePlayerReady() {

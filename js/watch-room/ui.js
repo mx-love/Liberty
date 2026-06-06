@@ -855,6 +855,9 @@
 
         bindPlaybackGateToCurrentVideo();
         if (activeRoom.role === 'host') {
+            if (getWatchRoomController()) {
+                return;
+            }
             setupHostPlaybackSync(video);
         } else if (activeRoom.role === 'viewer') {
             setupViewerWaitingGuard(video);

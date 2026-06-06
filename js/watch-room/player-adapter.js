@@ -2,6 +2,10 @@
     window.LibertyWatchRoom = window.LibertyWatchRoom || {};
 
     class WatchRoomPlayerAdapter {
+        constructor() {
+            this.localListeners = [];
+        }
+
         getArt() {
             return window.LibertyPlayer?.art || window.art || window.artPlayer || null;
         }
@@ -17,6 +21,45 @@
 
         isReady() {
             return Boolean(this.getVideo());
+        }
+
+        addLocalListener(eventName, callback) {
+            const video = this.getVideo();
+            if (!video || typeof callback !== 'function') return null;
+
+            const handler = () => callback(this.getSnapshot());
+            video.addEventListener(eventName, handler);
+
+            const cleanup = () => {
+                video.removeEventListener(eventName, handler);
+            };
+            this.localListeners.push(cleanup);
+            return cleanup;
+        }
+
+        onLocalPlay(callback) {
+            return this.addLocalListener('play', callback);
+        }
+
+        onLocalPause(callback) {
+            return this.addLocalListener('pause', callback);
+        }
+
+        onLocalSeek(callback) {
+            return this.addLocalListener('seeked', callback);
+        }
+
+        onLocalRateChange(callback) {
+            return this.addLocalListener('ratechange', callback);
+        }
+
+        offLocalListeners() {
+            this.localListeners.forEach((cleanup) => {
+                try {
+                    cleanup();
+                } catch (error) {}
+            });
+            this.localListeners = [];
         }
 
         waitForVideo(timeoutMs = 5000) {

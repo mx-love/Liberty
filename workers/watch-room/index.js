@@ -506,7 +506,10 @@ export class WatchRoomDurableObject {
 
     async handleHostControl(socket, room, session, message) {
         if (message.type === 'host:sync') {
-            console.log('[WatchRoomDO] host sync received', message.type);
+            console.log('[WatchRoomDO] host sync received', {
+                type: message.type,
+                clientId: session.clientId,
+            });
         }
 
         if (message.type !== 'host:sync') {
@@ -783,6 +786,8 @@ export class WatchRoomDurableObject {
                 type,
                 roomId: room.roomId,
             });
+        } else {
+            console.log('[WatchRoomDO] broadcast viewer sync', { type });
         }
 
         const message = buildMessage(type, room.roomId, sourceClientId, {
