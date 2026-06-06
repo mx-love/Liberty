@@ -913,6 +913,40 @@ function buildDanmuKeyword({ title, year, season, episode, platform }) {
     return parts.filter(Boolean).join(' ');
 }
 
+function buildDanmuMatchQueries(context) {
+    const cleanTitle = normalizeDanmuTitle(context.title);
+    const episode = Number(context.episode || 0);
+    const season = Number(context.season || 1);
+    const seasonEpisode = episode
+        ? `S${String(season || 1).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
+        : '';
+    const platform = context.platform ? `@${context.platform}` : '';
+
+    const variants = [];
+
+    if (cleanTitle && context.year && seasonEpisode) {
+        variants.push([cleanTitle, context.year, seasonEpisode, platform]);
+    }
+
+    if (cleanTitle && seasonEpisode) {
+        variants.push([cleanTitle, seasonEpisode, platform]);
+    }
+
+    if (cleanTitle && episode) {
+        variants.push([cleanTitle, `第${episode}集`, platform]);
+    }
+
+    if (cleanTitle && !variants.length) {
+        variants.push([cleanTitle, platform]);
+    }
+
+    return [...new Set(
+        variants
+            .map(parts => parts.filter(Boolean).join(' ').trim())
+            .filter(Boolean)
+    )];
+}
+
 function buildDanmuVideoKey(title, year, season, episode) {
     return [
         normalizeDanmuTitle(title),
@@ -1088,13 +1122,9 @@ function pickValidDanmuApiMatch(matches, episodeIndex, options = {}) {
         return null;
     }
 
-    if (options.strict && currentEpisodes.length > 1) {
-        danmuDebugWarn('⚠️ match 候选没有明确集数，严格模式下拒绝自动加载，等待手动选择');
-        return null;
-    }
-
-    // 所有候选都解析不出集数时，才相信 match 接口的第一个结果
-    danmuDebugWarn(`⚠️ match 候选没有明确集数，暂按接口结果使用：`, list[0]);
+    // match 接口已经按当前集 query 返回明确 episodeId 时，不再设置额外高分门槛。
+    // 只有候选自身带有明确且错误的集数时才拒绝，避免第 N 集加载到其他集。
+    danmuDebugWarn(`⚠️ match 候选没有明确集数，按接口明确 episodeId 使用：`, list[0]);
     return list[0];
 }
 
@@ -1102,55 +1132,66 @@ async function matchDanmuByApi(title, episodeIndex) {
     if (!DANMU_CONFIG.adaptive?.enableMatchApi || !isDanmuServiceEnabled()) return null;
 
     const context = getDanmuPlaybackContext(title, episodeIndex);
-    const fileName = buildDanmuKeyword(context);
+    const matchQueries = buildDanmuMatchQueries(context);
     const matchUrl = await addDanmuAuth(`${getDanmuBaseUrl()}/api/v2/match`);
 
-    try {
-        danmuDebugLog(`🎯 使用 danmu_api match 自动匹配: ${fileName}`);
+    for (const fileName of matchQueries) {
+        try {
+            danmuDebugLog(`🎯 使用 danmu_api match 自动匹配: ${fileName}`);
 
-        const response = await fetchWithRetry(matchUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
+            const response = await fetchWithRetry(matchUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    fileName,
+                    title: normalizeDanmuTitle(title),
+                    year: context.year || undefined,
+                    season: context.season || undefined,
+                    episode: context.episode || undefined,
+                    episodeTitle: context.episodeName || undefined,
+                    episodeCount: context.episodeCount || undefined,
+                    sourceCode: context.sourceCode || undefined,
+                    vodId: context.vodId || undefined,
+                    platform: context.platform || undefined,
+                    url: context.playUrl || undefined,
+                    duration: context.duration || undefined
+                })
+            }, 2, 15000);
+
+            const data = await response.json();
+            danmuDebugLog('[DanmuDebug] match candidate results', {
                 fileName,
-                title: normalizeDanmuTitle(title),
-                year: context.year || undefined,
-                season: context.season || undefined,
-                episode: context.episode || undefined,
-                episodeTitle: context.episodeName || undefined,
-                episodeCount: context.episodeCount || undefined,
-                sourceCode: context.sourceCode || undefined,
-                vodId: context.vodId || undefined,
-                platform: context.platform || undefined,
-                url: context.playUrl || undefined,
-                duration: context.duration || undefined
-            })
-        }, 2, 15000);
-
-        const data = await response.json();
-        danmuDebugLog('[DanmuDebug] match candidate results', data?.matches || []);
-		const match = pickValidDanmuApiMatch(data?.matches, episodeIndex, {
-            strict: DANMU_CONFIG.strictAutoLoad !== false
-        });
-		
-		if (data?.isMatched && match?.episodeId) {
-            danmuDebugLog('✅ match 自动匹配成功:', {
-                animeTitle: match.animeTitle,
-                episodeTitle: match.episodeTitle,
-                episodeId: match.episodeId
+                matches: data?.matches || []
             });
+            const match = pickValidDanmuApiMatch(data?.matches, episodeIndex);
 
-            return match;
+            if (data?.isMatched && match?.episodeId) {
+                danmuDebugLog('✅ match 自动匹配成功:', {
+                    matchQuery: fileName,
+                    animeTitle: match.animeTitle,
+                    episodeTitle: match.episodeTitle,
+                    episodeId: match.episodeId
+                });
+
+                return {
+                    ...match,
+                    matchQuery: fileName
+                };
+            }
+        } catch (e) {
+            console.warn('⚠️ match 接口失败，尝试下一个 query:', {
+                matchQuery: fileName,
+                error: e.message
+            });
         }
-
-        danmuDebugWarn('[DanmuDebug] match 自动匹配失败，等待用户手动选择弹幕源');
-        return null;
-    } catch (e) {
-        console.warn('⚠️ match 接口失败，等待用户手动选择弹幕源:', e.message);
-        return null;
     }
+
+    danmuDebugWarn('[DanmuDebug] match 自动匹配失败，等待用户手动选择弹幕源', {
+        matchQueries
+    });
+    return null;
 }
 
 // 弹幕缓存 - 只缓存当前集
@@ -2118,6 +2159,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
         const cleanTitle = sanitizeTitle(title);
         const context = getDanmuPlaybackContext(title, episodeIndex);
         const matchQuery = buildDanmuKeyword(context);
+        const matchQueries = buildDanmuMatchQueries(context);
 
         danmuDebugLog('[DanmuDebug] match params', {
             cleanTitle,
@@ -2129,6 +2171,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
             currentVideoUrl,
             duration: context.duration,
             matchQuery,
+            matchQueries,
             currentSessionDanmuSource
         });
 
@@ -2202,7 +2245,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                 updateLastDanmuMatchInfo({
                     reason: 'api-match',
                     matchMode: 'api-match',
-                    matchQuery,
+                    matchQuery: matchedByApi.matchQuery || matchQuery,
                     episodeIndex,
                     displayEpisode: episodeIndex + 1,
                     animeId: matchedByApi.animeId || '',
@@ -2218,7 +2261,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                 });
                 danmuDebugLog('[DanmuDebug] match success', {
                     matchMode: 'api-match',
-                    matchQuery,
+                    matchQuery: matchedByApi.matchQuery || matchQuery,
                     animeId: matchedByApi.animeId || '',
                     animeTitle: matchedByApi.animeTitle || '',
                     episodeId: matchedByApi.episodeId,
@@ -2258,8 +2301,22 @@ async function getDanmukuForVideo(title, episodeIndex) {
             displayEpisode: episodeIndex + 1,
             episodeName: context.episodeName,
             matchQuery,
+            matchQueries,
             reason: 'api-match-and-session-source-failed',
             nextAction: 'open-danmu-source-modal'
+        });
+
+        updateLastDanmuMatchInfo({
+            reason: 'auto-match-failed',
+            matchMode: 'none',
+            matchQuery,
+            episodeIndex,
+            displayEpisode: episodeIndex + 1,
+            selectedBy: '',
+            fallbackUsed: false,
+            manualSourceUsed: false,
+            loadedCount: 0,
+            failReason: 'api-match-and-session-source-failed'
         });
 
         console.warn('❌ 未自动匹配到当前集弹幕，请手动选择弹幕源');
