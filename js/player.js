@@ -1294,6 +1294,7 @@ function buildDanmuEpisodeSummary(reason, overrides = {}) {
         confidence: Number(info.confidence || 0),
         fallbackUsed: Boolean(info.fallbackUsed),
         manualSourceUsed: Boolean(info.manualSourceUsed),
+        sessionSourceUsed: Boolean(info.sessionSourceUsed),
         rawCount: Number.isFinite(stats.rawCount) ? stats.rawCount : 0,
         validCount: Number.isFinite(stats.validCount) ? stats.validCount : 0,
         convertedCount: Number.isFinite(stats.convertedCount) ? stats.convertedCount : 0,
@@ -1301,6 +1302,7 @@ function buildDanmuEpisodeSummary(reason, overrides = {}) {
             ? overrides.loadedCount
             : (Number.isFinite(info.loadedCount) ? info.loadedCount : (Number.isFinite(stats.loadedCount) ? stats.loadedCount : 0)),
         pluginApplied: Boolean(overrides.pluginApplied),
+        failReason: overrides.failReason || info.failReason || '',
         ...overrides
     };
 }
@@ -1368,6 +1370,7 @@ function saveDanmuConfig(config) {
 
 // ✅ 新增：临时详情缓存（Map自动管理大小）
 const tempDetailCache = new Map();
+const sessionDanmuAnimeSearchCache = new Map();
 
 // ===== 获取弹幕数据 =====
 function rankDanmuSourceCandidates(animes, cleanTitle, videoIdentity = getVideoIdentity()) {
@@ -1444,6 +1447,41 @@ function rankDanmuSourceCandidates(animes, cleanTitle, videoIdentity = getVideoI
             raw: anime
         };
     }).sort((a, b) => b.score - a.score);
+}
+
+async function searchDanmuAnimeCandidatesWithCache(cleanTitle) {
+    const cacheKey = normalizeDanmuTitle(cleanTitle);
+    const cached = sessionDanmuAnimeSearchCache.get(cacheKey);
+    const TTL = DANMU_CONFIG.tempDetailCacheTTL || (90 * 60 * 1000);
+
+    if (cached && Date.now() - cached.timestamp < TTL) {
+        danmuDebugLog('[DanmuDebug] use session anime search cache', {
+            cleanTitle,
+            count: cached.animes.length
+        });
+        return cached.animes;
+    }
+
+    const searchUrl = `${getDanmuBaseUrl()}/api/v2/search/anime?keyword=${encodeURIComponent(cleanTitle)}`;
+    const authedSearchUrl = await addDanmuAuth(searchUrl);
+    const response = await fetchWithRetry(authedSearchUrl, {}, 2, 12000);
+
+    if (!response.ok) {
+        throw new Error(`search/anime HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    const animes = Array.isArray(data?.animes) ? data.animes : [];
+    sessionDanmuAnimeSearchCache.set(cacheKey, {
+        timestamp: Date.now(),
+        animes
+    });
+
+    danmuDebugLog('[DanmuDebug] cached anime search candidates', {
+        cleanTitle,
+        count: animes.length
+    });
+    return animes;
 }
 
 // ✅ 【新增】计算字符串相似度
@@ -2022,7 +2060,15 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
         reason
     });
 
-    const episodes = await getAnimeEpisodesWithCache(animeId, cleanTitle);
+    const sessionEpisodes =
+        currentSessionDanmuSource &&
+        String(currentSessionDanmuSource.animeId) === String(animeId) &&
+        Array.isArray(currentSessionDanmuSource.episodes)
+            ? currentSessionDanmuSource.episodes
+            : null;
+    const episodes = Array.isArray(meta.episodes) && meta.episodes.length
+        ? meta.episodes
+        : (sessionEpisodes || await getAnimeEpisodesWithCache(animeId, cleanTitle));
     if (controller?.cancelled) return [];
     if (!episodes || episodes.length === 0) {
         danmuDebugWarn('[DanmuDebug] candidate has no episodes', { animeId, sourceName, reason });
@@ -2076,6 +2122,8 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
             animeTitle: sourceName || '',
             sourceName: sourceName || '',
             selectedBy: meta.selectedBy || (meta.manualSourceUsed ? 'manual' : 'auto'),
+            episodes,
+            episodeCount: episodes.length,
             updatedAt: Date.now()
         };
         updateLastDanmuMatchInfo({
@@ -2092,6 +2140,7 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
             selectedBy: currentSessionDanmuSource.selectedBy,
             fallbackUsed: Boolean(meta.fallbackUsed),
             manualSourceUsed: Boolean(meta.manualSourceUsed),
+            sessionSourceUsed: Boolean(meta.sessionSourceUsed),
             confidence: Number(meta.confidence || meta.score || matchedEpisode.confidence || 0),
             loadedCount: result.length
         });
@@ -2104,7 +2153,8 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
             episodeTitle: matchedEpisode.episodeTitle || matchedEpisode.title || matchedEpisode.name || '',
             displayEpisode: episodeIndex + 1,
             loadedCount: result.length,
-            selectedBy: currentSessionDanmuSource.selectedBy
+            selectedBy: currentSessionDanmuSource.selectedBy,
+            sessionSourceUsed: Boolean(meta.sessionSourceUsed)
         });
         danmuDebugLog('[DanmuDebug] candidate fallback loaded danmaku', {
             animeId,
@@ -2125,6 +2175,73 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
         reason
     });
     return null;
+}
+
+async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIndex, controller, matchQuery) {
+    try {
+        const candidates = await searchDanmuAnimeCandidatesWithCache(cleanTitle);
+        if (controller?.cancelled) return [];
+
+        if (!candidates.length) {
+            danmuDebugWarn('[DanmuDebug] auto fallback has no search candidates', {
+                cleanTitle,
+                displayEpisode: episodeIndex + 1
+            });
+            return null;
+        }
+
+        const ranked = rankDanmuSourceCandidates(candidates, cleanTitle);
+        const eligible = ranked.filter(item => item.score >= 80);
+
+        danmuDebugLog('[DanmuDebug] auto fallback ranked candidates', ranked.slice(0, 5).map(item => ({
+            animeId: item.animeId,
+            animeTitle: item.animeTitle,
+            episodeCount: item.episodeCount,
+            score: item.score
+        })));
+
+        for (const candidate of eligible.slice(0, 3)) {
+            const result = await loadDanmakuFromAnimeCandidate(
+                candidate.animeId,
+                candidate.animeTitle,
+                cleanTitle,
+                title,
+                episodeIndex,
+                controller,
+                'auto-fallback',
+                {
+                    matchMode: 'auto-fallback',
+                    selectedBy: 'auto',
+                    fallbackUsed: true,
+                    manualSourceUsed: false,
+                    sessionSourceUsed: false,
+                    matchQuery,
+                    score: candidate.score,
+                    confidence: candidate.confidence,
+                    videoIdentity: getVideoIdentity(title)
+                }
+            );
+            if (controller?.cancelled) return [];
+            if (result && result.length > 0) {
+                return result;
+            }
+        }
+
+        danmuDebugWarn('[DanmuDebug] auto fallback did not resolve current episode', {
+            cleanTitle,
+            displayEpisode: episodeIndex + 1,
+            eligibleCount: eligible.length,
+            topScore: ranked[0]?.score || 0
+        });
+        return null;
+    } catch (error) {
+        danmuDebugWarn('[DanmuDebug] auto fallback search failed', {
+            cleanTitle,
+            displayEpisode: episodeIndex + 1,
+            error: error?.message || String(error)
+        });
+        return null;
+    }
 }
 
 // 主弹幕获取函数：自动 match + 页面会话源复用 + 用户手选
@@ -2184,18 +2301,21 @@ async function getDanmukuForVideo(title, episodeIndex) {
             loadedCount: 0
         });
 
-        const hasManualSessionSource =
+        const hasSessionSourceWithEpisodes =
             currentSessionDanmuSource?.animeId &&
-            currentSessionDanmuSource.selectedBy === 'manual';
+            Array.isArray(currentSessionDanmuSource.episodes) &&
+            currentSessionDanmuSource.episodes.length > 0;
 
-        if (hasManualSessionSource) {
-            danmuDebugLog('[DanmuDebug] manual session source priority', {
+        if (hasSessionSourceWithEpisodes) {
+            danmuDebugLog('[DanmuDebug] session source episode mapping priority', {
                 animeId: currentSessionDanmuSource.animeId,
                 animeTitle: currentSessionDanmuSource.animeTitle || currentSessionDanmuSource.sourceName || '',
-                displayEpisode: episodeIndex + 1
+                displayEpisode: episodeIndex + 1,
+                selectedBy: currentSessionDanmuSource.selectedBy,
+                episodeCount: currentSessionDanmuSource.episodes.length
             });
 
-            const manualSessionResult = await loadDanmakuFromAnimeCandidate(
+            const sessionResult = await loadDanmakuFromAnimeCandidate(
                 currentSessionDanmuSource.animeId,
                 currentSessionDanmuSource.animeTitle || currentSessionDanmuSource.sourceName || '',
                 cleanTitle,
@@ -2205,18 +2325,20 @@ async function getDanmukuForVideo(title, episodeIndex) {
                 'session-source',
                 {
                     matchMode: 'session-source',
-                    selectedBy: 'manual',
-                    manualSourceUsed: true,
+                    selectedBy: currentSessionDanmuSource.selectedBy || 'auto',
+                    manualSourceUsed: currentSessionDanmuSource.selectedBy === 'manual',
+                    sessionSourceUsed: true,
                     fallbackUsed: false,
-                    matchQuery
+                    matchQuery,
+                    episodes: currentSessionDanmuSource.episodes
                 }
             );
             if (controller.cancelled) return [];
-            if (manualSessionResult && manualSessionResult.length > 0) {
-                return manualSessionResult;
+            if (sessionResult && sessionResult.length > 0) {
+                return sessionResult;
             }
 
-            danmuDebugWarn('[DanmuDebug] manual session source did not resolve current episode, fallback to api match', {
+            danmuDebugWarn('[DanmuDebug] session source did not resolve current episode, fallback to api match', {
                 animeId: currentSessionDanmuSource?.animeId || '',
                 displayEpisode: episodeIndex + 1,
                 matchQuery
@@ -2234,13 +2356,19 @@ async function getDanmukuForVideo(title, episodeIndex) {
                 currentDanmuAnimeId = matchedByApi.animeId || null;
                 currentDanmuSourceName = matchedByApi.animeTitle || '';
                 if (currentDanmuAnimeId) {
-                    currentSessionDanmuSource = {
-                        animeId: currentDanmuAnimeId,
-                        animeTitle: currentDanmuSourceName,
-                        sourceName: currentDanmuSourceName,
-                        selectedBy: 'auto',
-                        updatedAt: Date.now()
-                    };
+                    const episodes = await getAnimeEpisodesWithCache(currentDanmuAnimeId, cleanTitle);
+                    if (controller.cancelled) return [];
+                    if (Array.isArray(episodes) && episodes.length > 0) {
+                        currentSessionDanmuSource = {
+                            animeId: currentDanmuAnimeId,
+                            animeTitle: currentDanmuSourceName,
+                            sourceName: currentDanmuSourceName,
+                            selectedBy: 'auto',
+                            episodes,
+                            episodeCount: episodes.length,
+                            updatedAt: Date.now()
+                        };
+                    }
                 }
                 updateLastDanmuMatchInfo({
                     reason: 'api-match',
@@ -2256,6 +2384,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                     selectedBy: 'auto',
                     fallbackUsed: false,
                     manualSourceUsed: false,
+                    sessionSourceUsed: false,
                     confidence: matchedByApi.confidence || 90,
                     loadedCount: result.length
                 });
@@ -2273,7 +2402,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
             }
         }
 
-        if (currentSessionDanmuSource?.animeId && !hasManualSessionSource) {
+        if (currentSessionDanmuSource?.animeId && !hasSessionSourceWithEpisodes) {
             const sessionResult = await loadDanmakuFromAnimeCandidate(
                 currentSessionDanmuSource.animeId,
                 currentSessionDanmuSource.animeTitle || currentSessionDanmuSource.sourceName || '',
@@ -2286,6 +2415,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                     matchMode: 'session-source',
                     selectedBy: currentSessionDanmuSource.selectedBy || 'manual',
                     manualSourceUsed: currentSessionDanmuSource.selectedBy === 'manual',
+                    sessionSourceUsed: true,
                     fallbackUsed: false,
                     matchQuery
                 }
@@ -2294,6 +2424,12 @@ async function getDanmukuForVideo(title, episodeIndex) {
             if (sessionResult && sessionResult.length > 0) {
                 return sessionResult;
             }
+        }
+
+        const fallbackResult = await autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIndex, controller, matchQuery);
+        if (controller.cancelled) return [];
+        if (fallbackResult && fallbackResult.length > 0) {
+            return fallbackResult;
         }
 
         danmuDebugWarn('[DanmuDebug] strict match failed', {
@@ -5390,20 +5526,14 @@ async function showDanmuSourceModal() {
 
     try {
         const cleanTitle = normalizeDanmuTitle(currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim());
-        const searchUrl = `${getDanmuBaseUrl()}/api/v2/search/anime?keyword=${encodeURIComponent(cleanTitle)}`;
-        const authedSearchUrl = await addDanmuAuth(searchUrl);
-		const searchResponse = await fetchWithRetry(authedSearchUrl, {}, 2, 12000);
+        const animes = await searchDanmuAnimeCandidatesWithCache(cleanTitle);
 
-        if (!searchResponse.ok) throw new Error('搜索失败');
-
-        const searchData = await searchResponse.json();
-
-        if (!searchData.animes || searchData.animes.length === 0) {
+        if (!animes.length) {
             modalContent.innerHTML = '<div class="text-center py-8 text-gray-400">未找到匹配的弹幕源</div>';
             return;
         }
 
-        const allSources = rankDanmuSourceCandidates(searchData.animes, cleanTitle);
+        const allSources = rankDanmuSourceCandidates(animes, cleanTitle);
 
         // ✅ 全部弹幕源在一个列表中，高亮当前使用的
         let html = '<div class="space-y-2 max-h-[60vh] overflow-y-auto p-2">';
@@ -5565,6 +5695,8 @@ async function switchDanmuSource(animeId, encodedSourceName) {
                 animeTitle: sourceName,
                 sourceName,
                 selectedBy: 'manual',
+                episodes,
+                episodeCount: episodes.length,
                 updatedAt: Date.now()
             };
             updateLastDanmuMatchInfo({
