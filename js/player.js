@@ -1,3 +1,23 @@
+window.LibertyDebug = window.LibertyDebug || {
+    enabled() {
+        try {
+            return localStorage.getItem('LIBRETV_DEBUG') === '1'
+                || new URLSearchParams(window.location.search).get('debug') === '1';
+        } catch (error) {
+            return window.location.search.includes('debug=1');
+        }
+    },
+    log(...args) {
+        if (this.enabled()) console.log(...args);
+    },
+    warn(...args) {
+        if (this.enabled()) console.warn(...args);
+    },
+    trace(...args) {
+        if (this.enabled()) console.trace(...args);
+    },
+};
+
 function safeLocalStorageGet(key, fallback = '[]') {
     try {
         const storageUtils = window.LibertyUtils?.storage;
@@ -230,7 +250,7 @@ function cleanCacheByType(type, maxAge, maxCount = null) {
             toDelete.forEach(item => config.storage.removeItem(item.key));
         }
 
-        console.log(`✅ 已清理 ${type} 缓存`);
+        window.LibertyDebug.log(`✅ 已清理 ${type} 缓存`);
     } catch (e) {
         console.warn(`清理 ${type} 缓存失败:`, e);
     }
@@ -268,7 +288,7 @@ async function fetchWithRetry(url, options = {}, maxRetries = 3, timeout = 15000
 			}
         } catch (error) {
             const isTimeout = error.name === 'AbortError';
-			console.debug(`${isTimeout ? '超时' : '网络错误'} (尝试 ${i + 1}/${maxRetries})`);
+			window.LibertyDebug.log(`${isTimeout ? '超时' : '网络错误'} (尝试 ${i + 1}/${maxRetries})`);
 
             if (i < maxRetries - 1) {
                 const delay = baseDelay * Math.pow(2, i);
@@ -350,7 +370,7 @@ function goBack(event) {
 
 // ===== 【增强】页面卸载时的完整清理 =====
 function cleanupResources() {
-    console.log('🧹 开始彻底清理资源...');
+    window.LibertyDebug.log('🧹 开始彻底清理资源...');
 
     // 🔥 修复：清理 saveHistoryTimer，防止切集后 5 秒写入错误集数记录
     if (typeof saveHistoryTimer !== 'undefined' && saveHistoryTimer) {
@@ -401,7 +421,7 @@ function cleanupResources() {
         window.globalDanmuSyncTimer = null;
     }
 
-    console.log('✅ 资源清理完成');
+    window.LibertyDebug.log('✅ 资源清理完成');
 }
 
 // 页面卸载时清理
@@ -420,7 +440,7 @@ let restoreDanmuTimer = null; // 🔥 新增：防止定时器冲突
 function onVisibilityChange() {
     if (document.hidden) {
         pageWasHidden = true;
-        console.debug('页面已隐藏');
+        window.LibertyDebug.log('页面已隐藏');
 
         saveCurrentProgress();
 
@@ -434,7 +454,7 @@ function onVisibilityChange() {
         }
 
     } else if (pageWasHidden) {
-        console.debug('页面恢复可见');
+        window.LibertyDebug.log('页面恢复可见');
 
         // 🔥 立即重置标志，防止重复执行
         pageWasHidden = false;
@@ -454,7 +474,7 @@ function onVisibilityChange() {
                     // 🔥 关键修复：检查 video 是否真的不同，且确实有父节点
                     if (video !== activeVideo && video.parentNode) {
                         try {
-                            console.log('🧹 清理幽灵视频元素');
+                            window.LibertyDebug.log('🧹 清理幽灵视频元素');
                             video.pause();
                             video.removeAttribute('src');
                             video.load();
@@ -499,7 +519,7 @@ function onVisibilityChange() {
                         danmukuPlugin.seek(art.video.currentTime);
                     }
 
-                    console.debug('弹幕已恢复');
+                    window.LibertyDebug.log('弹幕已恢复');
                 } else {
                     // 缓存失效，重新获取
                     getDanmukuForVideo(currentVideoTitle, currentEpisodeIndex)
@@ -519,7 +539,7 @@ function onVisibilityChange() {
                                     danmukuPlugin.show();
                                 }
 
-                                console.debug('弹幕已恢复（重新加载）');
+                                window.LibertyDebug.log('弹幕已恢复（重新加载）');
                             }
                         })
                         .catch(err => {
@@ -1073,7 +1093,7 @@ async function matchDanmuByApi(title, episodeIndex) {
     const matchUrl = await addDanmuAuth(`${getDanmuBaseUrl()}/api/v2/match`);
 
     try {
-        console.log(`🎯 使用 danmu_api match 自动匹配: ${fileName}`);
+        window.LibertyDebug.log(`🎯 使用 danmu_api match 自动匹配: ${fileName}`);
 
         const response = await fetchWithRetry(matchUrl, {
             method: 'POST',
@@ -1103,7 +1123,7 @@ async function matchDanmuByApi(title, episodeIndex) {
             currentDanmuAnimeId = match.animeId || null;
             currentDanmuSourceName = match.animeTitle || '';
 
-            console.log('✅ match 自动匹配成功:', {
+            window.LibertyDebug.log('✅ match 自动匹配成功:', {
                 animeTitle: match.animeTitle,
                 episodeTitle: match.episodeTitle,
                 episodeId: match.episodeId
@@ -1203,7 +1223,7 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
     // 预过滤（短标题时排除综艺等）
     let filteredAnimes = animes;
     if (isShortTitle) {
-        console.log('⚠️ 检测到短标题，启用严格匹配模式');
+        window.LibertyDebug.log('⚠️ 检测到短标题，启用严格匹配模式');
 
         filteredAnimes = animes.filter(anime => {
             const animeTitle = (anime.animeTitle || '').toLowerCase();
@@ -1220,14 +1240,14 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
             );
 
             if (shouldExclude) {
-                console.log(`❌ 过滤掉: ${anime.animeTitle} (包含排除关键词)`);
+                window.LibertyDebug.log(`❌ 过滤掉: ${anime.animeTitle} (包含排除关键词)`);
                 return false;
             }
 
             return true;
         });
 
-        console.log(`📊 过滤后剩余 ${filteredAnimes.length}/${animes.length} 个候选`);
+        window.LibertyDebug.log(`📊 过滤后剩余 ${filteredAnimes.length}/${animes.length} 个候选`);
 
         if (filteredAnimes.length === 0) {
             console.warn('⚠️ 过滤后无剩余结果，使用原始列表');
@@ -1478,7 +1498,7 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
     scored.sort((a, b) => b.score - a.score);
 
     // 详细日志
-    console.log('🎯 弹幕匹配评分 (前5):', scored.slice(0, 5).map(s => ({
+    window.LibertyDebug.log('🎯 弹幕匹配评分 (前5):', scored.slice(0, 5).map(s => ({
         title: s.anime.animeTitle,
         总分: s.score,
         明细: s.breakdown,
@@ -1499,7 +1519,7 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
 
     // 【新增】检测歧义情况 - 优先处理无季度的情况
 	if (!targetInfo.season && scored.length > 1) {
-		console.log('🎯 目标无季度，优先查找第一季或无季度版本');
+		window.LibertyDebug.log('🎯 目标无季度，优先查找第一季或无季度版本');
 
 		const maxScore = scored[0].score;
 		// 只在高质量候选（最高分70%以上）中查找，避免误选低分条目
@@ -1521,7 +1541,7 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
 
 		if (firstSeasonMatch) {
 			const animeInfo = advancedCleanTitle(firstSeasonMatch.anime.animeTitle);
-			console.log(`✅ 自动选择: ${firstSeasonMatch.anime.animeTitle} (季度: ${animeInfo.season || '无'})`);
+			window.LibertyDebug.log(`✅ 自动选择: ${firstSeasonMatch.anime.animeTitle} (季度: ${animeInfo.season || '无'})`);
 			return firstSeasonMatch.anime;
 		}
 	}
@@ -1542,13 +1562,13 @@ function findBestAnimeMatch(animes, targetTitle, currentEpisodeCount = 0) {
 					s.anime.episodeCount === 1 || /电影|剧场版/.test(s.anime.typeDescription || '')
 				);
 				if (movieMatch) {
-					console.log('🎬 根据集数判断，自动选择电影版');
+					window.LibertyDebug.log('🎬 根据集数判断，自动选择电影版');
 					return movieMatch.anime;
 				}
 			} else if (currentEpisodeCount > 1) {
 				const seriesMatch = scored.slice(0, 3).find(s => s.anime.episodeCount > 1);
 				if (seriesMatch) {
-					console.log('📺 根据集数判断，自动选择连续剧版');
+					window.LibertyDebug.log('📺 根据集数判断，自动选择连续剧版');
 					return seriesMatch.anime;
 				}
 			}
@@ -1709,7 +1729,7 @@ async function findOrSearchAnimeId(cleanTitle) {
                     .replace(/【.*?】/g, '')
                     .replace(/\[.*?\]/g, '')
                     .trim();
-                console.log(`🔍 第2次尝试简化标题: ${searchTitle}`);
+                window.LibertyDebug.log(`🔍 第2次尝试简化标题: ${searchTitle}`);
             }
 
             // 第3次：只保留核心词
@@ -1722,11 +1742,11 @@ async function findOrSearchAnimeId(cleanTitle) {
                     .replace(/Season\s*\d+/gi, '')
                     .replace(/\d{4}/g, '')
                     .trim();
-                console.log(`🔍 第3次尝试核心标题: ${searchTitle}`);
+                window.LibertyDebug.log(`🔍 第3次尝试核心标题: ${searchTitle}`);
             }
 
             const searchUrl = `${getDanmuBaseUrl()}/api/v2/search/anime?keyword=${encodeURIComponent(searchTitle)}`;
-            console.log(`🔍 弹幕搜索尝试 ${attempt}/3`);
+            window.LibertyDebug.log(`🔍 弹幕搜索尝试 ${attempt}/3`);
 
             const authedSearchUrl = await addDanmuAuth(searchUrl);
 			const response = await fetchWithRetry(authedSearchUrl, {}, 3, 12000);
@@ -1751,7 +1771,7 @@ async function findOrSearchAnimeId(cleanTitle) {
                 return null;
             }
 
-            console.log(`✅ 第${attempt}次搜索成功: ${bestMatch.animeTitle} (ID: ${bestMatch.animeId})`);
+            window.LibertyDebug.log(`✅ 第${attempt}次搜索成功: ${bestMatch.animeTitle} (ID: ${bestMatch.animeId})`);
 
             // 🔥 保存到全局变量（用于界面显示）
             currentDanmuAnimeId = bestMatch.animeId;
@@ -1763,7 +1783,7 @@ async function findOrSearchAnimeId(cleanTitle) {
             console.error(`❌ 第${attempt}次搜索失败:`, error.message);
 
             if (attempt < 3) {
-                console.log(`🔄 2秒后重试...`);
+                window.LibertyDebug.log(`🔄 2秒后重试...`);
                 await new Promise(r => setTimeout(r, 2000));
             } else {
                 reportError('弹幕搜索', '搜索失败', { cleanTitle, error: error.message });
@@ -1898,7 +1918,7 @@ function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
     );
 
     if (exactMatch) {
-        console.log(`✅ [弹幕] 精确匹配 第${targetNumber}集: ${exactMatch.title}`);
+        window.LibertyDebug.log(`✅ [弹幕] 精确匹配 第${targetNumber}集: ${exactMatch.title}`);
         return exactMatch.episode;
     }
 
@@ -1935,7 +1955,7 @@ function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
     }
 
     console.error(`❌ [弹幕] 无法匹配第${targetNumber}集，共${episodes.length}集`);
-    console.log('可用弹幕:', episodesWithInfo.map(e => ({
+    window.LibertyDebug.log('可用弹幕:', episodesWithInfo.map(e => ({
         index: e.index,
         number: e.number,
         confidence: e.confidence,
@@ -1956,7 +1976,7 @@ function pickMatchedDanmuEpisode(episodes, episodeIndex, title) {
     // 但如果当前视频本身是多集剧/动漫/综艺，就不要把单集弹幕源套到每一集上
     if (episodes.length === 1) {
         if (playerEpisodeCount <= 1) {
-            console.log('✅ [弹幕] 单集内容，直接使用唯一弹幕剧集');
+            window.LibertyDebug.log('✅ [弹幕] 单集内容，直接使用唯一弹幕剧集');
             return episodes[0];
         }
 
@@ -1998,7 +2018,7 @@ async function fetchDanmaku(episodeId, episodeIndex) {
     const rawComments = commentData.comments;
     const totalComments = rawComments.length;
 
-    console.log(`📊 原始弹幕数量: ${totalComments}`);
+    window.LibertyDebug.log(`📊 原始弹幕数量: ${totalComments}`);
 
     const apiDuration = Number(commentData.videoDuration || 0);
     const playerDuration = getCurrentVideoDuration();
@@ -2017,7 +2037,7 @@ async function fetchDanmaku(episodeId, episodeIndex) {
         const maxDiffRatio = Number(DANMU_CONFIG.maxDurationDiffRatio || 0.08);
         if (diff > 20 && Math.abs(1 - ratio) <= maxDiffRatio) {
             durationScale = ratio;
-            console.log(`🎯 弹幕时长自适应: API=${apiDuration.toFixed(1)}s, 视频=${playerDuration.toFixed(1)}s, scale=${durationScale.toFixed(4)}`);
+            window.LibertyDebug.log(`🎯 弹幕时长自适应: API=${apiDuration.toFixed(1)}s, 视频=${playerDuration.toFixed(1)}s, scale=${durationScale.toFixed(4)}`);
         }
     }
 
@@ -2041,12 +2061,12 @@ async function fetchDanmaku(episodeId, episodeIndex) {
     parsedComments.sort((a, b) => a.time - b.time);
 
     const lastTime = parsedComments[parsedComments.length - 1]?.time || 0;
-    console.log(`📐 弹幕时长: ${Math.floor(lastTime / 60)}分${Math.floor(lastTime % 60)}秒`);
+    window.LibertyDebug.log(`📐 弹幕时长: ${Math.floor(lastTime / 60)}分${Math.floor(lastTime % 60)}秒`);
 
     const finalDanmaku = [];
     parsedComments.forEach(item => processDanmakuOptimized(item, finalDanmaku));
 
-    console.log(`✅ 弹幕解析完成: ${totalComments} → ${finalDanmaku.length}条（未做数量裁剪）`);
+    window.LibertyDebug.log(`✅ 弹幕解析完成: ${totalComments} → ${finalDanmaku.length}条（未做数量裁剪）`);
 
     const cacheData = {
         episodeIndex,
@@ -2167,7 +2187,7 @@ async function getAnimeEpisodesWithCache(animeId, cleanTitle) {
 
     // 缓存有效直接返回
     if (cached && Date.now() - cached.timestamp < TTL) {
-        console.log('✅ 使用临时详情缓存（有效期内）');
+        window.LibertyDebug.log('✅ 使用临时详情缓存（有效期内）');
         return cached.episodes;
     }
 
@@ -2194,7 +2214,7 @@ async function getAnimeEpisodesWithCache(animeId, cleanTitle) {
 			while (tempDetailCache.size >= 8) {
 				const firstKey = tempDetailCache.keys().next().value;
 				tempDetailCache.delete(firstKey);
-				console.log('🧹 清理过期剧集缓存');
+				window.LibertyDebug.log('🧹 清理过期剧集缓存');
 			}
 			tempDetailCache.set(cacheKey, {
 				timestamp: Date.now(),
@@ -2203,7 +2223,7 @@ async function getAnimeEpisodesWithCache(animeId, cleanTitle) {
 				isMovie: isMovieContent(data.bangumi)
 			});
 
-            console.log(`✅ 第${attempt}次成功获取剧集: ${episodes.length} 集`);
+            window.LibertyDebug.log(`✅ 第${attempt}次成功获取剧集: ${episodes.length} 集`);
             return episodes;
 
         } catch (error) {
@@ -2242,7 +2262,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
         if (currentDanmuCache.episodeIndex === episodeIndex &&
             currentDanmuCache.danmuList &&
             Date.now() - currentDanmuCache.timestamp < DANMU_CONFIG.cacheExpiration.danmuCache) {
-            console.log('✅ 使用弹幕缓存（当前集）');
+            window.LibertyDebug.log('✅ 使用弹幕缓存（当前集）');
             return currentDanmuCache.danmuList;
         }
 
@@ -2252,7 +2272,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
         let animeId = null;
 
         if (manualMapping) {
-            console.log('🎯 使用本地保存的弹幕手动映射:', manualMapping);
+            window.LibertyDebug.log('🎯 使用本地保存的弹幕手动映射:', manualMapping);
 
             if (manualMapping.animeId) {
                 currentDanmuAnimeId = manualMapping.animeId;
@@ -2271,7 +2291,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
 
         // ② 路径 A：用户手动选择了弹幕源（优先级最高）
         if (currentDanmuAnimeId) {
-            console.log(`🎯 使用用户选定的弹幕源: ${currentDanmuAnimeId}`);
+            window.LibertyDebug.log(`🎯 使用用户选定的弹幕源: ${currentDanmuAnimeId}`);
 
             // 先用带兜底的缓存函数获取剧集（即使缓存过期也会重试）
             const episodes = await getAnimeEpisodesWithCache(currentDanmuAnimeId, cleanTitle);
@@ -2289,7 +2309,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                     const result = await fetchDanmaku(matchedEpisode.episodeId, episodeIndex);
 					if (controller.cancelled) return [];
 					if (result && result.length > 0) {
-						console.log(`✅ 用户选定源加载成功: ${result.length} 条`);
+						window.LibertyDebug.log(`✅ 用户选定源加载成功: ${result.length} 条`);
 						return result;
 					}
                     console.warn('⚠️ 用户选定源弹幕为空，降级自动搜索');
@@ -2317,7 +2337,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
 		        if (controller.cancelled) return [];
 
 		        if (result && result.length > 0) {
-		            console.log(`✅ match 接口成功加载第${episodeIndex + 1}集弹幕: ${result.length} 条`);
+		            window.LibertyDebug.log(`✅ match 接口成功加载第${episodeIndex + 1}集弹幕: ${result.length} 条`);
 		            return result;
 		        }
 
@@ -2332,7 +2352,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                 return [];
             }
 
-		    console.log(`🔍 降级旧搜索弹幕源: ${cleanTitle}`);
+		    window.LibertyDebug.log(`🔍 降级旧搜索弹幕源: ${cleanTitle}`);
 		    animeId = await findOrSearchAnimeId(cleanTitle);
 		    if (controller.cancelled) return [];
 
@@ -2361,7 +2381,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
         const result = await fetchDanmaku(matchedEpisode.episodeId, episodeIndex);
 		if (controller.cancelled) return [];
 		if (result && result.length > 0) {
-			console.log(`✅ 自动搜索成功加载第${episodeIndex + 1}集弹幕: ${result.length} 条`);
+			window.LibertyDebug.log(`✅ 自动搜索成功加载第${episodeIndex + 1}集弹幕: ${result.length} 条`);
 			return result;
 		}
 
@@ -2510,7 +2530,7 @@ function initializePageContent() {
 
         episodesReversed = localStorage.getItem('episodesReversed') === 'true';
         if (isWatchRoomLaunch()) {
-            console.log('[WatchRoomAudit] player init source', {
+            window.LibertyDebug.log('[WatchRoomAudit] player init source', {
                 url: videoUrl,
                 episodes: currentEpisodes,
                 episodeIndex: currentEpisodeIndex
@@ -2554,7 +2574,7 @@ function initializePageContent() {
 
     // 页面加载完成后，延迟保存一次历史记录
     setTimeout(() => {
-        console.log('[历史记录] 尝试保存初始历史记录');
+        window.LibertyDebug.log('[历史记录] 尝试保存初始历史记录');
         saveToHistory();
     }, 2000);
 }
@@ -2806,7 +2826,7 @@ class VideoPlayer {
     // ============================================
     async requestWakeLock() {
         if (!('wakeLock' in navigator)) {
-            console.log('ℹ️ 浏览器不支持 Wake Lock，启用备用方案');
+            window.LibertyDebug.log('ℹ️ 浏览器不支持 Wake Lock，启用备用方案');
             this.enableNoSleepFallback();
             return;
         }
@@ -2815,7 +2835,7 @@ class VideoPlayer {
 
         try {
             this.wakeLock.instance = await navigator.wakeLock.request('screen');
-            console.debug('防息屏已激活');
+            window.LibertyDebug.log('防息屏已激活');
 
             this.wakeLock.instance.addEventListener('release', () => {
                 this.wakeLock.instance = null;
@@ -2918,7 +2938,7 @@ class VideoPlayer {
                 this.hls.stopLoad();
                 this.hls.detachMedia();
                 this.hls.destroy();
-                console.log('✅ HLS 实例已完全销毁');
+                window.LibertyDebug.log('✅ HLS 实例已完全销毁');
             } catch (e) {
                 console.error('HLS 销毁失败:', e);
             } finally {
@@ -2960,7 +2980,7 @@ class VideoPlayer {
                 }
 
                 this.art.destroy();
-                console.log('✅ 播放器已完全销毁');
+                window.LibertyDebug.log('✅ 播放器已完全销毁');
             } catch (e) {
                 console.error('播放器销毁失败:', e);
             } finally {
@@ -2978,7 +2998,7 @@ class VideoPlayer {
             danmuList: null,
             timestamp: 0
         };
-        console.log('✅ 弹幕缓存已清理');
+        window.LibertyDebug.log('✅ 弹幕缓存已清理');
     }
 
     updateDanmuCache(episodeIndex, danmuList) {
@@ -3017,7 +3037,7 @@ class VideoPlayer {
     // 统一销毁方法
     // ============================================
     destroy() {
-        console.log('🧹 VideoPlayer 开始销毁...');
+        window.LibertyDebug.log('🧹 VideoPlayer 开始销毁...');
 
         this.clearAllTimers();
         this.removeAllEventListeners();
@@ -3044,7 +3064,7 @@ class VideoPlayer {
 			});
 		}
 
-        console.log('✅ VideoPlayer 销毁完成');
+        window.LibertyDebug.log('✅ VideoPlayer 销毁完成');
     }
 }
 
@@ -3055,9 +3075,9 @@ let videoPlayer = null;
 function initPlayer(videoUrl) {
     // 🔥 使用 VideoPlayer 类管理实例
     if (videoPlayer) {
-        console.log('🔄 销毁旧播放器实例');
+        window.LibertyDebug.log('🔄 销毁旧播放器实例');
         const status = videoPlayer.getStatus();
-        console.log('旧实例状态:', status);
+        window.LibertyDebug.log('旧实例状态:', status);
         videoPlayer.destroy();
         videoPlayer = null;
 
@@ -3082,7 +3102,7 @@ function initPlayerInternal(videoUrl) {
     }
     initPlayer.lastInitTime = now;
 
-    console.log('🎬 开始初始化播放器...');
+    window.LibertyDebug.log('🎬 开始初始化播放器...');
 
 	// 使用新的统一缓存清理函数
     if (!window.danmuCacheCleanedThisSession) {
@@ -3097,7 +3117,7 @@ function initPlayerInternal(videoUrl) {
 
     const shouldDisableAutoplayForWatchRoom = isWatchRoomLaunch();
     if (shouldDisableAutoplayForWatchRoom) {
-        console.log('[WatchRoom] watch room launch detected, disable initial autoplay', {
+        window.LibertyDebug.log('[WatchRoom] watch room launch detected, disable initial autoplay', {
             role: getWatchRoomLaunchRole()
         });
     }
@@ -3231,7 +3251,7 @@ function initPlayerInternal(videoUrl) {
 						currentHls.stopLoad();
 						currentHls.detachMedia();
 						currentHls.destroy();
-						console.log('✅ HLS 实例已完全销毁');
+						window.LibertyDebug.log('✅ HLS 实例已完全销毁');
 					} catch (e) {
 						console.error('HLS销毁失败:', e);
 					} finally {
@@ -3369,7 +3389,7 @@ function initPlayerInternal(videoUrl) {
 
                 hls.on(Hls.Events.MANIFEST_PARSED, function () {
                     if (isWatchRoomLaunch()) {
-                        console.log('[WatchRoomAudit] skip hls manifest autoplay for watch room mode', {
+                        window.LibertyDebug.log('[WatchRoomAudit] skip hls manifest autoplay for watch room mode', {
                             role: getWatchRoomLaunchRole()
                         });
                         return;
@@ -3480,7 +3500,7 @@ function initPlayerInternal(videoUrl) {
             // ✅ 移动端横屏锁定（只在原生全屏时）
             if (isMobileDevice && !isWeb && window.screen?.orientation) {
                 window.screen.orientation.lock('landscape')
-                    .then(() => console.log('✅ 已锁定横屏'))
+                    .then(() => window.LibertyDebug.log('✅ 已锁定横屏'))
                     .catch((error) => console.warn('⚠️ 横屏锁定失败:', error));
             }
         } else {
@@ -3491,7 +3511,7 @@ function initPlayerInternal(videoUrl) {
             if (isMobileDevice && window.screen?.orientation) {
                 try {
                     window.screen.orientation.unlock();
-                    console.log('✅ 已解锁屏幕方向');
+                    window.LibertyDebug.log('✅ 已解锁屏幕方向');
                 } catch (e) {
                     console.warn('⚠️ 解锁屏幕方向失败:', e);
                 }
@@ -3515,7 +3535,7 @@ function initPlayerInternal(videoUrl) {
 		    if (config.mode !== undefined) toSave.mode = config.mode;
 		    if (Object.keys(toSave).length > 0) {
 		        saveDanmuConfig(toSave);
-		        console.debug('✅ 弹幕显示设置已保存:', toSave);;
+		        window.LibertyDebug.log('✅ 弹幕显示设置已保存:', toSave);;
 		    }
 		});
 
@@ -3586,7 +3606,7 @@ function initPlayerInternal(videoUrl) {
 				if (danmukuPlugin && typeof danmukuPlugin.seek === 'function') {
 					danmukuPlugin.seek(currentTime);
 					lastSyncTime = currentTime;
-					console.log(`🎯 弹幕定期校准: ${currentTime.toFixed(0)}s`);
+					window.LibertyDebug.log(`🎯 弹幕定期校准: ${currentTime.toFixed(0)}s`);
 				}
 			} else {
 				// 正常播放中，只更新记录，不触发 seek
@@ -3740,7 +3760,7 @@ function initPlayerInternal(videoUrl) {
                 console.error('读取临时进度失败:', e);
             }
         } else {
-            console.log('[WatchRoomAudit] watch room mode', {
+            window.LibertyDebug.log('[WatchRoomAudit] watch room mode', {
                 roomId: sessionStorage.getItem('watchRoomId') || '',
                 role: sessionStorage.getItem('watchRoomRole') || '',
             });
@@ -3770,7 +3790,7 @@ function initPlayerInternal(videoUrl) {
                 console.error('恢复播放进度失败:', e);
             }
         } else {
-            console.log('[WatchRoomAudit] skip local progress restore for watch room viewer', {
+            window.LibertyDebug.log('[WatchRoomAudit] skip local progress restore for watch room viewer', {
                 savedPosition,
                 restoredPosition
             });
@@ -3780,7 +3800,7 @@ function initPlayerInternal(videoUrl) {
         if (isDanmuServiceEnabled() && art.plugins.artplayerPluginDanmuku) {
             const loadDanmaku = async () => {
                 try {
-                    console.log('🎬 开始加载弹幕...');
+                    window.LibertyDebug.log('🎬 开始加载弹幕...');
 
                     const danmuku = await getDanmukuForVideo(
                         currentVideoTitle, 
@@ -3792,7 +3812,7 @@ function initPlayerInternal(videoUrl) {
                         return;
                     }
 
-                    console.log(`📦 获取到 ${danmuku.length} 条弹幕，全量加载`);
+                    window.LibertyDebug.log(`📦 获取到 ${danmuku.length} 条弹幕，全量加载`);
 
                     const waitForVideoReady = (maxWait = 10000) => {
 						return new Promise((resolve) => {
@@ -3831,7 +3851,7 @@ function initPlayerInternal(videoUrl) {
 					};
 
                     await waitForVideoReady();
-                    console.log('✅ 视频已准备好，开始加载弹幕');
+                    window.LibertyDebug.log('✅ 视频已准备好，开始加载弹幕');
 
                     const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
                     if (typeof danmukuPlugin.clear === 'function') {
@@ -3850,10 +3870,10 @@ function initPlayerInternal(videoUrl) {
                     const currentTime = art.video.currentTime || restoredPosition || 0;
                     if (currentTime > 0 && typeof danmukuPlugin.seek === 'function') {
                         danmukuPlugin.seek(currentTime);
-                        console.log(`🎯 弹幕同步到: ${currentTime.toFixed(2)}s`);
+                        window.LibertyDebug.log(`🎯 弹幕同步到: ${currentTime.toFixed(2)}s`);
                     }
 
-                    console.log(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
+                    window.LibertyDebug.log(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
 
                 } catch (e) {
                     console.error('❌ 弹幕加载失败:', e);
@@ -3971,7 +3991,7 @@ function initPlayerInternal(videoUrl) {
         }, 60000, true); // 每分钟检查一次
     }
 
-    console.log('✅ 播放器初始化完成');
+    window.LibertyDebug.log('✅ 播放器初始化完成');
 // 🔥 输出初始化后的状态
     if (videoPlayer) {
         setTimeout(() => videoPlayer.logStatus(), 1000);
@@ -4112,7 +4132,7 @@ function playEpisode(index) {
     }
 
     // 切换前清理旧资源
-    console.log('🔄 准备切换集数，清理旧资源...');
+    window.LibertyDebug.log('🔄 准备切换集数，清理旧资源...');
 
     // 清理历史记录防抖定时器，防止旧集数写入
 	if (saveHistoryTimer) {
@@ -4326,11 +4346,11 @@ function saveToHistory(forceImmediate = false) {
 				const positionChange = Math.abs(currentPosition - lastSavedPosition);
 
 				if (!forceImmediate && timeSinceLastSave < 120000 && positionChange < 60) {
-					if (DEBUG_HISTORY) console.log('[历史记录] ⏭️ 跳过保存（变化不大）');
+					if (DEBUG_HISTORY) window.LibertyDebug.log('[历史记录] ⏭️ 跳过保存（变化不大）');
 					return false;
 				}
 
-                if (DEBUG_HISTORY) console.log(`[历史记录] 位置: ${currentPosition.toFixed(0)}s / ${videoDuration.toFixed(0)}s`);
+                if (DEBUG_HISTORY) window.LibertyDebug.log(`[历史记录] 位置: ${currentPosition.toFixed(0)}s / ${videoDuration.toFixed(0)}s`);
             }
 
             const videoInfo = {
@@ -4372,12 +4392,12 @@ function saveToHistory(forceImmediate = false) {
 
                 // 只在强制保存或DEBUG模式时输出日志
                 if (DEBUG_HISTORY) {
-                    console.debug(`[历史记录] 更新 第${videoInfo.episodeIndex + 1}集`);
+                    window.LibertyDebug.log(`[历史记录] 更新 第${videoInfo.episodeIndex + 1}集`);
                 }
             } else {
                 history.unshift(videoInfo);
                 if (DEBUG_HISTORY) {
-                    console.debug(`[历史记录] 新增 第${videoInfo.episodeIndex + 1}集`);
+                    window.LibertyDebug.log(`[历史记录] 新增 第${videoInfo.episodeIndex + 1}集`);
                 }
             }
 
@@ -4983,14 +5003,14 @@ async function showSwitchResourceModal() {
 // 智能缓存清理（只清理当前视频的缓存）
 function cleanCurrentVideoCache() {
     try {
-        console.log('🔄 清理当前视频的缓存...');
+        window.LibertyDebug.log('🔄 清理当前视频的缓存...');
 
         const cleanTitle = sanitizeTitle(currentVideoTitle);
         const titleHash = simpleHash(cleanTitle);
 
         const cacheKey = `anime_*`; // 无法精确定位，清理所有
         tempDetailCache.clear();
-        console.log('✅ 已清理临时缓存');
+        window.LibertyDebug.log('✅ 已清理临时缓存');
 
         // 清理当前视频的弹幕缓存
 		currentDanmuCache = {
@@ -5003,7 +5023,7 @@ function cleanCurrentVideoCache() {
         // ✅ 不再使用 currentDanmuAnimeId
         localStorage.removeItem(`danmuSource_${titleHash}`);
 
-        console.log('✅ 已清理当前视频缓存（保留其他视频缓存）');
+        window.LibertyDebug.log('✅ 已清理当前视频缓存（保留其他视频缓存）');
     } catch (e) {
         console.warn('清理缓存失败:', e);
     }
@@ -5136,7 +5156,7 @@ async function showDanmuSourceModal() {
     modal.classList.remove('hidden');
 
     // 🔥 调试日志
-    console.log('🔍 当前弹幕源ID:', currentDanmuAnimeId);
+    window.LibertyDebug.log('🔍 当前弹幕源ID:', currentDanmuAnimeId);
 
     try {
         const cleanTitle = normalizeDanmuTitle(currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim());
@@ -5395,9 +5415,9 @@ async function switchDanmuSource(animeId, encodedSourceName) {
 // ============================================
 window.debugPlayer = function() {
     if (videoPlayer) {
-        console.log('=== VideoPlayer 状态 ===');
+        window.LibertyDebug.log('=== VideoPlayer 状态 ===');
         videoPlayer.logStatus();
-        console.log('\n=== 全局变量状态 ===');
+        window.LibertyDebug.log('\n=== 全局变量状态 ===');
         console.table({
             art: !!art,
             currentHls: !!currentHls,
@@ -5416,11 +5436,11 @@ window.cleanupPlayer = function() {
     if (videoPlayer) {
         videoPlayer.destroy();
         videoPlayer = null;
-        console.log('✅ 播放器已手动清理');
+        window.LibertyDebug.log('✅ 播放器已手动清理');
     }
 };
 
-console.log('✅ 播放器修复补丁已加载');
-console.log('💡 调试命令:');
-console.log('   - debugPlayer() : 查看播放器状态');
-console.log('   - cleanupPlayer() : 手动清理播放');
+window.LibertyDebug.log('✅ 播放器修复补丁已加载');
+window.LibertyDebug.log('💡 调试命令:');
+window.LibertyDebug.log('   - debugPlayer() : 查看播放器状态');
+window.LibertyDebug.log('   - cleanupPlayer() : 手动清理播放');

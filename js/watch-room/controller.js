@@ -1,5 +1,24 @@
 (function () {
     window.LibertyWatchRoom = window.LibertyWatchRoom || {};
+    window.LibertyDebug = window.LibertyDebug || {
+        enabled() {
+            try {
+                return localStorage.getItem('LIBRETV_DEBUG') === '1'
+                    || new URLSearchParams(window.location.search).get('debug') === '1';
+            } catch (error) {
+                return window.location.search.includes('debug=1');
+            }
+        },
+        log(...args) {
+            if (this.enabled()) console.log(...args);
+        },
+        warn(...args) {
+            if (this.enabled()) console.warn(...args);
+        },
+        trace(...args) {
+            if (this.enabled()) console.trace(...args);
+        },
+    };
 
     const HOST_SYNC_INTERVAL = 5000;
     const HOST_SEEK_THROTTLE = 100;
@@ -70,7 +89,7 @@
             const type = message.type || '';
             const payload = message.payload || {};
             if (type) {
-                console.log('[WatchRoomController] dispatch', type);
+                window.LibertyDebug.log('[WatchRoomController] dispatch', type);
             }
 
             if (type === 'room:state') return this.handleRoomState(payload, message);
@@ -107,7 +126,7 @@
                 connected: true,
                 lastRoomStateAt: Date.now(),
             };
-            console.log('[WatchRoomController] state changed', this.state.status);
+            window.LibertyDebug.log('[WatchRoomController] state changed', this.state.status);
             this.updatePlayerReady();
             this.render(this.getViewModel());
             this.reconcilePlaybackControls();
@@ -154,7 +173,7 @@
                     media: payload.media || this.state.media,
                     playback: payload.playback || this.state.playback,
                 };
-                console.log('[WatchRoomController] state changed', this.state.status);
+                window.LibertyDebug.log('[WatchRoomController] state changed', this.state.status);
                 this.render(this.getViewModel());
                 this.reconcilePlaybackControls();
                 this.player?.applyPlayback?.(payload.playback || {}, { shouldPlay: false, seekThreshold: 0.5 })
@@ -162,7 +181,7 @@
                 return null;
             }
 
-            console.log('[WatchRoomController] sync prepare', payload);
+            window.LibertyDebug.log('[WatchRoomController] sync prepare', payload);
             this.state = {
                 ...this.state,
                 status: 'starting',
@@ -178,7 +197,7 @@
                 : Math.max(0, Number(payload.currentTime) || 0);
             Promise.resolve(this.player?.seek?.(targetTime))
                 .finally(() => {
-                    console.log('[WatchRoomController] send client ready');
+                    window.LibertyDebug.log('[WatchRoomController] send client ready');
                     const sent = this.socketSend({
                         type: 'client:ready',
                         payload: {
@@ -195,7 +214,7 @@
         }
 
         handleSyncStart(payload = {}) {
-            console.log('[WatchRoomController] sync start', payload);
+            window.LibertyDebug.log('[WatchRoomController] sync start', payload);
             this.state = {
                 ...this.state,
                 status: 'playing',
@@ -212,14 +231,14 @@
         handleSyncPlay(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             this.setLastHostPlayback(payload);
-            console.log('[WatchRoomController] apply host sync', 'sync:play');
+            window.LibertyDebug.log('[WatchRoomController] apply host sync', 'sync:play');
             return this.applyPlaybackWithLock({ ...payload, paused: false }, { shouldPlay: true, seekThreshold: 1 }, true);
         }
 
         handleSyncPause(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             this.setLastHostPlayback(payload);
-            console.log('[WatchRoomController] apply host sync', 'sync:pause');
+            window.LibertyDebug.log('[WatchRoomController] apply host sync', 'sync:pause');
             return this.applyPlaybackWithLock({ ...payload, paused: true }, { shouldPlay: false, seekThreshold: 1 }, false);
         }
 
@@ -227,7 +246,7 @@
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             const shouldPlay = payload.paused === false;
             this.setLastHostPlayback(payload);
-            console.log('[WatchRoomController] apply host sync', 'sync:seek');
+            window.LibertyDebug.log('[WatchRoomController] apply host sync', 'sync:seek');
             return this.applyPlaybackWithLock(payload, { shouldPlay, forceSeek: true }, shouldPlay);
         }
 
@@ -235,7 +254,7 @@
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             const shouldPlay = payload.paused === false;
             this.setLastHostPlayback(payload);
-            console.log('[WatchRoomController] apply host sync', 'sync:state');
+            window.LibertyDebug.log('[WatchRoomController] apply host sync', 'sync:state');
             return this.applyPlaybackWithLock(payload, { shouldPlay, seekThreshold: 3 }, shouldPlay);
         }
 
@@ -264,7 +283,7 @@
 
         markReady() {
             if (this.state.role !== 'viewer' || this.state.status !== 'waiting') return false;
-            console.log('[WatchRoomController] mark ready');
+            window.LibertyDebug.log('[WatchRoomController] mark ready');
             const sent = this.socketSend({
                 type: 'viewer:ready',
                 payload: {
@@ -284,7 +303,7 @@
         startTogether() {
             if (this.state.role !== 'host' || this.state.status !== 'waiting') return false;
             const payload = this.player?.getSnapshot?.() || {};
-            console.log('[WatchRoomController] start together', payload);
+            window.LibertyDebug.log('[WatchRoomController] start together', payload);
             return this.socketSend({
                 type: 'host:start',
                 payload,
@@ -296,7 +315,7 @@
         }
 
         leaveRoom(reason = 'user_leave') {
-            console.log('[WatchRoomController] leave room', { reason });
+            window.LibertyDebug.log('[WatchRoomController] leave room', { reason });
             this.cleanupLocalState(reason);
             if (this.socketClose) {
                 this.socketClose(true);
@@ -318,7 +337,7 @@
                 connected: false,
             };
             this.clearSessionStorage();
-            console.log('[WatchRoomController] local state cleaned', { reason });
+            window.LibertyDebug.log('[WatchRoomController] local state cleaned', { reason });
         }
 
         clearSessionStorage() {
@@ -341,7 +360,7 @@
         applyPlayingRecovery(playback = {}) {
             const shouldPlay = playback.paused !== true;
             this.setLastHostPlayback(playback);
-            console.log('[WatchRoomController] room state playing recovery', playback);
+            window.LibertyDebug.log('[WatchRoomController] room state playing recovery', playback);
             return this.applyPlaybackWithLock(playback, { shouldPlay, seekThreshold: 3 }, shouldPlay);
         }
 
@@ -392,13 +411,13 @@
             const blockReason = this.canSendHostPlaybackEvent(type);
             if (blockReason) {
                 if (type !== 'host:sync') {
-                    console.warn('[WatchRoomController] host event ignored', { reason: blockReason, type });
+                    window.LibertyDebug.warn('[WatchRoomController] host event ignored', { reason: blockReason, type });
                 }
                 return false;
             }
 
             const payload = this.player.getSnapshot();
-            console.log('[WatchRoomController] send host event', { type, payload });
+            window.LibertyDebug.log('[WatchRoomController] send host event', { type, payload });
             return this.socketSend({ type, payload });
         }
 
@@ -421,23 +440,23 @@
 
             const listeners = [
                 this.player.onLocalPlay?.(() => {
-                    console.log('[WatchRoomController] host local play');
+                    window.LibertyDebug.log('[WatchRoomController] host local play');
                     this.sendHostPlaybackEvent('host:play');
                 }),
                 this.player.onLocalPause?.(() => {
-                    console.log('[WatchRoomController] host local pause');
+                    window.LibertyDebug.log('[WatchRoomController] host local pause');
                     this.sendHostPlaybackEvent('host:pause');
                 }),
                 this.player.onLocalSeeking?.(() => {
-                    console.log('[WatchRoomController] host local seeking');
+                    window.LibertyDebug.log('[WatchRoomController] host local seeking');
                     this.throttleHostSeeking();
                 }),
                 this.player.onLocalSeek?.(() => {
-                    console.log('[WatchRoomController] host local seeked');
+                    window.LibertyDebug.log('[WatchRoomController] host local seeked');
                     this.sendFinalHostSeek();
                 }),
                 this.player.onLocalRateChange?.(() => {
-                    console.log('[WatchRoomController] host local ratechange');
+                    window.LibertyDebug.log('[WatchRoomController] host local ratechange');
                     this.sendHostPlaybackEvent('host:sync');
                 }),
             ].filter(Boolean);
@@ -572,13 +591,13 @@
             if (now - this.lastViewerReadonlyToastAt < VIEWER_READONLY_TOAST_INTERVAL) return;
             this.lastViewerReadonlyToastAt = now;
             this.toast('播放控制已由房主托管', 'info');
-            console.log('[WatchRoomController] viewer readonly control blocked', { reason });
+            window.LibertyDebug.log('[WatchRoomController] viewer readonly control blocked', { reason });
         }
 
         restoreViewerToHostState(reason) {
             if (!this.lastHostPlayback) return null;
             const shouldPlay = this.lastHostPlayback.paused !== true;
-            console.log('[WatchRoomController] restore viewer to host state', { reason });
+            window.LibertyDebug.log('[WatchRoomController] restore viewer to host state', { reason });
             return this.applyPlaybackWithLock(
                 this.lastHostPlayback,
                 { shouldPlay, forceSeek: true },

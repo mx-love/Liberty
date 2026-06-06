@@ -1,5 +1,24 @@
 (function () {
     window.LibertyWatchRoom = window.LibertyWatchRoom || {};
+    window.LibertyDebug = window.LibertyDebug || {
+        enabled() {
+            try {
+                return localStorage.getItem('LIBRETV_DEBUG') === '1'
+                    || new URLSearchParams(window.location.search).get('debug') === '1';
+            } catch (error) {
+                return window.location.search.includes('debug=1');
+            }
+        },
+        log(...args) {
+            if (this.enabled()) console.log(...args);
+        },
+        warn(...args) {
+            if (this.enabled()) console.warn(...args);
+        },
+        trace(...args) {
+            if (this.enabled()) console.trace(...args);
+        },
+    };
 
     const SESSION_ROOM_ID_KEY = 'watchRoomId';
     const SESSION_ROOM_ROLE_KEY = 'watchRoomRole';
@@ -213,7 +232,7 @@
 
     function logVideoCandidates() {
         try {
-            console.log('[WatchRoomDebug] videos', [...document.querySelectorAll('video')].map(getVideoDebugInfo));
+            window.LibertyDebug.log('[WatchRoomDebug] videos', [...document.querySelectorAll('video')].map(getVideoDebugInfo));
         } catch (error) {}
     }
 
@@ -271,7 +290,7 @@
             playbackRate,
             updatedAt: Date.now()
         };
-        console.log('[WatchRoom] playback snapshot', snapshot);
+        window.LibertyDebug.log('[WatchRoom] playback snapshot', snapshot);
         return snapshot;
     }
 
@@ -546,20 +565,20 @@
     }
 
     function enterHostPlayback(payload = {}, message = {}) {
-        console.log('[WatchRoom] isPlayerPage', isPlayerPage());
+        window.LibertyDebug.log('[WatchRoom] isPlayerPage', isPlayerPage());
         if (isPlayerPage()) {
-            console.log('[WatchRoom] skip redirect on player page');
+            window.LibertyDebug.log('[WatchRoom] skip redirect on player page');
             return false;
         }
 
         if (isRedirectingToPlayer) {
-            console.warn('[WatchRoom] duplicate redirect skipped');
+            window.LibertyDebug.warn('[WatchRoom] duplicate redirect skipped');
             return false;
         }
 
         const media = payload.media || {};
         const playback = payload.playback || {};
-        console.log('[WatchRoom] viewer redirect check', { media, playback });
+        window.LibertyDebug.log('[WatchRoom] viewer redirect check', { media, playback });
 
         const session = buildPlaybackSessionFromRoomState(payload);
         if (!session) {
@@ -578,11 +597,11 @@
         };
 
         persistRoomSession(room);
-        console.log('[WatchRoom] writing playback session');
+        window.LibertyDebug.log('[WatchRoom] writing playback session');
         writePlaybackSessionForViewer(session);
         const playerUrl = buildPlayerUrl(session, playback);
         if (isCurrentPlayerUrl(playerUrl)) {
-            console.log('[WatchRoom] already at target player url, skip reload');
+            window.LibertyDebug.log('[WatchRoom] already at target player url, skip reload');
             return false;
         }
 
@@ -590,7 +609,7 @@
         writeSessionValue(SESSION_REDIRECTING_KEY, '1');
         closeSocket(false);
         showMessage('已加入一起看，正在进入播放页', 'success');
-        console.log('[WatchRoom] redirecting to player', playerUrl);
+        window.LibertyDebug.log('[WatchRoom] redirecting to player', playerUrl);
         window.location.href = playerUrl;
         return true;
     }
@@ -698,14 +717,14 @@
         const isWaitingHost = isHost && activeRoom.status === 'waiting';
         const canStart = isWaitingHost && areAllViewersReady();
         const viewerReadyButtonText = isViewer ? getViewerReadyButtonText() : '';
-        console.log('[WatchRoom] watch room modal render', {
+        window.LibertyDebug.log('[WatchRoom] watch room modal render', {
             localTechnicalReady,
             localUserReady,
             roomStatus: activeRoom.status,
             role: activeRoom.role
         });
         if (isViewer) {
-            console.log('[WatchRoom] ready button render state', {
+            window.LibertyDebug.log('[WatchRoom] ready button render state', {
                 localTechnicalReady,
                 localUserReady,
                 buttonText: viewerReadyButtonText
@@ -808,7 +827,7 @@
         activeRoom = room;
         syncControllerContext(room);
         if (previousStatus !== activeRoom?.status) {
-            console.log('[WatchRoom] room status updated', activeRoom?.status);
+            window.LibertyDebug.log('[WatchRoom] room status updated', activeRoom?.status);
         }
         updatePlayerWatchRoomButton();
         setupPlayerSyncForRoom();
@@ -943,7 +962,7 @@
 
         const oldVideo = boundGateVideo;
         if (oldVideo) {
-            console.log('[WatchRoomDebug] rebind playback gate video', {
+            window.LibertyDebug.log('[WatchRoomDebug] rebind playback gate video', {
                 old: getVideoDebugInfo(oldVideo),
                 current: getVideoDebugInfo(currentVideo),
             });
@@ -954,7 +973,7 @@
         currentVideo.addEventListener('playing', handleLocalVideoPlay, true);
         currentVideo.addEventListener('timeupdate', handleLocalVideoTimeUpdate, true);
         currentVideo.addEventListener('seeking', handleLocalVideoSeeking, true);
-        console.log('[WatchRoom] playback gate bound to video', getVideoDebugInfo(currentVideo));
+        window.LibertyDebug.log('[WatchRoom] playback gate bound to video', getVideoDebugInfo(currentVideo));
         logVideoCandidates();
     }
 
@@ -974,7 +993,7 @@
     }
 
     function logPlaybackGateCheck(reason, result) {
-        console.log('[WatchRoomDebug] gate check', {
+        window.LibertyDebug.log('[WatchRoomDebug] gate check', {
             reason,
             result,
             roomId: activeRoom?.roomId,
@@ -994,7 +1013,7 @@
         const video = getActiveVideoElement();
         const targetTime = Number(waitTargetTime) || 0;
 
-        console.log('[WatchRoomDebug] pause before', {
+        window.LibertyDebug.log('[WatchRoomDebug] pause before', {
             reason,
             currentTime: video?.currentTime,
             paused: video?.paused,
@@ -1024,7 +1043,7 @@
         const now = Date.now();
         if (reason !== 'timeupdate' || now - lastPlaybackGateLogAt > 1000) {
             lastPlaybackGateLogAt = now;
-            console.log('[WatchRoom] local playback blocked', {
+            window.LibertyDebug.log('[WatchRoom] local playback blocked', {
                 reason,
                 roomStatus: activeRoom?.status,
                 role: activeRoom?.role,
@@ -1034,7 +1053,7 @@
         }
 
         window.setTimeout(() => {
-            console.log('[WatchRoomDebug] pause after', {
+            window.LibertyDebug.log('[WatchRoomDebug] pause after', {
                 reason,
                 currentTime: video?.currentTime,
                 paused: video?.paused,
@@ -1048,7 +1067,7 @@
 
     function enterHostWaitingMode(snapshot = {}) {
         waitTargetTime = Math.max(0, Number(snapshot.currentTime) || 0);
-        console.log('[WatchRoom] host enter waiting mode', {
+        window.LibertyDebug.log('[WatchRoom] host enter waiting mode', {
             currentTime: waitTargetTime,
             duration: snapshot.duration,
             playbackRate: snapshot.playbackRate,
@@ -1074,13 +1093,13 @@
         enforceWatchRoomPause('host_enter_waiting');
         window.setTimeout(() => {
             const video = getActiveVideoElement();
-            console.log('[WatchRoom] host waiting pause verify', {
+            window.LibertyDebug.log('[WatchRoom] host waiting pause verify', {
                 paused: video?.paused,
                 currentTime: video?.currentTime,
                 roomStatus: activeRoom?.status,
             });
             if (video && !video.paused) {
-                console.warn('[WatchRoom] host waiting pause verify failed, retry pause');
+                window.LibertyDebug.warn('[WatchRoom] host waiting pause verify failed, retry pause');
                 enforceWatchRoomPause('host_enter_waiting_retry');
             }
         }, 50);
@@ -1091,7 +1110,7 @@
         const shouldBlock = shouldBlockLocalPlayback();
         logPlaybackGateCheck(event?.type || 'play', shouldBlock);
         if (!shouldBlock) return;
-        console.trace('[WatchRoomDebug] video play event while blocked');
+        window.LibertyDebug.trace('[WatchRoomDebug] video play event while blocked');
         enforceWatchRoomPause(event?.type || 'play');
     }
 
@@ -1104,7 +1123,7 @@
         if (now - lastBlockedTimeupdateLogAt > 1000) {
             lastBlockedTimeupdateLogAt = now;
             const targetTime = Number(waitTargetTime) || 0;
-            console.log('[WatchRoomDebug] blocked timeupdate', {
+            window.LibertyDebug.log('[WatchRoomDebug] blocked timeupdate', {
                 currentTime: video.currentTime,
                 paused: video.paused,
                 waitTargetTime: targetTime,
@@ -1117,7 +1136,7 @@
             && ['waiting', 'starting'].includes(activeRoom?.status)
             && Math.abs((Number(video.currentTime) || 0) - (Number(waitTargetTime) || 0)) > 1
         ) {
-            console.log('[WatchRoom] host playback drift blocked', {
+            window.LibertyDebug.log('[WatchRoom] host playback drift blocked', {
                 currentTime: video.currentTime,
                 waitTargetTime,
                 roomStatus: activeRoom.status,
@@ -1157,7 +1176,7 @@
     function sendHostPlaybackEvent(type) {
         if (!canBroadcastHostSync()) {
             if (type !== 'host:sync') {
-                console.warn('[WatchRoom] host event blocked', {
+                window.LibertyDebug.warn('[WatchRoom] host event blocked', {
                     reason: getHostSyncBlockReason(),
                     role: activeRoom?.role,
                     socketReady: socket?.readyState === WebSocket.OPEN,
@@ -1170,7 +1189,7 @@
 
         const payload = getPlaybackSyncPayload();
         if (type !== 'host:sync') {
-            console.log('[WatchRoom] send host event', {
+            window.LibertyDebug.log('[WatchRoom] send host event', {
                 type,
                 currentTime: payload.currentTime,
                 roomStatus: activeRoom?.status
@@ -1200,7 +1219,7 @@
                 activeRoom?.role === 'host'
                 && ['waiting', 'starting'].includes(activeRoom?.status)
             ) {
-                console.log('[WatchRoom] host play blocked in waiting, use start button');
+                window.LibertyDebug.log('[WatchRoom] host play blocked in waiting, use start button');
                 enforceWatchRoomPause('host_play_waiting');
                 showMessage(
                     activeRoom.status === 'starting'
@@ -1235,7 +1254,7 @@
                 || isApplyingRemoteSync
             ) return;
 
-            console.log('[WatchRoom] viewer play blocked in waiting');
+            window.LibertyDebug.log('[WatchRoom] viewer play blocked in waiting');
             isApplyingRemoteSync = true;
             try {
                 video.pause();
@@ -1280,7 +1299,7 @@
                 }
 
                 const video = getWatchRoomVideoElement();
-                console.log('[WatchRoom] viewer technical ready fallback check', {
+                window.LibertyDebug.log('[WatchRoom] viewer technical ready fallback check', {
                     role: activeRoom?.role,
                     roomStatus: activeRoom?.status,
                     hasActiveRoom: Boolean(activeRoom),
@@ -1327,7 +1346,7 @@
             const finishReady = (allowFallback = false) => {
                 if (viewerInitialSyncComplete) return;
                 const diff = Math.abs((Number(video.currentTime) || 0) - targetTime);
-                console.log('[WatchRoom] viewer technical ready check', {
+                window.LibertyDebug.log('[WatchRoom] viewer technical ready check', {
                     role: activeRoom?.role,
                     roomStatus: status,
                     hasActiveRoom: Boolean(activeRoom),
@@ -1342,7 +1361,7 @@
                 });
                 if (!allowFallback && diff > 1.5 && retryCount < 1) {
                     retryCount += 1;
-                    console.warn('[WatchRoom] viewer technical ready seek retry', {
+                    window.LibertyDebug.warn('[WatchRoom] viewer technical ready seek retry', {
                         currentTime: Number(video.currentTime) || 0,
                         waitTargetTime: targetTime,
                         diff,
@@ -1355,7 +1374,7 @@
                     return;
                 }
                 if (diff > 1.5) {
-                    console.warn('[WatchRoom] viewer technical ready with seek drift', {
+                    window.LibertyDebug.warn('[WatchRoom] viewer technical ready with seek drift', {
                         currentTime: Number(video.currentTime) || 0,
                         waitTargetTime: targetTime,
                         diff,
@@ -1389,21 +1408,21 @@
 
         localTechnicalReady = true;
         viewerInitialSyncComplete = true;
-        console.log('[WatchRoom] viewer technical ready true');
-        console.log('[WatchRoom] viewer technical ready true, render ready button', {
+        window.LibertyDebug.log('[WatchRoom] viewer technical ready true');
+        window.LibertyDebug.log('[WatchRoom] viewer technical ready true, render ready button', {
             localTechnicalReady,
             localUserReady,
             roomStatus: activeRoom?.status || status,
             role: activeRoom?.role,
             fallback
         });
-        console.log('[WatchRoom] viewer technical ready', {
+        window.LibertyDebug.log('[WatchRoom] viewer technical ready', {
             currentTime: Number(video?.currentTime) || 0,
             waitTargetTime: targetTime,
             paused: video?.paused
         });
         if (status === 'playing') {
-            console.log('[WatchRoomAudit] initial sync completed without playback; waiting for sync:start or host control');
+            window.LibertyDebug.log('[WatchRoomAudit] initial sync completed without playback; waiting for sync:start or host control');
         } else {
             showMessage('正在等待房主开始播放', 'info');
         }
@@ -1419,7 +1438,7 @@
     function sendViewerReady(currentTime) {
         if (viewerReadySent) return false;
 
-        console.log('[WatchRoom] viewer ready sent');
+        window.LibertyDebug.log('[WatchRoom] viewer ready sent');
         const sent = sendSocketMessage({
             type: 'viewer:ready',
             payload: {
@@ -1439,7 +1458,7 @@
     function markViewerUserReady() {
         if (activeRoom?.role !== 'viewer' || activeRoom?.status !== 'waiting') return;
 
-        console.log('[WatchRoom] viewer manual ready clicked');
+        window.LibertyDebug.log('[WatchRoom] viewer manual ready clicked');
 
         const controller = getWatchRoomController();
         if (controller?.markReady?.()) {
@@ -1468,7 +1487,7 @@
     function handleSyncPrepare(payload = {}) {
         if (!isPlayerPage() || !activeRoom) return;
 
-        console.log('[WatchRoom] received sync:prepare', payload);
+        window.LibertyDebug.log('[WatchRoom] received sync:prepare', payload);
         setActiveRoom({
             ...(activeRoom || {}),
             status: 'starting'
@@ -1512,7 +1531,7 @@
             const finishReady = () => {
                 if (readySent) return;
                 readySent = true;
-                console.log('[WatchRoom] send client:ready', {
+                window.LibertyDebug.log('[WatchRoom] send client:ready', {
                     roomId: activeRoom?.roomId,
                     role: activeRoom?.role,
                     clientId: activeRoom?.clientId
@@ -1556,7 +1575,7 @@
     function handleSyncStart(payload = {}) {
         if (!isPlayerPage() || !activeRoom) return;
 
-        console.log('[WatchRoom] received sync:start', payload);
+        window.LibertyDebug.log('[WatchRoom] received sync:start', payload);
         if (startingWatchdogTimer) {
             window.clearTimeout(startingWatchdogTimer);
             startingWatchdogTimer = null;
@@ -1565,7 +1584,7 @@
             ...(activeRoom || {}),
             status: 'playing'
         });
-        console.log('[WatchRoom] playback gate released');
+        window.LibertyDebug.log('[WatchRoom] playback gate released');
         viewerInitialSyncComplete = true;
 
         waitForVideoReady((video) => {
@@ -1597,7 +1616,7 @@
         if (!isPlayerPage() || !room?.roomId || room.status !== 'playing') return;
 
         const playback = payload.playback || {};
-        console.log('[WatchRoom] room state playing recovery', {
+        window.LibertyDebug.log('[WatchRoom] room state playing recovery', {
             roomId: room.roomId,
             role: room.role,
             playback
@@ -1605,7 +1624,7 @@
 
         localTechnicalReady = true;
         viewerInitialSyncComplete = true;
-        console.log('[WatchRoom] playback gate released by playing recovery');
+        window.LibertyDebug.log('[WatchRoom] playback gate released by playing recovery');
 
         waitForVideoReady((video) => {
             if (!video) return;
@@ -1625,7 +1644,7 @@
                 if (playback.paused === true) {
                     if (!video.paused) video.pause();
                 } else {
-                    console.log('[WatchRoom] try play from room state playing', {
+                    window.LibertyDebug.log('[WatchRoom] try play from room state playing', {
                         targetTime,
                         paused: playback?.paused
                     });
@@ -1688,7 +1707,7 @@
         const shouldSeek = isSeekEvent || diff > 3;
 
         isApplyingRemoteSync = true;
-        console.log('[WatchRoom] applying remote sync', {
+        window.LibertyDebug.log('[WatchRoom] applying remote sync', {
             type,
             currentTime: targetTime,
             paused: payload.paused
@@ -1731,12 +1750,12 @@
     }
 
     async function createRoom() {
-        console.log('[WatchRoom] host create room clicked');
+        window.LibertyDebug.log('[WatchRoom] host create room clicked');
         showMessage('正在创建房间...', 'info');
 
         try {
             const createPayload = buildCreatePayload();
-            console.log('[WatchRoom] host playback snapshot before waiting', createPayload.playback);
+            window.LibertyDebug.log('[WatchRoom] host playback snapshot before waiting', createPayload.playback);
             enterHostWaitingMode(createPayload.playback);
             const response = await fetch('/api/watch/create', {
                 method: 'POST',
@@ -1804,7 +1823,7 @@
         if (activeRoom?.role !== 'host') return;
         if (activeRoom?.status !== 'waiting') return;
 
-        console.log('[WatchRoom] start together button clicked', {
+        window.LibertyDebug.log('[WatchRoom] start together button clicked', {
             roomId: activeRoom?.roomId,
             role: activeRoom?.role,
             roomStatus: activeRoom?.status
@@ -1829,7 +1848,7 @@
 
         isStartingWatchRoom = true;
         const payload = getPlaybackSyncPayload();
-        console.log('[WatchRoom] send host:start', payload);
+        window.LibertyDebug.log('[WatchRoom] send host:start', payload);
 
         const sent = sendSocketMessage({
             type: 'host:start',
@@ -1864,7 +1883,7 @@
     async function fetchRoomState(roomId) {
         const url = new URL('/api/watch/state', window.location.origin);
         url.searchParams.set('room', roomId);
-        console.log('[WatchRoom] fetching room state', roomId);
+        window.LibertyDebug.log('[WatchRoom] fetching room state', roomId);
 
         try {
             const response = await fetch(url.toString(), {
@@ -1894,7 +1913,7 @@
                 return null;
             }
 
-            console.log('[WatchRoom] room state received', data);
+            window.LibertyDebug.log('[WatchRoom] room state received', data);
             return data;
         } catch (error) {
             showMessage('一起看连接失败', 'error');
@@ -1911,12 +1930,12 @@
         socket.addEventListener('open', () => {
             startHeartbeat();
             if (role === 'viewer') {
-                console.log('[WatchRoom] viewer socket connected', {
+                window.LibertyDebug.log('[WatchRoom] viewer socket connected', {
                     roomId,
                     role,
                     clientId: clientId || '(server-generated)'
                 });
-                console.log('[WatchRoom] join room success', roomId);
+                window.LibertyDebug.log('[WatchRoom] join room success', roomId);
                 showMessage('已连接一起看房间', 'success');
             }
         });
@@ -1976,7 +1995,7 @@
 
         if (message.type === 'room:state') {
             const payload = message.payload || {};
-            console.log('[WatchRoom] room:state received', payload);
+            window.LibertyDebug.log('[WatchRoom] room:state received', payload);
             const room = {
                 ...(activeRoom || {}),
                 roomId: message.roomId || payload.roomId || activeRoom?.roomId,
@@ -1994,7 +2013,7 @@
             persistRoomSession(room);
 
             if (room.role === 'viewer' && isPlayerPage()) {
-                console.log('[WatchRoom] skip redirect on player page');
+                window.LibertyDebug.log('[WatchRoom] skip redirect on player page');
                 if (room.status === 'playing') {
                     recoverPlayingFromRoomState(payload, room);
                 } else {
@@ -2025,7 +2044,7 @@
         }
 
         if (message.type === 'sync:start') {
-            console.log('[WatchRoom] received sync event', {
+            window.LibertyDebug.log('[WatchRoom] received sync event', {
                 type: message.type,
                 payload: message.payload || {}
             });
@@ -2034,7 +2053,7 @@
         }
 
         if (['sync:play', 'sync:pause', 'sync:seek', 'sync:state'].includes(message.type)) {
-            console.log('[WatchRoom] received sync event', {
+            window.LibertyDebug.log('[WatchRoom] received sync event', {
                 type: message.type,
                 payload: message.payload || {}
             });

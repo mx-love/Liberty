@@ -1,5 +1,24 @@
 (function () {
     window.LibertyWatchRoom = window.LibertyWatchRoom || {};
+    window.LibertyDebug = window.LibertyDebug || {
+        enabled() {
+            try {
+                return localStorage.getItem('LIBRETV_DEBUG') === '1'
+                    || new URLSearchParams(window.location.search).get('debug') === '1';
+            } catch (error) {
+                return window.location.search.includes('debug=1');
+            }
+        },
+        log(...args) {
+            if (this.enabled()) console.log(...args);
+        },
+        warn(...args) {
+            if (this.enabled()) console.warn(...args);
+        },
+        trace(...args) {
+            if (this.enabled()) console.trace(...args);
+        },
+    };
 
     class WatchRoomPlayerAdapter {
         constructor() {

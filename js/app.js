@@ -1,3 +1,23 @@
+window.LibertyDebug = window.LibertyDebug || {
+    enabled() {
+        try {
+            return localStorage.getItem('LIBRETV_DEBUG') === '1'
+                || new URLSearchParams(window.location.search).get('debug') === '1';
+        } catch (error) {
+            return window.location.search.includes('debug=1');
+        }
+    },
+    log(...args) {
+        if (this.enabled()) console.log(...args);
+    },
+    warn(...args) {
+        if (this.enabled()) console.warn(...args);
+    },
+    trace(...args) {
+        if (this.enabled()) console.trace(...args);
+    },
+};
+
 // 全局变量
 let selectedAPIs = window.LibertyUtils?.storage
     ? window.LibertyUtils.storage.readStorage('selectedAPIs', ["tyyszy", "dyttzy", "bfzy", "ruyi"])
@@ -2009,7 +2029,7 @@ async function showDetails(id, vod_name, sourceCode) {
                 </div>
             `;
         } else {
-            console.warn('[Detail Debug] 未找到可播放资源', {
+            window.LibertyDebug.warn('[Detail Debug] 未找到可播放资源', {
                 sourceCode,
                 id,
                 episodes: data?.episodes,
