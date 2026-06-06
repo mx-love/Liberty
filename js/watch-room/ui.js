@@ -12,6 +12,7 @@
     let hostSyncTimer = null;
     let hostSeekDebounceTimer = null;
     let playerSyncSetupTimer = null;
+    let startingWatchdogTimer = null;
     let playerSyncVideo = null;
     let playerSyncRole = '';
     let playerSyncCleanupCallbacks = [];
@@ -773,6 +774,10 @@
             window.clearTimeout(hostSeekDebounceTimer);
             hostSeekDebounceTimer = null;
         }
+        if (startingWatchdogTimer) {
+            window.clearTimeout(startingWatchdogTimer);
+            startingWatchdogTimer = null;
+        }
         if (playbackGateRetryTimer) {
             window.clearTimeout(playbackGateRetryTimer);
             playbackGateRetryTimer = null;
@@ -1357,6 +1362,19 @@
             ...(activeRoom || {}),
             status: 'starting'
         });
+        if (startingWatchdogTimer) {
+            window.clearTimeout(startingWatchdogTimer);
+        }
+        startingWatchdogTimer = window.setTimeout(() => {
+            if (activeRoom?.status === 'starting') {
+                console.warn('[WatchRoom] room still starting after 5s', {
+                    roomId: activeRoom?.roomId,
+                    role: activeRoom?.role,
+                    clientId: activeRoom?.clientId,
+                    socketReady: socket?.readyState
+                });
+            }
+        }, 5000);
 
         waitForVideoReady((video) => {
             if (!video) return;
@@ -1383,14 +1401,26 @@
             const finishReady = () => {
                 if (readySent) return;
                 readySent = true;
-                console.log('[WatchRoom] client ready for starting');
-                sendSocketMessage({
+                console.log('[WatchRoom] send client:ready', {
+                    roomId: activeRoom?.roomId,
+                    role: activeRoom?.role,
+                    clientId: activeRoom?.clientId
+                });
+                const sent = sendSocketMessage({
                     type: 'client:ready',
                     payload: {
                         currentTime: targetTime,
                         readyAt: Date.now()
                     }
                 });
+                if (!sent) {
+                    console.warn('[WatchRoom] send client:ready failed', {
+                        roomId: activeRoom?.roomId,
+                        role: activeRoom?.role,
+                        clientId: activeRoom?.clientId,
+                        socketReady: socket?.readyState
+                    });
+                }
                 window.setTimeout(() => {
                     isApplyingRemoteSync = false;
                 }, REMOTE_SYNC_LOCK_MS);
@@ -1416,6 +1446,10 @@
         if (!isPlayerPage() || !activeRoom) return;
 
         console.log('[WatchRoom] received sync:start', payload);
+        if (startingWatchdogTimer) {
+            window.clearTimeout(startingWatchdogTimer);
+            startingWatchdogTimer = null;
+        }
         setActiveRoom({
             ...(activeRoom || {}),
             status: 'playing'

@@ -58,6 +58,14 @@ function getParticipantList(participants = {}) {
     }));
 }
 
+function getStartingReadyState(room = {}) {
+    const participants = Object.values(room.participants || {});
+    return {
+        readyCount: participants.filter((participant) => participant.startingReady).length,
+        expectedCount: participants.length,
+    };
+}
+
 function isHostControlEvent(type) {
     return ['host:play', 'host:pause', 'host:seek', 'host:sync'].includes(type);
 }
@@ -159,6 +167,11 @@ export class WatchRoomDurableObject {
         }
 
         return jsonResponse({ success: false, error: 'Not found' }, 404);
+    }
+
+    async alarm() {
+        console.log('[WatchRoomDO] starting timeout reached');
+        await this.maybeEnterPlaying('', true);
     }
 
     async readRoom() {
@@ -588,14 +601,20 @@ export class WatchRoomDurableObject {
         console.log('[WatchRoomDO] room status changed to starting', {
             roomId: room.roomId,
         });
+        console.log('[WatchRoomDO] broadcast sync:prepare', {
+            roomId: room.roomId,
+            payload: preparePayload,
+        });
         this.broadcastToAll(buildMessage('sync:prepare', room.roomId, session.clientId, {
             ...preparePayload,
             status: ROOM_STATUS.STARTING,
             sourceClientId: session.clientId,
         }));
         await this.broadcastParticipants(room);
+        await this.state.storage.setAlarm(now() + 3000);
 
         setTimeout(() => {
+            console.log('[WatchRoomDO] starting timeout reached');
             this.maybeEnterPlaying(room.hostId, true).catch((error) => {
                 console.warn('[WatchRoomDO] start timeout failed', error?.message || String(error));
             });
@@ -632,11 +651,12 @@ export class WatchRoomDurableObject {
             await this.writeRoom(room);
         }
 
-        console.log('[WatchRoomDO] client ready received', {
+        console.log('[WatchRoomDO] client:ready received', {
             roomId: room.roomId,
             clientId: session.clientId,
             role: session.role,
         });
+        console.log('[WatchRoomDO] starting ready state', getStartingReadyState(room));
         await this.broadcastParticipants(room);
         await this.maybeEnterPlaying(room.hostId, false);
     }
@@ -655,6 +675,8 @@ export class WatchRoomDurableObject {
     async maybeEnterPlaying(sourceClientId, force = false) {
         const room = await this.readRoom();
         if (!room || room.status !== ROOM_STATUS.STARTING) return;
+        const readyState = getStartingReadyState(room);
+        console.log('[WatchRoomDO] starting ready state', readyState);
         if (!force && !this.areStartingClientsReady(room)) return;
 
         const playback = normalizeStartPlayback({
@@ -666,6 +688,9 @@ export class WatchRoomDurableObject {
         delete room.startPayload;
         delete room.startingStartedAt;
         await this.writeRoom(room);
+        try {
+            await this.state.storage.deleteAlarm();
+        } catch (error) {}
         console.log('[WatchRoomDO] room status changed to playing', {
             roomId: room.roomId,
             playback,
