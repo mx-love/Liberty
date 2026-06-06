@@ -33,6 +33,8 @@
     let boundGateVideo = null;
     let playbackGateRetryTimer = null;
     let waitTargetTime = 0;
+    let watchRoomPlayerAdapter = null;
+    let watchRoomController = null;
 
     const HOST_SYNC_INTERVAL = 5000;
     const HOST_SEEK_DEBOUNCE = 300;
@@ -46,6 +48,104 @@
         }
 
         console[type === 'error' ? 'error' : 'log'](`[WatchRoom] ${message}`);
+    }
+
+    function handleControllerRoomEnded() {
+        showMessage('房主已结束一起看', 'info');
+        clearRoomState();
+    }
+
+    function handleControllerRoomError(payload = {}) {
+        showMessage(getErrorMessage(payload.code) || payload.message || '一起看发生错误', 'error');
+        if (
+            activeRoom?.role === 'host'
+            && ['VIEWERS_NOT_READY', 'UNAUTHORIZED_ACTION'].includes(payload.code)
+            && activeRoom.status === 'starting'
+        ) {
+            isStartingWatchRoom = false;
+            setActiveRoom({
+                ...(activeRoom || {}),
+                status: 'waiting'
+            });
+        }
+        if (activeRoom?.role === 'viewer') {
+            clearRoomState();
+        }
+    }
+
+    function getWatchRoomController() {
+        if (watchRoomController) return watchRoomController;
+
+        const PlayerAdapter = window.LibertyWatchRoom?.PlayerAdapter;
+        const Controller = window.LibertyWatchRoom?.Controller;
+        if (!PlayerAdapter || !Controller) return null;
+
+        watchRoomPlayerAdapter = watchRoomPlayerAdapter || new PlayerAdapter();
+        watchRoomController = new Controller({
+            player: watchRoomPlayerAdapter,
+            socketSend: sendSocketMessage,
+            render: syncLegacyStateFromController,
+            toast: showMessage,
+            onEnded: handleControllerRoomEnded,
+            onError: handleControllerRoomError,
+        });
+        return watchRoomController;
+    }
+
+    function syncControllerContext(room) {
+        const controller = getWatchRoomController();
+        if (!controller || !room) return;
+        controller.setContext({
+            roomId: room.roomId || '',
+            clientId: room.clientId || '',
+            role: room.role || '',
+            status: room.status || 'idle',
+            participants: Array.isArray(room.participants) ? room.participants : [],
+            participantCount: room.participantCount || room.participantsCount || room.participants?.length || 0,
+            maxMembers: room.maxMembers || 10,
+            connected: Boolean(room.roomId),
+        });
+    }
+
+    function syncLegacyStateFromController(viewModel = {}) {
+        if (!viewModel.roomId && viewModel.status === 'idle') return;
+
+        activeRoom = {
+            ...(activeRoom || {}),
+            roomId: viewModel.roomId || activeRoom?.roomId || '',
+            clientId: viewModel.clientId || activeRoom?.clientId || '',
+            role: viewModel.role || activeRoom?.role || '',
+            status: viewModel.status || activeRoom?.status || 'waiting',
+            participants: Array.isArray(viewModel.participants) ? viewModel.participants : activeRoom?.participants || [],
+            participantCount: Array.isArray(viewModel.participants)
+                ? (viewModel.participantCount || viewModel.participants.length)
+                : viewModel.participantCount || activeRoom?.participantCount || 1,
+            maxMembers: viewModel.maxMembers || activeRoom?.maxMembers || 10,
+        };
+
+        if (activeRoom.role === 'viewer') {
+            localUserReady = Boolean(viewModel.userReady);
+            if (['starting', 'playing'].includes(activeRoom.status)) {
+                localTechnicalReady = true;
+            }
+        }
+
+        if (
+            ['waiting', 'starting'].includes(activeRoom.status)
+            && viewModel.playback
+            && Number.isFinite(Number(viewModel.playback.currentTime))
+        ) {
+            waitTargetTime = Math.max(0, Number(viewModel.playback.currentTime) || 0);
+        }
+
+        if (activeRoom.roomId && activeRoom.role) {
+            persistRoomSession(activeRoom);
+        }
+
+        updatePlayerWatchRoomButton();
+        if (!document.getElementById('watchRoomModal')?.classList.contains('hidden')) {
+            renderWatchRoomPanel();
+        }
     }
 
     function cleanRoomId(value = '') {
@@ -564,7 +664,6 @@
     function getViewerReadyStatusText() {
         if (activeRoom?.status === 'playing') return '一起看中';
         if (activeRoom?.status === 'starting') return '准备开播中';
-        if (!localTechnicalReady) return '视频准备中';
         if (localUserReady || getLocalParticipant()?.ready) return '已准备';
         return '未准备';
     }
@@ -704,6 +803,7 @@
     function setActiveRoom(room) {
         const previousStatus = activeRoom?.status;
         activeRoom = room;
+        syncControllerContext(room);
         if (previousStatus !== activeRoom?.status) {
             console.log('[WatchRoom] room status updated', activeRoom?.status);
         }
@@ -1335,6 +1435,11 @@
 
         console.log('[WatchRoom] viewer manual ready clicked');
 
+        const controller = getWatchRoomController();
+        if (controller?.markReady?.()) {
+            return;
+        }
+
         const video = getWatchRoomVideoElement();
         if (video && !video.paused) {
             enforceWatchRoomPause('manual_ready');
@@ -1645,14 +1750,20 @@
             const room = {
                 roomId: data.roomId,
                 role: 'host',
-                clientId: data.clientId,
+                clientId: data.clientId || data.hostId,
                 participantCount: 1,
                 maxMembers: data.maxMembers || 10,
-                status: data.status || 'waiting'
+                status: data.status || 'waiting',
+                participants: [{
+                    id: data.clientId || data.hostId,
+                    role: 'host',
+                    name: '房主',
+                    ready: true
+                }]
             };
             setActiveRoom(room);
             persistRoomSession(room);
-            connectRoomSocket(data.roomId, 'host', data.clientId);
+            connectRoomSocket(data.roomId, 'host', data.clientId || data.hostId);
             renderWatchRoomPanel();
             ensureWatchRoomModal().classList.remove('hidden');
         } catch (error) {
@@ -1695,6 +1806,11 @@
 
         if (!areAllViewersReady()) {
             showMessage('还有观众未准备', 'warning');
+            return;
+        }
+
+        const controller = getWatchRoomController();
+        if (controller?.startTogether?.()) {
             return;
         }
 
@@ -1823,6 +1939,26 @@
             message = JSON.parse(rawData);
         } catch (error) {
             return;
+        }
+
+        const controller = getWatchRoomController();
+        const controllerHandledTypes = [
+            'room:state',
+            'room:participants',
+            'sync:prepare',
+            'sync:start',
+            'sync:play',
+            'sync:pause',
+            'sync:seek',
+            'sync:state',
+            'room:ended',
+            'room:error',
+        ];
+        if (controller) {
+            controller.dispatch(message);
+            if (controllerHandledTypes.includes(message.type)) {
+                return;
+            }
         }
 
         if (message.type === 'room:state') {
@@ -2011,6 +2147,7 @@
         resetViewerInitialSync();
         clearStoredRoomSession();
         activeRoom = null;
+        watchRoomController = null;
         updatePlayerWatchRoomButton();
         closeWatchRoomPanel();
     }

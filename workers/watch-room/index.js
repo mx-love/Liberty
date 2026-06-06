@@ -239,6 +239,7 @@ export class WatchRoomDurableObject {
             roomId,
             status: room.status,
             role: 'host',
+            clientId: room.hostId,
             hostId: room.hostId,
             maxMembers: MAX_MEMBERS,
         });
@@ -504,6 +505,10 @@ export class WatchRoomDurableObject {
     }
 
     async handleHostControl(socket, room, session, message) {
+        if (message.type === 'host:sync') {
+            console.log('[WatchRoomDO] host sync received', message.type);
+        }
+
         if (message.type !== 'host:sync') {
             console.log('[WatchRoomDO] host event received', {
                 type: message.type,
