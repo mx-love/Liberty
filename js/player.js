@@ -1210,6 +1210,12 @@ let currentDanmuAnimeId = null;
 let currentDanmuSourceName = '';
 let currentSessionDanmuSource = null;
 const sessionDanmuBangumiNegativeCache = new Set();
+const sessionDanmuCommentNegativeCache = new Set();
+const sessionDanmuCommentSuccessCache = new Map();
+const DANMU_AUTO_FALLBACK_MAX_COMMENT_REQUESTS = 2;
+const DANMU_COMMENT_RATE_LIMIT_COOLDOWN = 30000;
+let danmuCommentRateLimitUntil = 0;
+let danmuCommentRateLimitWarnedAt = 0;
 
 function getCurrentVideoYearValue() {
     try {
@@ -1313,11 +1319,16 @@ function buildDanmuEpisodeSummary(reason, overrides = {}) {
         candidateCoreTitle: info.candidateCoreTitle || '',
         titleScore: Number.isFinite(info.titleScore) ? info.titleScore : 0,
         rejectReason: info.rejectReason || lastDanmuAutoFallbackStats?.rejectReason || '',
+        rejectReasons: info.rejectReasons || lastDanmuAutoFallbackStats?.rejectReasons || [],
         hardRejected: Boolean(info.hardRejected),
         verifiedScore: Number.isFinite(info.verifiedScore) ? info.verifiedScore : 0,
         validCandidateCount: Number.isFinite(info.validCandidateCount)
             ? info.validCandidateCount
             : (Number.isFinite(lastDanmuAutoFallbackStats?.validCandidateCount) ? lastDanmuAutoFallbackStats.validCandidateCount : 0),
+        triedCommentCount: Number.isFinite(info.triedCommentCount)
+            ? info.triedCommentCount
+            : (Number.isFinite(lastDanmuAutoFallbackStats?.triedCommentCount) ? lastDanmuAutoFallbackStats.triedCommentCount : 0),
+        rateLimited: Boolean(info.rateLimited || stats.rateLimited || lastDanmuAutoFallbackStats?.rateLimited),
         selectedCandidateReason: info.selectedCandidateReason || '',
         commentCount: Number.isFinite(info.commentCount) ? info.commentCount : 0,
         rawCount: Number.isFinite(stats.rawCount) ? stats.rawCount : 0,
@@ -1327,7 +1338,7 @@ function buildDanmuEpisodeSummary(reason, overrides = {}) {
             ? overrides.loadedCount
             : (Number.isFinite(info.loadedCount) ? info.loadedCount : (Number.isFinite(stats.loadedCount) ? stats.loadedCount : 0)),
         pluginApplied: Boolean(overrides.pluginApplied),
-        failReason: overrides.failReason || info.failReason || '',
+        failReason: overrides.failReason || info.failReason || stats.failReason || '',
         ...overrides
     };
 }
@@ -1481,6 +1492,15 @@ function getDanmuTitleCloseness(currentCoreTitle, candidateCoreTitle) {
         similarity,
         titleScore: close ? 30 : Math.round(similarity * 30)
     };
+}
+
+function getDanmuSearchKeyword(title) {
+    return normalizeDanmuTitle(
+        String(title || currentVideoTitle || '')
+            .replace(/\([^)]*\)/g, '')
+            .replace(/【[^】]*】/g, '')
+            .trim()
+    );
 }
 
 function getDanmuTypeCategory(typeText, episodeCount) {
@@ -2012,8 +2032,12 @@ function pickMatchedDanmuEpisode(episodes, episodeIndex, title) {
 }
 
 // ✅ 优化后的弹幕获取函数 - 解决主线程阻塞
-async function fetchDanmaku(episodeId, episodeIndex) {
+async function fetchDanmaku(episodeId, episodeIndex, options = {}) {
     if (!isDanmuServiceEnabled()) return null;
+
+    const silentCandidate = Boolean(options.silentCandidate);
+    const cacheKey = String(episodeId || '');
+    if (!cacheKey) return null;
 
     lastDanmuFetchStats = {
         episodeId,
@@ -2022,22 +2046,122 @@ async function fetchDanmaku(episodeId, episodeIndex) {
         validCount: 0,
         convertedCount: 0,
         loadedCount: 0,
+        status: 0,
+        failReason: '',
+        rateLimited: false,
         updatedAt: Date.now()
     };
+
+    if (sessionDanmuCommentSuccessCache.has(cacheKey)) {
+        const cached = sessionDanmuCommentSuccessCache.get(cacheKey) || [];
+        lastDanmuFetchStats = {
+            ...lastDanmuFetchStats,
+            rawCount: cached.length,
+            validCount: cached.length,
+            convertedCount: cached.length,
+            loadedCount: cached.length,
+            fromCache: true,
+            updatedAt: Date.now()
+        };
+        danmuDebugLog('[DanmuDebug] use comment success cache', {
+            episodeId,
+            loadedCount: cached.length
+        });
+        return cached;
+    }
+
+    if (sessionDanmuCommentNegativeCache.has(cacheKey)) {
+        lastDanmuFetchStats = {
+            ...lastDanmuFetchStats,
+            failReason: 'comment_negative_cache',
+            updatedAt: Date.now()
+        };
+        danmuDebugWarn('[DanmuDebug] skip comment due to negative cache', { episodeId });
+        return null;
+    }
+
+    if (Date.now() < danmuCommentRateLimitUntil) {
+        lastDanmuFetchStats = {
+            ...lastDanmuFetchStats,
+            status: 429,
+            failReason: 'rate_limited',
+            rateLimited: true,
+            updatedAt: Date.now()
+        };
+        danmuDebugWarn('[DanmuDebug] skip comment due to rate limit cooldown', {
+            episodeId,
+            cooldownMs: danmuCommentRateLimitUntil - Date.now()
+        });
+        return null;
+    }
 
     const commentUrl = `${getDanmuBaseUrl()}/api/v2/comment/${episodeId}?format=json&duration=true&withRelated=true&chConvert=1`;
 
     let commentResponse;
+    let timeoutId = null;
     try {
         const authedCommentUrl = await addDanmuAuth(commentUrl);
-        commentResponse = await fetchWithRetry(authedCommentUrl, {}, 3, 12000);
+        const controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), 12000);
+        commentResponse = await fetch(authedCommentUrl, {
+            signal: controller.signal
+        });
     } catch (e) {
-        console.warn(`⚠️ 获取弹幕失败:`, e.message);
+        const failReason = e?.name === 'AbortError' ? 'comment_timeout' : 'comment_request_failed';
+        lastDanmuFetchStats = {
+            ...lastDanmuFetchStats,
+            failReason,
+            updatedAt: Date.now()
+        };
+        if (silentCandidate) {
+            danmuDebugWarn('[DanmuDebug] comment request failed', {
+                episodeId,
+                failReason,
+                error: e?.message || String(e)
+            });
+        } else {
+            console.warn(`⚠️ 获取弹幕失败:`, e.message);
+        }
         return null;
+    } finally {
+        if (timeoutId) clearTimeout(timeoutId);
     }
 
     if (!commentResponse.ok) {
-        console.warn(`⚠️ 获取弹幕失败: HTTP ${commentResponse.status}`);
+        const status = commentResponse.status;
+        let failReason = `http_${status}`;
+        if (status === 400 || status === 404) {
+            failReason = 'comment_not_found';
+            sessionDanmuCommentNegativeCache.add(cacheKey);
+        } else if (status === 429) {
+            failReason = 'rate_limited';
+            danmuCommentRateLimitUntil = Date.now() + DANMU_COMMENT_RATE_LIMIT_COOLDOWN;
+        }
+
+        lastDanmuFetchStats = {
+            ...lastDanmuFetchStats,
+            status,
+            failReason,
+            rateLimited: status === 429,
+            updatedAt: Date.now()
+        };
+
+        if (status === 429) {
+            const now = Date.now();
+            if (now - danmuCommentRateLimitWarnedAt > DANMU_COMMENT_RATE_LIMIT_COOLDOWN) {
+                danmuCommentRateLimitWarnedAt = now;
+                console.warn('⚠️ 弹幕接口请求过快，已暂停自动候选验证 30 秒');
+            }
+            danmuDebugWarn('[DanmuDebug] comment rate limited', { episodeId, status });
+        } else if (silentCandidate) {
+            danmuDebugWarn('[DanmuDebug] comment candidate failed', {
+                episodeId,
+                status,
+                failReason
+            });
+        } else {
+            console.warn(`⚠️ 获取弹幕失败: HTTP ${status}`);
+        }
         return null;
     }
 
@@ -2046,6 +2170,8 @@ async function fetchDanmaku(episodeId, episodeIndex) {
     if (!commentData.comments || !Array.isArray(commentData.comments)) {
         lastDanmuFetchStats = {
             ...lastDanmuFetchStats,
+            status: commentResponse.status,
+            failReason: 'invalid_comment_payload',
             updatedAt: Date.now()
         };
         return [];
@@ -2106,12 +2232,19 @@ async function fetchDanmaku(episodeId, episodeIndex) {
     lastDanmuFetchStats = {
         episodeId,
         episodeIndex,
+        status: commentResponse.status,
         rawCount: totalComments,
         validCount: parsedComments.length,
         convertedCount: finalDanmaku.length,
         loadedCount: finalDanmaku.length,
+        failReason: finalDanmaku.length > 0 ? '' : 'empty_comment',
+        rateLimited: false,
         updatedAt: Date.now()
     };
+
+    if (finalDanmaku.length > 0) {
+        sessionDanmuCommentSuccessCache.set(cacheKey, finalDanmaku);
+    }
 
     danmuDebugLog(`[DanmuDebug] 弹幕转换后数量: ${finalDanmaku.length}`);
     danmuDebugLog(`✅ 弹幕解析完成: ${totalComments} → ${finalDanmaku.length}条（未做数量裁剪）`);
@@ -2398,13 +2531,18 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
         lastDanmuAutoFallbackStats = {
             candidateCount: candidates.length,
             triedCandidateCount: 0,
+            triedCommentCount: 0,
             validCandidateCount: 0,
             candidateScore: 0,
             rejectReason: '',
-            autoApplied: false
+            rejectReasons: [],
+            autoApplied: false,
+            rateLimited: false
         };
 
         if (!candidates.length) {
+            lastDanmuAutoFallbackStats.rejectReason = 'no_candidates';
+            lastDanmuAutoFallbackStats.rejectReasons.push('no_candidates');
             danmuDebugWarn('[DanmuDebug] auto fallback has no search candidates', {
                 cleanTitle,
                 displayEpisode: episodeIndex + 1
@@ -2416,19 +2554,28 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
         const candidatesToTry = ranked.filter(item => item.animeId).slice(0, 5);
         const validCandidates = [];
 
-        danmuDebugLog('[DanmuDebug] auto fallback candidates', ranked.slice(0, 5).map(item => ({
-            animeId: item.animeId,
-            animeTitle: item.animeTitle,
-            coreTitle: item.coreTitle,
-            normalizedCoreTitle: item.normalizedCoreTitle,
-            year: item.year,
-            type: item.typeDescription || item.type,
-            sourceName: item.sourceName,
-            episodeCount: item.episodeCount,
-            titleScore: item.titleScore,
-            finalScore: item.score
-        })));
+        danmuDebugLog('[DanmuDebug] auto fallback candidates', {
+            searchKeyword: cleanTitle,
+            candidateCount: candidates.length,
+            candidates: ranked.slice(0, 5).map(item => ({
+                animeId: item.animeId,
+                rawTitle: item.animeTitle,
+                coreTitle: item.coreTitle,
+                normalizedCoreTitle: item.normalizedCoreTitle,
+                year: item.year,
+                sourceName: item.sourceName,
+                titleScore: item.titleScore,
+                verifiedScore: item.score
+            }))
+        });
         danmuDebugLog('[DanmuDebug] ranked danmu candidates', ranked.slice(0, 5));
+
+        if (!candidatesToTry.length) {
+            lastDanmuAutoFallbackStats.rejectReason = 'no_tryable_candidates';
+            lastDanmuAutoFallbackStats.rejectReasons.push('no_tryable_candidates');
+        }
+
+        const metadataCandidates = [];
 
         for (const candidate of candidatesToTry) {
             lastDanmuAutoFallbackStats.triedCandidateCount += 1;
@@ -2445,6 +2592,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
             let rejectReason = getDanmuCandidateRejectReason(context, candidate);
             if (rejectReason) {
                 lastDanmuAutoFallbackStats.rejectReason = rejectReason;
+                lastDanmuAutoFallbackStats.rejectReasons.push(rejectReason);
                 danmuDebugWarn('[DanmuDebug] auto fallback candidate hard rejected', {
                     rawTitle: candidate.animeTitle,
                     coreTitle: candidate.coreTitle,
@@ -2475,6 +2623,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
             rejectReason = rejectReason || getDanmuCandidateRejectReason(context, candidate, episodes, matchedEpisode);
             if (rejectReason) {
                 lastDanmuAutoFallbackStats.rejectReason = rejectReason;
+                lastDanmuAutoFallbackStats.rejectReasons.push(rejectReason);
                 danmuDebugWarn('[DanmuDebug] auto fallback candidate hard rejected', {
                     rawTitle: candidate.animeTitle,
                     coreTitle: candidate.coreTitle,
@@ -2495,17 +2644,81 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
                 continue;
             }
 
-            const danmuku = await fetchDanmaku(matchedEpisode.episodeId, episodeIndex);
+            const metadataScore = calculateDanmuVerifiedScore(context, candidate, episodes, 0);
+            metadataCandidates.push({
+                candidate,
+                episodes,
+                matchedEpisode,
+                metadataScore
+            });
+            danmuDebugLog('[DanmuDebug] auto fallback candidate metadata verified', {
+                animeId: candidate.animeId,
+                animeTitle: candidate.animeTitle,
+                coreTitle: candidate.coreTitle,
+                sourceName: candidate.sourceName,
+                displayEpisode: episodeIndex + 1,
+                episodeId: matchedEpisode.episodeId,
+                metadataScore
+            });
+        }
+
+        metadataCandidates.sort((a, b) => b.metadataScore - a.metadataScore);
+        danmuDebugLog('[DanmuDebug] auto fallback metadata candidates', metadataCandidates.map(item => ({
+            animeId: item.candidate.animeId,
+            animeTitle: item.candidate.animeTitle,
+            sourceName: item.candidate.sourceName,
+            metadataScore: item.metadataScore,
+            episodeId: item.matchedEpisode.episodeId
+        })));
+
+        for (const item of metadataCandidates) {
+            const candidate = item.candidate;
+            const episodes = item.episodes;
+            const matchedEpisode = item.matchedEpisode;
+            let rejectReason = '';
+
+            if (lastDanmuAutoFallbackStats.triedCommentCount >= DANMU_AUTO_FALLBACK_MAX_COMMENT_REQUESTS) {
+                rejectReason = 'comment_probe_limit_reached';
+                lastDanmuAutoFallbackStats.rejectReason = rejectReason;
+                lastDanmuAutoFallbackStats.rejectReasons.push(rejectReason);
+                danmuDebugWarn('[DanmuDebug] auto fallback comment probe limit reached', {
+                    maxCommentRequests: DANMU_AUTO_FALLBACK_MAX_COMMENT_REQUESTS,
+                    triedCommentCount: lastDanmuAutoFallbackStats.triedCommentCount,
+                    nextAnimeId: candidate.animeId,
+                    nextEpisodeId: matchedEpisode.episodeId
+                });
+                break;
+            }
+
+            lastDanmuAutoFallbackStats.triedCommentCount += 1;
+            const danmuku = await fetchDanmaku(matchedEpisode.episodeId, episodeIndex, {
+                silentCandidate: true
+            });
             if (controller?.cancelled) return [];
             if (!danmuku || danmuku.length === 0) {
-                rejectReason = 'empty_comment';
+                rejectReason = lastDanmuFetchStats?.failReason || 'empty_comment';
+                if (lastDanmuFetchStats?.rateLimited || rejectReason === 'rate_limited') {
+                    lastDanmuAutoFallbackStats.rateLimited = true;
+                    lastDanmuAutoFallbackStats.rejectReason = 'rate_limited';
+                    lastDanmuAutoFallbackStats.rejectReasons.push('rate_limited');
+                    danmuDebugWarn('[DanmuDebug] auto fallback stopped by rate limit', {
+                        animeId: candidate.animeId,
+                        animeTitle: candidate.animeTitle,
+                        episodeId: matchedEpisode.episodeId,
+                        triedCommentCount: lastDanmuAutoFallbackStats.triedCommentCount
+                    });
+                    break;
+                }
                 lastDanmuAutoFallbackStats.rejectReason = rejectReason;
+                lastDanmuAutoFallbackStats.rejectReasons.push(rejectReason);
                 danmuDebugWarn('[DanmuDebug] auto fallback candidate rejected', {
                     animeId: candidate.animeId,
                     animeTitle: candidate.animeTitle,
                     displayEpisode: episodeIndex + 1,
+                    episodeId: matchedEpisode.episodeId,
                     score: candidate.score,
-                    rejectReason
+                    rejectReason,
+                    triedCommentCount: lastDanmuAutoFallbackStats.triedCommentCount
                 });
                 continue;
             }
@@ -2517,6 +2730,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
                 matchedEpisode,
                 danmuku,
                 verifiedScore,
+                metadataScore: item.metadataScore,
                 fetchStats: { ...(lastDanmuFetchStats || {}) }
             };
             validCandidates.push(validCandidate);
@@ -2541,9 +2755,13 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
                 rejectReason: '',
                 hardRejected: false,
                 verifiedScore,
+                metadataScore: item.metadataScore,
                 commentCount: danmuku.length,
                 episodeId: matchedEpisode.episodeId
             });
+
+            // Comment 已验证且非空，立即停止后续候选验证，避免额外 404/429。
+            break;
         }
 
         danmuDebugLog('[DanmuDebug] auto fallback valid candidates', validCandidates.map(item => ({
@@ -2563,11 +2781,11 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
             const danmuku = best.danmuku;
 
             currentDanmuAnimeId = candidate.animeId;
-            currentDanmuSourceName = candidate.animeTitle || '';
+            currentDanmuSourceName = candidate.sourceName || candidate.animeTitle || '';
             currentSessionDanmuSource = {
                 animeId: candidate.animeId,
                 animeTitle: candidate.animeTitle || '',
-                sourceName: candidate.animeTitle || '',
+                sourceName: candidate.sourceName || candidate.animeTitle || '',
                 selectedBy: 'auto-fallback',
                 episodes: best.episodes,
                 episodeCount: best.episodes.length,
@@ -2603,6 +2821,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
                 autoApplied: true,
                 candidateCount: candidates.length,
                 triedCandidateCount: lastDanmuAutoFallbackStats.triedCandidateCount,
+                triedCommentCount: lastDanmuAutoFallbackStats.triedCommentCount,
                 candidateScore: candidate.score,
                 currentYear,
                 candidateYear: candidate.candidateYear || candidate.year || '',
@@ -2612,9 +2831,10 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
                 titleScore: candidate.titleScore,
                 rejectReason: '',
                 hardRejected: false,
+                rateLimited: false,
                 verifiedScore: best.verifiedScore,
                 validCandidateCount: validCandidates.length,
-                selectedCandidateReason: 'highest_verified_score',
+                selectedCandidateReason: 'metadata_top_comment_success',
                 commentCount: danmuku.length,
                 confidence: best.verifiedScore,
                 loadedCount: danmuku.length
@@ -2636,19 +2856,28 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
             displayEpisode: episodeIndex + 1,
             candidateCount: candidates.length,
             triedCandidateCount: lastDanmuAutoFallbackStats.triedCandidateCount,
+            triedCommentCount: lastDanmuAutoFallbackStats.triedCommentCount,
             validCandidateCount: validCandidates.length,
+            rateLimited: Boolean(lastDanmuAutoFallbackStats.rateLimited),
             topScore: ranked[0]?.score || 0
         });
         if (!lastDanmuAutoFallbackStats.rejectReason) {
             lastDanmuAutoFallbackStats.rejectReason = validCandidates.length
                 ? 'no_best_candidate'
                 : 'no_valid_candidate';
+            lastDanmuAutoFallbackStats.rejectReasons.push(lastDanmuAutoFallbackStats.rejectReason);
         }
         return null;
     } catch (error) {
         lastDanmuAutoFallbackStats = {
             ...(lastDanmuAutoFallbackStats || {}),
-            rejectReason: 'search-error'
+            rejectReason: 'search-error',
+            rateLimited: Boolean(lastDanmuAutoFallbackStats?.rateLimited),
+            triedCommentCount: Number(lastDanmuAutoFallbackStats?.triedCommentCount || 0),
+            rejectReasons: [
+                ...((lastDanmuAutoFallbackStats && lastDanmuAutoFallbackStats.rejectReasons) || []),
+                'search-error'
+            ]
         };
         danmuDebugWarn('[DanmuDebug] auto fallback search failed', {
             cleanTitle,
@@ -2688,7 +2917,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
             return currentDanmuCache.danmuList;
         }
 
-        const cleanTitle = sanitizeTitle(title);
+        const cleanTitle = getDanmuSearchKeyword(title);
         const context = getDanmuPlaybackContext(title, episodeIndex);
         const matchQuery = buildDanmuKeyword(context);
         const matchQueries = buildDanmuMatchQueries(context);
@@ -2864,10 +3093,18 @@ async function getDanmukuForVideo(title, episodeIndex) {
             episodeIndex,
             displayEpisode: episodeIndex + 1,
             selectedBy: '',
-            fallbackUsed: false,
+            fallbackUsed: Boolean(lastDanmuAutoFallbackStats?.candidateCount || lastDanmuAutoFallbackStats?.triedCandidateCount),
             manualSourceUsed: false,
+            autoApplied: false,
+            candidateCount: Number(lastDanmuAutoFallbackStats?.candidateCount || 0),
+            triedCandidateCount: Number(lastDanmuAutoFallbackStats?.triedCandidateCount || 0),
+            triedCommentCount: Number(lastDanmuAutoFallbackStats?.triedCommentCount || 0),
+            validCandidateCount: Number(lastDanmuAutoFallbackStats?.validCandidateCount || 0),
+            rateLimited: Boolean(lastDanmuAutoFallbackStats?.rateLimited),
+            rejectReason: lastDanmuAutoFallbackStats?.rejectReason || '',
+            rejectReasons: lastDanmuAutoFallbackStats?.rejectReasons || [],
             loadedCount: 0,
-            failReason: 'api-match-and-session-source-failed'
+            failReason: lastDanmuAutoFallbackStats?.rejectReason || 'api-match-and-session-source-failed'
         });
 
         console.warn('❌ 未自动匹配到当前集弹幕，请手动选择弹幕源');
@@ -5940,7 +6177,7 @@ async function showDanmuSourceModal() {
     danmuDebugLog('🔍 当前弹幕源ID:', currentDanmuAnimeId);
 
     try {
-        const cleanTitle = normalizeDanmuTitle(currentVideoTitle.replace(/\([^)]*\)/g, '').replace(/【[^】]*】/g, '').trim());
+        const cleanTitle = getDanmuSearchKeyword(currentVideoTitle);
         const animes = await searchDanmuAnimeCandidatesWithCache(cleanTitle);
 
         if (!animes.length) {
