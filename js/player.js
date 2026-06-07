@@ -958,10 +958,11 @@ function buildDanmuVideoKey(title, year, season, episode) {
 
 function getDanmuPlaybackContext(title, episodeIndex) {
     const params = new URLSearchParams(window.location.search);
+    const contextTitle = title || currentVideoTitle || '';
+    const normalizedTitle = getDanmuSearchKeyword(contextTitle);
     const year =
         params.get('year') ||
-        localStorage.getItem('currentVideoYear') ||
-        advancedCleanTitle(title).year ||
+        advancedCleanTitle(contextTitle).year ||
         '';
     const sourceCode =
         params.get('source') ||
@@ -982,8 +983,11 @@ function getDanmuPlaybackContext(title, episodeIndex) {
     const episodeCount = Array.isArray(currentEpisodes) ? currentEpisodes.length : 0;
 
     const context = {
-        title,
+        title: contextTitle,
+        normalizedTitle,
         year,
+        episodeIndex,
+        displayEpisode: episodeIndex + 1,
         season,
         episode,
         episodeName,
@@ -994,7 +998,7 @@ function getDanmuPlaybackContext(title, episodeIndex) {
         vodId,
         platform,
         duration,
-        videoKey: buildDanmuVideoKey(title, year, season, episode),
+        videoKey: buildDanmuVideoKey(contextTitle, year, season, episode),
     };
 
     danmuDebugLog('[DanmuDebug] playback context', context);
@@ -1219,7 +1223,9 @@ let danmuCommentRateLimitWarnedAt = 0;
 
 function getCurrentVideoYearValue() {
     try {
-        return new URLSearchParams(window.location.search).get('year') || localStorage.getItem('currentVideoYear') || '';
+        return new URLSearchParams(window.location.search).get('year') ||
+            advancedCleanTitle(currentVideoTitle || '').year ||
+            '';
     } catch (error) {
         return '';
     }
@@ -1227,10 +1233,9 @@ function getCurrentVideoYearValue() {
 
 function getVideoIdentity(title = currentVideoTitle) {
     const params = new URLSearchParams(window.location.search);
-    const normalizedTitle = sanitizeTitle(title || currentVideoTitle || '');
+    const normalizedTitle = getDanmuSearchKeyword(title || currentVideoTitle || '');
     const year =
         params.get('year') ||
-        localStorage.getItem('currentVideoYear') ||
         advancedCleanTitle(title || currentVideoTitle || '').year ||
         '';
     const sourceCode =
@@ -3216,7 +3221,7 @@ function waitForCurrentVideoReady(maxWait = 10000, expected = {}) {
     });
 }
 
-async function reloadDanmakuForCurrentEpisode(reason = 'episode-switch') {
+async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
     if (!isDanmuServiceEnabled()) return;
 
     const reloadToken = ++danmuReloadToken;
@@ -3381,6 +3386,10 @@ async function reloadDanmakuForCurrentEpisode(reason = 'episode-switch') {
         pluginApplied: true
     });
     danmuDebugLog(`✅ 切集后已重新加载第${episodeIndex + 1}集弹幕: ${danmuku.length}条`, { reason });
+}
+
+function reloadDanmakuForCurrentEpisode(reason = 'episode-switch') {
+    return loadDanmakuForCurrentEpisode(reason);
 }
 
 // 页面加载
@@ -4782,118 +4791,15 @@ function initPlayerInternal(videoUrl) {
 
         // 加载弹幕
         if (isDanmuServiceEnabled() && art.plugins.artplayerPluginDanmuku) {
-            const loadDanmaku = async () => {
-                try {
-                    danmuDebugLog('🎬 开始加载弹幕...');
-
-                    const danmuku = await getDanmukuForVideo(
-                        currentVideoTitle, 
-                        currentEpisodeIndex,
-                    );
-
-                    if (!danmuku || danmuku.length === 0) {
-                        console.warn('⚠ 未找到弹幕，继续播放视频');
-                        logDanmuEpisodeSummary('initial-load', {
-                            episodeIndex: currentEpisodeIndex,
-                            loadedCount: 0,
-                            pluginApplied: false,
-                            failReason: 'empty-danmaku'
-                        });
-                        return;
-                    }
-
-                    danmuDebugLog(`📦 获取到 ${danmuku.length} 条弹幕，全量加载`);
-
-                    const waitForVideoReady = (maxWait = 10000) => {
-						return new Promise((resolve) => {
-							const start = Date.now();
-							let cancelled = false;
-
-							// 播放器销毁时立即终止轮询
-							const cancelWait = () => { cancelled = true; resolve(); };
-							if (art) art.once('destroy', cancelWait);
-
-							const checkReady = () => {
-								if (cancelled) return;
-
-								if (!art || !art.video) {
-									resolve();
-									return;
-								}
-
-								if (art.video.readyState >= 2) {
-									if (art) art.off('destroy', cancelWait);
-									resolve();
-									return;
-								}
-
-								if (Date.now() - start > maxWait) {
-									console.warn('⚠️ waitForVideoReady 超时，继续加载弹幕');
-									if (art) art.off('destroy', cancelWait);
-									resolve();
-									return;
-								}
-
-								setTimeout(checkReady, 50);
-							};
-							checkReady();
-						});
-					};
-
-                    await waitForVideoReady();
-                    danmuDebugLog('✅ 视频已准备好，开始加载弹幕');
-
-                    const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
-                    danmuDebugLog('[DanmuDebug] apply danmaku to artplayer', {
-                        displayEpisode: currentEpisodeIndex + 1,
-                        rawCount: lastDanmuFetchStats?.rawCount || 0,
-                        validCount: lastDanmuFetchStats?.validCount || 0,
-                        convertedCount: lastDanmuFetchStats?.convertedCount || 0,
-                        loadedCount: danmuku.length,
-                        hasPlugin: Boolean(danmukuPlugin)
-                    });
-                    if (typeof danmukuPlugin.clear === 'function') {
-                        danmukuPlugin.clear();
-                    }
-
-                    // 直接加载全部弹幕
-                    danmukuPlugin.config({
-                        danmuku: danmuku,
-                        synchronousPlayback: true
-                    });
-                    danmukuPlugin.load();
-
-                    await new Promise(resolve => setTimeout(resolve, 100));
-
-                    const currentTime = art.video.currentTime || restoredPosition || 0;
-                    if (currentTime > 0 && typeof danmukuPlugin.seek === 'function') {
-                        danmukuPlugin.seek(currentTime);
-                        danmuDebugLog(`🎯 弹幕同步到: ${currentTime.toFixed(2)}s`);
-                    }
-
-                    danmuDebugLog(`✅ 已加载第${currentEpisodeIndex + 1}集弹幕: ${danmuku.length}条`);
-                    danmuDebugLog('[DanmuDebug] apply danmaku to artplayer success', {
-                        displayEpisode: currentEpisodeIndex + 1,
-                        loadedCount: danmuku.length
-                    });
-                    logDanmuEpisodeSummary('initial-load', {
-                        episodeIndex: currentEpisodeIndex,
-                        loadedCount: danmuku.length,
-                        pluginApplied: true
-                    });
-
-                } catch (e) {
-                    console.error('❌ 弹幕加载失败:', e);
-                    logDanmuEpisodeSummary('initial-load', {
-                        episodeIndex: currentEpisodeIndex,
-                        loadedCount: 0,
-                        pluginApplied: false,
-                        failReason: e?.message || String(e)
-                    });
-                }
-            };
-
-            loadDanmaku();
+            loadDanmakuForCurrentEpisode('initial-load').catch((e) => {
+                console.error('❌ 弹幕加载失败:', e);
+                logDanmuEpisodeSummary('initial-load', {
+                    episodeIndex: currentEpisodeIndex,
+                    loadedCount: 0,
+                    pluginApplied: false,
+                    failReason: e?.message || String(e)
+                });
+            });
         }
 
         startProgressSaveInterval();
@@ -6277,7 +6183,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
             });
         }
 
-        const cleanTitle = sanitizeTitle(currentVideoTitle);
+        const cleanTitle = getDanmuSearchKeyword(currentVideoTitle);
         const manualContext = getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex);
         const manualMatchQuery = buildDanmuKeyword(manualContext);
         const manualCurrentParsed = parseDanmuCandidateTitle(currentVideoTitle);
