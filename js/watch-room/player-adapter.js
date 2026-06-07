@@ -171,50 +171,6 @@
             }
         }
 
-        getCurrentMedia() {
-            const params = new URLSearchParams(window.location.search);
-            return {
-                episodeIndex: Number(window.currentEpisodeIndex ?? params.get('index') ?? 0) || 0,
-                url: window.currentVideoUrl || params.get('url') || '',
-            };
-        }
-
-        isMediaDifferent(media = {}) {
-            const current = this.getCurrentMedia();
-            const targetIndex = Number(media.episodeIndex);
-            const targetUrl = String(media.url || media.episodeUrl || '');
-            if (Number.isFinite(targetIndex) && targetIndex !== current.episodeIndex) return true;
-            if (targetUrl && current.url && targetUrl !== current.url) return true;
-            return false;
-        }
-
-        async load(media = {}, options = {}) {
-            const episodeIndex = Number(media.episodeIndex);
-            if (!Number.isFinite(episodeIndex)) {
-                return { success: false, error: new Error('Invalid episode index') };
-            }
-
-            this.offLocalListeners();
-
-            try {
-                if (typeof window.playEpisode === 'function') {
-                    window.playEpisode(episodeIndex, options.reason || 'watch-room-media', {
-                        fromWatchRoom: true,
-                    });
-                } else {
-                    const art = this.getArt();
-                    const url = media.url || media.episodeUrl || '';
-                    if (art && url) art.switch = url;
-                }
-                const video = await this.waitForVideo(8000);
-                return video
-                    ? { success: true }
-                    : { success: false, error: new Error('Video element is not ready after media load') };
-            } catch (error) {
-                return { success: false, error };
-            }
-        }
-
         calculateTargetTime(playback = {}) {
             const currentTime = Number(playback.currentTime) || 0;
             const duration = Number(playback.duration) || 0;

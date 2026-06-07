@@ -95,7 +95,6 @@
             if (type === 'room:state') return this.handleRoomState(payload, message);
             if (type === 'room:participants') return this.handleParticipants(payload);
             if (type === 'sync:prepare') return this.handleSyncPrepare(payload);
-            if (type === 'sync:media') return this.handleSyncMedia(payload);
             if (type === 'sync:start') return this.handleSyncStart(payload);
             if (type === 'sync:play') return this.handleSyncPlay(payload);
             if (type === 'sync:pause') return this.handleSyncPause(payload);
@@ -143,7 +142,7 @@
             }
 
             if (this.state.status === 'playing') {
-                return this.applyPlayingRecovery(payload.playback || {}, payload.media || this.state.media);
+                return this.applyPlayingRecovery(payload.playback || {});
             }
 
             return null;
@@ -219,7 +218,6 @@
             this.state = {
                 ...this.state,
                 status: 'playing',
-                media: payload.media || this.state.media,
                 playback: payload,
                 playerReady: true,
                 lastSyncStartAt: Date.now(),
@@ -228,48 +226,6 @@
             this.render(this.getViewModel());
             this.reconcilePlaybackControls();
             return this.applyPlaybackWithLock(payload, { shouldPlay: true, forceSeek: true }, true);
-        }
-
-        handleSyncMedia(payload = {}) {
-            window.LibertyDebug.log('[WatchRoomController] sync media received', payload);
-            const media = payload.media || {};
-            const playback = payload.playback || { paused: true, currentTime: 0, updatedAt: Date.now() };
-            this.state = {
-                ...this.state,
-                status: 'starting',
-                media,
-                playback,
-                startingReady: false,
-            };
-            this.detachHostPlaybackControls();
-            this.detachViewerReadonlyControls();
-            this.render(this.getViewModel());
-
-            this.isApplyingRemoteSync = true;
-            Promise.resolve()
-                .then(() => this.player?.load?.(media, { fromWatchRoom: true }))
-                .then(() => this.player?.pause?.())
-                .then(() => this.player?.seek?.(0))
-                .finally(() => {
-                    window.LibertyDebug.log('[WatchRoomController] media load ready');
-                    window.LibertyDebug.log('[WatchRoomController] send client ready after media change');
-                    const sent = this.socketSend({
-                        type: 'client:ready',
-                        payload: {
-                            media,
-                            currentTime: 0,
-                            readyAt: Date.now(),
-                        },
-                    });
-                    this.state = {
-                        ...this.state,
-                        startingReady: Boolean(sent),
-                    };
-                    this.render(this.getViewModel());
-                    window.setTimeout(() => {
-                        this.isApplyingRemoteSync = false;
-                    }, REMOTE_SYNC_LOCK_MS);
-                });
         }
 
         handleSyncPlay(payload = {}) {
@@ -354,49 +310,6 @@
             });
         }
 
-        requestMediaChange(media = {}, reason = 'media-change') {
-            if (this.state.role !== 'host' || this.state.status !== 'playing') return false;
-            const playback = {
-                ...(this.player?.getSnapshot?.() || {}),
-                currentTime: 0,
-                paused: false,
-                updatedAt: Date.now(),
-            };
-            window.LibertyDebug.log('[WatchRoomController] host media change request', {
-                media,
-                playback,
-                reason,
-            });
-            this.detachHostPlaybackControls();
-            this.player?.pause?.();
-            this.state = {
-                ...this.state,
-                status: 'starting',
-                media,
-                playback,
-                startingReady: false,
-            };
-            this.render(this.getViewModel());
-            const sent = this.socketSend({
-                type: 'host:media-change',
-                payload: {
-                    media,
-                    playback,
-                    episodeIndex: media.episodeIndex,
-                    reason,
-                },
-            });
-            if (!sent) {
-                this.state = {
-                    ...this.state,
-                    status: 'playing',
-                };
-                this.render(this.getViewModel());
-                this.reconcilePlaybackControls();
-            }
-            return sent;
-        }
-
         endRoom() {
             return this.socketSend({ type: 'room:end' });
         }
@@ -444,20 +357,10 @@
             return Boolean(this.state.roomId && this.state.connected);
         }
 
-        async applyPlayingRecovery(playback = {}, media = null) {
+        applyPlayingRecovery(playback = {}) {
             const shouldPlay = playback.paused !== true;
             this.setLastHostPlayback(playback);
             window.LibertyDebug.log('[WatchRoomController] room state playing recovery', playback);
-            if (media && this.player?.isMediaDifferent?.(media)) {
-                this.isApplyingRemoteSync = true;
-                try {
-                    await this.player.load(media, { fromWatchRoom: true });
-                } finally {
-                    window.setTimeout(() => {
-                        this.isApplyingRemoteSync = false;
-                    }, REMOTE_SYNC_LOCK_MS);
-                }
-            }
             return this.applyPlaybackWithLock(playback, { shouldPlay, seekThreshold: 3 }, shouldPlay);
         }
 
