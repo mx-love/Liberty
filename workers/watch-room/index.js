@@ -140,6 +140,20 @@ function normalizePreparePayload(payload = {}, previousPlayback = {}) {
     };
 }
 
+function normalizeMediaPayload(media = {}) {
+    return {
+        title: String(media.title || ''),
+        year: String(media.year || ''),
+        sourceCode: String(media.sourceCode || ''),
+        vodId: String(media.vodId || ''),
+        episodeIndex: Math.max(0, normalizeNumber(media.episodeIndex, 0)),
+        episodeName: String(media.episodeName || ''),
+        url: String(media.url || media.episodeUrl || ''),
+        episodes: Array.isArray(media.episodes) ? media.episodes : [],
+        duration: Math.max(0, normalizeNumber(media.duration, 0)),
+    };
+}
+
 export class WatchRoomDurableObject {
     constructor(state, env) {
         this.state = state;
@@ -423,6 +437,7 @@ export class WatchRoomDurableObject {
         } else if (role === 'viewer' && room.status === ROOM_STATUS.PLAYING) {
             socket.send(buildMessage('sync:start', room.roomId, clientId, {
                 ...(room.playback || {}),
+                media: room.media || {},
                 status: ROOM_STATUS.PLAYING,
             }));
         }
@@ -493,6 +508,11 @@ export class WatchRoomDurableObject {
 
         if (message.type === 'host:start') {
             await this.handleHostStart(socket, room, session, message);
+            return;
+        }
+
+        if (message.type === 'host:media-change') {
+            await this.handleHostMediaChange(socket, room, session, message);
             return;
         }
 
@@ -629,6 +649,68 @@ export class WatchRoomDurableObject {
         }, 3000);
     }
 
+    async handleHostMediaChange(socket, room, session, message) {
+        console.log('[WatchRoomDO] host media change', {
+            roomId: room.roomId,
+            clientId: session.clientId,
+            status: room.status,
+        });
+
+        if (session.role !== 'host' || session.clientId !== room.hostId) {
+            this.sendError(socket, ERROR_CODE.UNAUTHORIZED_ACTION, 'Only host can change media');
+            return;
+        }
+
+        if (![ROOM_STATUS.PLAYING, ROOM_STATUS.STARTING].includes(room.status)) {
+            this.sendError(socket, ERROR_CODE.UNAUTHORIZED_ACTION, 'Room is not playing');
+            return;
+        }
+
+        const payload = message.payload || {};
+        const media = normalizeMediaPayload(payload.media || {});
+        const playback = normalizePreparePayload(
+            {
+                ...(payload.playback || {}),
+                currentTime: 0,
+                updatedAt: now(),
+            },
+            room.playback || {}
+        );
+
+        room.media = media;
+        room.playback = playback;
+        room.status = ROOM_STATUS.STARTING;
+        room.startPayload = playback;
+        room.startingStartedAt = now();
+        Object.values(room.participants || {}).forEach((participant) => {
+            participant.startingReady = false;
+        });
+        await this.writeRoom(room);
+
+        console.log('[WatchRoomDO] broadcast sync:media', {
+            roomId: room.roomId,
+            episodeIndex: media.episodeIndex,
+            reason: payload.reason || '',
+        });
+        this.broadcastToAll(buildMessage('sync:media', room.roomId, session.clientId, {
+            media,
+            playback,
+            episodeIndex: media.episodeIndex,
+            reason: payload.reason || 'media-change',
+            status: ROOM_STATUS.STARTING,
+            sourceClientId: session.clientId,
+        }));
+        await this.broadcastParticipants(room);
+        await this.state.storage.setAlarm(now() + 3000);
+
+        setTimeout(() => {
+            console.log('[WatchRoomDO] media change ready state', getStartingReadyState(room));
+            this.maybeEnterPlaying(room.hostId, true).catch((error) => {
+                console.warn('[WatchRoomDO] media change timeout failed', error?.message || String(error));
+            });
+        }, 3000);
+    }
+
     async handleViewerReady(room, session, message) {
         if (session.role !== 'viewer') {
             this.sendErrorByClientId(session.clientId, ERROR_CODE.UNAUTHORIZED_ACTION, 'Only viewer can become ready');
@@ -709,6 +791,7 @@ export class WatchRoomDurableObject {
         });
         this.broadcastToAll(buildMessage('sync:start', room.roomId, sourceClientId || room.hostId, {
             ...playback,
+            media: room.media || {},
             status: ROOM_STATUS.PLAYING,
             sourceClientId: sourceClientId || room.hostId,
         }));

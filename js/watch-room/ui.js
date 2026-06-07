@@ -1978,6 +1978,7 @@
             'room:state',
             'room:participants',
             'sync:prepare',
+            'sync:media',
             'sync:start',
             'sync:play',
             'sync:pause',
@@ -2361,6 +2362,7 @@
         leaveRoom,
         joinRoomById,
         joinMockRoomById: joinRoomById,
-        copyRoomId
+        copyRoomId,
+        getController: getWatchRoomController
     };
 })();

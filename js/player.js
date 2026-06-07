@@ -5043,10 +5043,73 @@ function renderEpisodes() {
     episodesList.innerHTML = html;
 }
 
+function getWatchRoomControllerForPlayer() {
+    return window.LibertyWatchRoom?.ui?.getController?.() || null;
+}
+
+function getWatchRoomControllerState() {
+    const controller = getWatchRoomControllerForPlayer();
+    return controller?.state || null;
+}
+
+function buildWatchRoomMediaSnapshot(index) {
+    const url = getPlayerEpisodeUrlValue(currentEpisodes?.[index]);
+    const params = new URLSearchParams(window.location.search);
+    return {
+        title: currentVideoTitle || params.get('title') || '',
+        year: params.get('year') || '',
+        sourceCode: params.get('source') || params.get('source_code') || '',
+        vodId: params.get('id') || params.get('vod_id') || '',
+        episodeIndex: index,
+        episodeName: getCurrentEpisodeName(index),
+        url,
+        episodeUrl: url,
+        episodes: Array.isArray(currentEpisodes)
+            ? currentEpisodes.map((episode) => getPlayerEpisodeUrlValue(episode))
+            : [],
+        duration: Number(art?.duration || art?.video?.duration || 0) || 0,
+    };
+}
+
+function handleWatchRoomEpisodeChange(index, switchReason, options = {}) {
+    if (options?.fromWatchRoom) return false;
+
+    const controller = getWatchRoomControllerForPlayer();
+    const state = controller?.state;
+    if (!controller || !state?.roomId) {
+        return false;
+    }
+
+    if (state.role === 'viewer' && ['waiting', 'starting', 'playing'].includes(state.status)) {
+        showToast('播放控制已由房主托管', 'info');
+        controller.restoreViewerToHostState?.('viewer_episode_change');
+        return true;
+    }
+
+    if (state.role === 'host' && state.status === 'playing') {
+        const media = buildWatchRoomMediaSnapshot(index);
+        if (controller.requestMediaChange?.(media, switchReason || 'episode-change')) {
+            return true;
+        }
+        return false;
+    }
+
+    if (state.role === 'host' && state.status === 'starting') {
+        showToast('正在准备同步新剧集，请稍候', 'info');
+        return true;
+    }
+
+    return false;
+}
+
 // 播放指定集数
-function playEpisode(index, switchReason = 'manual') {
+function playEpisode(index, switchReason = 'manual', options = {}) {
     // 确保index在有效范围内
     if (index < 0 || index >= currentEpisodes.length) {
+        return;
+    }
+
+    if (handleWatchRoomEpisodeChange(index, switchReason, options)) {
         return;
     }
 
