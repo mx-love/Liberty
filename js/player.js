@@ -5089,13 +5089,20 @@ function buildWatchRoomEpisodeSnapshot(index) {
 }
 
 function interceptWatchRoomEpisodeChange(index, reason = 'manual') {
-    if (isApplyingWatchRoomEpisodeSnapshot) return false;
-
     const room = getActiveWatchRoomForPlayer();
     if (!room?.roomId || !['waiting', 'starting', 'playing'].includes(room.status)) return false;
 
+    if (isApplyingWatchRoomEpisodeSnapshot) {
+        return true;
+    }
+
     if (room.role === 'viewer') {
         getWatchRoomUiApi()?.notifyViewerReadonlyControl?.();
+        return true;
+    }
+
+    if (room.role === 'host' && (room.status === 'starting' || pendingWatchRoomEpisodeChangeId)) {
+        showToast('正在同步切集，请稍后', 'info');
         return true;
     }
 
