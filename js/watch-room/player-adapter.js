@@ -128,6 +128,36 @@
             };
         }
 
+        getCurrentTime() {
+            const art = this.getArt();
+            const video = this.getVideo();
+            return Math.max(0, Number(video?.currentTime ?? art?.currentTime) || 0);
+        }
+
+        getPlaybackRate() {
+            const art = this.getArt();
+            const video = this.getVideo();
+            return Number(video?.playbackRate ?? art?.playbackRate) || 1;
+        }
+
+        async setPlaybackRate(rate) {
+            const video = this.getVideo() || await this.waitForVideo();
+            const playbackRate = Number(rate);
+            if (!video) {
+                return { success: false, error: new Error('Video element is not ready') };
+            }
+            if (!Number.isFinite(playbackRate) || playbackRate <= 0) {
+                return { success: false, error: new Error('Invalid playbackRate') };
+            }
+
+            try {
+                video.playbackRate = playbackRate;
+                return { success: true };
+            } catch (error) {
+                return { success: false, error };
+            }
+        }
+
         async pause() {
             const art = this.getArt();
             const video = this.getVideo();
@@ -176,10 +206,11 @@
             const duration = Number(playback.duration) || 0;
             const updatedAt = Number(playback.updatedAt) || 0;
             const paused = Boolean(playback.paused);
+            const playbackRate = Number(playback.playbackRate) || 1;
             let targetTime = Math.max(0, currentTime);
 
             if (!paused && updatedAt > 0) {
-                targetTime += Math.max(0, Date.now() - updatedAt) / 1000;
+                targetTime += (Math.max(0, Date.now() - updatedAt) / 1000) * Math.max(0, playbackRate);
             }
 
             if (duration > 0) {
@@ -202,14 +233,17 @@
             const seekThreshold = Number.isFinite(Number(options.seekThreshold))
                 ? Number(options.seekThreshold)
                 : 1;
-            if (options.forceSeek || diff > seekThreshold) {
+            if (!options.disableSeek && (options.forceSeek || diff > seekThreshold)) {
                 const seekResult = await this.seek(targetTime);
                 if (seekResult?.success === false) return seekResult;
             }
 
-            if (Number.isFinite(Number(playback.playbackRate))) {
+            const playbackRate = Number.isFinite(Number(options.playbackRateOverride))
+                ? Number(options.playbackRateOverride)
+                : Number(playback.playbackRate);
+            if (Number.isFinite(playbackRate) && playbackRate > 0) {
                 try {
-                    video.playbackRate = Number(playback.playbackRate);
+                    video.playbackRate = playbackRate;
                 } catch (error) {}
             }
 

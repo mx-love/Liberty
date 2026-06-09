@@ -20,10 +20,19 @@
         },
     };
 
-    const HOST_SYNC_INTERVAL = 5000;
+    const HOST_SYNC_INTERVAL = 3000;
     const HOST_SEEK_THROTTLE = 100;
     const REMOTE_SYNC_LOCK_MS = 500;
     const VIEWER_READONLY_TOAST_INTERVAL = 4000;
+    const SYNC_DRIFT_IGNORE_THRESHOLD = 0.35;
+    const SYNC_DRIFT_HARD_SEEK_THRESHOLD = 1.2;
+    const SOFT_DRIFT_RATE_MIN_DELTA = 0.03;
+    const SOFT_DRIFT_RATE_MAX_DELTA = 0.06;
+    const SOFT_DRIFT_RATE_MIN = 0.85;
+    const SOFT_DRIFT_RATE_MAX = 1.25;
+    const SOFT_DRIFT_CHECK_INTERVAL = 1000;
+    const SOFT_DRIFT_RESTORE_THRESHOLD = 0.2;
+    const SOFT_DRIFT_MAX_MS = 15000;
 
     const DEFAULT_STATE = {
         roomId: '',
@@ -65,6 +74,11 @@
             this.viewerBoundVideo = null;
             this.lastViewerReadonlyToastAt = 0;
             this.lastHostPlayback = null;
+            this.driftCorrectionTimer = null;
+            this.driftCorrectionHostRate = 1;
+            this.isSoftDriftCorrecting = false;
+            this.activeDriftCorrection = null;
+            this.remoteSyncUnlockTimer = null;
         }
 
         setContext(context = {}) {
@@ -215,6 +229,7 @@
 
         handleSyncStart(payload = {}) {
             window.LibertyDebug.log('[WatchRoomController] sync start', payload);
+            this.clearDriftCorrection(false);
             this.state = {
                 ...this.state,
                 status: 'playing',
@@ -231,21 +246,24 @@
         handleSyncPlay(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             this.setLastHostPlayback(payload);
+            this.clearDriftCorrection(false);
             window.LibertyDebug.log('[WatchRoomController] apply host sync', 'sync:play');
-            return this.applyPlaybackWithLock({ ...payload, paused: false }, { shouldPlay: true, seekThreshold: 1 }, true);
+            return this.applyPlaybackWithLock({ ...payload, paused: false }, { shouldPlay: true, forceSeek: true }, true);
         }
 
         handleSyncPause(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             this.setLastHostPlayback(payload);
+            this.clearDriftCorrection(false);
             window.LibertyDebug.log('[WatchRoomController] apply host sync', 'sync:pause');
-            return this.applyPlaybackWithLock({ ...payload, paused: true }, { shouldPlay: false, seekThreshold: 1 }, false);
+            return this.applyPlaybackWithLock({ ...payload, paused: true }, { shouldPlay: false, forceSeek: true }, false);
         }
 
         handleSyncSeek(payload = {}) {
             if (this.state.status !== 'playing' || this.state.role !== 'viewer') return null;
             const shouldPlay = payload.paused === false;
             this.setLastHostPlayback(payload);
+            this.clearDriftCorrection(false);
             window.LibertyDebug.log('[WatchRoomController] apply host sync', 'sync:seek');
             return this.applyPlaybackWithLock(payload, { shouldPlay, forceSeek: true }, shouldPlay);
         }
@@ -255,10 +273,15 @@
             const shouldPlay = payload.paused === false;
             this.setLastHostPlayback(payload);
             window.LibertyDebug.log('[WatchRoomController] apply host sync', 'sync:state');
-            return this.applyPlaybackWithLock(payload, { shouldPlay, seekThreshold: 3 }, shouldPlay);
+            if (!shouldPlay) {
+                this.clearDriftCorrection(false);
+                return this.applyPlaybackWithLock({ ...payload, paused: true }, { shouldPlay: false, forceSeek: true }, false);
+            }
+            return this.applySyncStateDrift({ ...payload, paused: false });
         }
 
         handleRoomEnded(payload = {}) {
+            this.clearDriftCorrection(true, 'room_ended');
             this.state = {
                 ...this.state,
                 status: 'ended',
@@ -324,11 +347,16 @@
         }
 
         cleanupLocalState(reason = 'cleanup') {
+            this.clearDriftCorrection(true, reason);
             this.detachHostPlaybackControls();
             this.detachViewerReadonlyControls();
             this.stopHostSyncTimer();
             this.player?.offLocalListeners?.();
             this.isApplyingRemoteSync = false;
+            if (this.remoteSyncUnlockTimer) {
+                window.clearTimeout(this.remoteSyncUnlockTimer);
+                this.remoteSyncUnlockTimer = null;
+            }
             this.lastHostPlayback = null;
             this.lastViewerReadonlyToastAt = 0;
             this.state = {
@@ -361,11 +389,17 @@
             const shouldPlay = playback.paused !== true;
             this.setLastHostPlayback(playback);
             window.LibertyDebug.log('[WatchRoomController] room state playing recovery', playback);
-            return this.applyPlaybackWithLock(playback, { shouldPlay, seekThreshold: 3 }, shouldPlay);
+            if (this.state.role === 'viewer') {
+                return this.handleSyncState(playback);
+            }
+            return this.applyPlaybackWithLock(playback, {
+                shouldPlay,
+                seekThreshold: SYNC_DRIFT_HARD_SEEK_THRESHOLD,
+            }, shouldPlay);
         }
 
         async applyPlaybackWithLock(playback = {}, options = {}, shouldWarn = false) {
-            this.isApplyingRemoteSync = true;
+            this.beginRemoteSyncLock();
             try {
                 const result = await this.player?.applyPlayback?.(playback, options);
                 return this.handlePlaybackResult(result, shouldWarn);
@@ -373,10 +407,231 @@
                 this.handlePlayError(error);
                 return { success: false, error };
             } finally {
-                window.setTimeout(() => {
-                    this.isApplyingRemoteSync = false;
-                }, REMOTE_SYNC_LOCK_MS);
+                this.scheduleRemoteSyncUnlock();
             }
+        }
+
+        beginRemoteSyncLock() {
+            if (this.remoteSyncUnlockTimer) {
+                window.clearTimeout(this.remoteSyncUnlockTimer);
+                this.remoteSyncUnlockTimer = null;
+            }
+            this.isApplyingRemoteSync = true;
+        }
+
+        scheduleRemoteSyncUnlock() {
+            if (this.remoteSyncUnlockTimer) {
+                window.clearTimeout(this.remoteSyncUnlockTimer);
+            }
+            this.remoteSyncUnlockTimer = window.setTimeout(() => {
+                this.isApplyingRemoteSync = false;
+                this.remoteSyncUnlockTimer = null;
+            }, REMOTE_SYNC_LOCK_MS);
+        }
+
+        async setRemotePlaybackRate(rate) {
+            this.beginRemoteSyncLock();
+            try {
+                return await this.player?.setPlaybackRate?.(rate);
+            } finally {
+                this.scheduleRemoteSyncUnlock();
+            }
+        }
+
+        applySyncStateDrift(playback = {}) {
+            const drift = this.getPlaybackDrift(playback);
+            if (!drift) {
+                this.clearDriftCorrection(false);
+                return this.applyPlaybackWithLock(playback, {
+                    shouldPlay: true,
+                    seekThreshold: SYNC_DRIFT_HARD_SEEK_THRESHOLD,
+                }, true);
+            }
+
+            this.logDrift('[WatchRoomController] sync drift', {
+                ...drift,
+                appliedRate: drift.hostRate,
+                threshold: SYNC_DRIFT_HARD_SEEK_THRESHOLD,
+                action: 'observe',
+            });
+
+            if (drift.absDrift > SYNC_DRIFT_HARD_SEEK_THRESHOLD) {
+                this.clearDriftCorrection(false);
+                this.logDrift('[WatchRoomController] hard drift correction', {
+                    ...drift,
+                    appliedRate: drift.hostRate,
+                    threshold: SYNC_DRIFT_HARD_SEEK_THRESHOLD,
+                    action: 'seek',
+                });
+                return this.applyPlaybackWithLock(playback, { shouldPlay: true, forceSeek: true }, true);
+            }
+
+            if (drift.absDrift >= SYNC_DRIFT_IGNORE_THRESHOLD) {
+                return this.applySoftDriftCorrection(playback, drift);
+            }
+
+            this.restorePlaybackRate(drift.hostRate, drift, 'drift_within_threshold');
+            this.clearDriftCorrection(false);
+            return this.applyPlaybackWithLock(playback, {
+                shouldPlay: true,
+                seekThreshold: SYNC_DRIFT_HARD_SEEK_THRESHOLD,
+            }, true);
+        }
+
+        getPlaybackDrift(playback = {}) {
+            if (!this.player) return null;
+            const expectedTime = this.player.calculateTargetTime
+                ? this.player.calculateTargetTime(playback)
+                : Math.max(0, Number(playback.currentTime) || 0);
+            const currentTime = this.player.getCurrentTime
+                ? this.player.getCurrentTime()
+                : Math.max(0, Number(this.player.getSnapshot?.().currentTime) || 0);
+            if (!Number.isFinite(expectedTime) || !Number.isFinite(currentTime)) return null;
+
+            const hostRate = this.normalizePlaybackRate(playback.playbackRate);
+            const drift = expectedTime - currentTime;
+            return {
+                drift,
+                absDrift: Math.abs(drift),
+                expectedTime,
+                currentTime,
+                hostRate,
+            };
+        }
+
+        normalizePlaybackRate(rate) {
+            const playbackRate = Number(rate);
+            return Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
+        }
+
+        clamp(number, min, max) {
+            return Math.min(max, Math.max(min, number));
+        }
+
+        getSoftCorrectionRate(drift, hostRate) {
+            const absDrift = Math.abs(Number(drift) || 0);
+            const range = SYNC_DRIFT_HARD_SEEK_THRESHOLD - SYNC_DRIFT_IGNORE_THRESHOLD;
+            const progress = range > 0
+                ? this.clamp((absDrift - SYNC_DRIFT_IGNORE_THRESHOLD) / range, 0, 1)
+                : 0;
+            const delta = SOFT_DRIFT_RATE_MIN_DELTA
+                + ((SOFT_DRIFT_RATE_MAX_DELTA - SOFT_DRIFT_RATE_MIN_DELTA) * progress);
+            const direction = drift > 0 ? 1 : -1;
+            const lowerBound = Math.min(SOFT_DRIFT_RATE_MIN, hostRate - SOFT_DRIFT_RATE_MAX_DELTA);
+            const upperBound = Math.max(SOFT_DRIFT_RATE_MAX, hostRate + SOFT_DRIFT_RATE_MAX_DELTA);
+            return this.clamp(hostRate + (direction * delta), lowerBound, upperBound);
+        }
+
+        applySoftDriftCorrection(playback = {}, drift = {}) {
+            const appliedRate = this.getSoftCorrectionRate(drift.drift, drift.hostRate);
+            this.logDrift('[WatchRoomController] soft drift correction', {
+                ...drift,
+                appliedRate,
+                threshold: SYNC_DRIFT_IGNORE_THRESHOLD,
+                action: drift.drift > 0 ? 'speed_up' : 'slow_down',
+            });
+
+            this.activeDriftCorrection = {
+                playback: {
+                    ...playback,
+                    paused: false,
+                    updatedAt: Number(playback.updatedAt) || Date.now(),
+                },
+                hostRate: drift.hostRate,
+                appliedRate,
+                direction: drift.drift > 0 ? 1 : -1,
+                startedAt: Date.now(),
+            };
+            this.driftCorrectionHostRate = drift.hostRate;
+            this.isSoftDriftCorrecting = true;
+            this.scheduleDriftCorrectionCheck();
+
+            return this.applyPlaybackWithLock(playback, {
+                shouldPlay: true,
+                disableSeek: true,
+                playbackRateOverride: appliedRate,
+            }, true);
+        }
+
+        scheduleDriftCorrectionCheck() {
+            if (this.driftCorrectionTimer) {
+                window.clearTimeout(this.driftCorrectionTimer);
+            }
+            this.driftCorrectionTimer = window.setTimeout(() => {
+                this.driftCorrectionTimer = null;
+                this.checkDriftCorrection();
+            }, SOFT_DRIFT_CHECK_INTERVAL);
+        }
+
+        checkDriftCorrection() {
+            const correction = this.activeDriftCorrection;
+            if (!correction) return;
+            if (this.state.role !== 'viewer' || this.state.status !== 'playing') {
+                this.clearDriftCorrection(true, 'inactive');
+                return;
+            }
+
+            const drift = this.getPlaybackDrift(correction.playback);
+            if (!drift) {
+                this.scheduleDriftCorrectionCheck();
+                return;
+            }
+
+            const crossedTarget = drift.drift === 0 || Math.sign(drift.drift) !== correction.direction;
+            const timedOut = Date.now() - correction.startedAt >= SOFT_DRIFT_MAX_MS;
+            if (drift.absDrift <= SOFT_DRIFT_RESTORE_THRESHOLD || crossedTarget || timedOut) {
+                this.clearDriftCorrection(true, timedOut ? 'timeout' : 'caught_up', drift);
+                return;
+            }
+
+            this.scheduleDriftCorrectionCheck();
+        }
+
+        clearDriftCorrection(restore = false, reason = 'clear', drift = null) {
+            if (this.driftCorrectionTimer) {
+                window.clearTimeout(this.driftCorrectionTimer);
+                this.driftCorrectionTimer = null;
+            }
+
+            const correction = this.activeDriftCorrection;
+            this.activeDriftCorrection = null;
+            this.isSoftDriftCorrecting = false;
+
+            if (restore && correction) {
+                this.restorePlaybackRate(correction.hostRate, drift, reason);
+            }
+        }
+
+        restorePlaybackRate(hostRate, drift = null, reason = 'restore') {
+            if (!Number.isFinite(Number(hostRate)) || Number(hostRate) <= 0) return null;
+
+            const currentRate = Number(this.player?.getPlaybackRate?.()) || 1;
+            if (Math.abs(currentRate - hostRate) < 0.001) return null;
+
+            this.logDrift('[WatchRoomController] restore playback rate', {
+                ...(drift || {}),
+                drift: Number.isFinite(Number(drift?.drift)) ? drift.drift : 0,
+                expectedTime: Number.isFinite(Number(drift?.expectedTime)) ? drift.expectedTime : 0,
+                currentTime: Number.isFinite(Number(drift?.currentTime)) ? drift.currentTime : this.player?.getCurrentTime?.() || 0,
+                hostRate,
+                appliedRate: hostRate,
+                threshold: SOFT_DRIFT_RESTORE_THRESHOLD,
+                action: reason,
+            });
+
+            return this.setRemotePlaybackRate(hostRate)?.catch?.(() => {});
+        }
+
+        logDrift(label, details = {}) {
+            window.LibertyDebug.log(label, {
+                drift: Number(details.drift || 0),
+                expectedTime: Number(details.expectedTime || 0),
+                currentTime: Number(details.currentTime || 0),
+                hostRate: Number(details.hostRate || 1),
+                appliedRate: Number(details.appliedRate || details.hostRate || 1),
+                threshold: details.threshold,
+                action: details.action || '',
+            });
         }
 
         handlePlaybackResult(result, shouldWarn = false) {
@@ -568,6 +823,7 @@
         }
 
         detachViewerReadonlyControls() {
+            this.clearDriftCorrection(true, 'detach_viewer_readonly');
             if (this.viewerReadonlyRetryTimer) {
                 window.clearTimeout(this.viewerReadonlyRetryTimer);
                 this.viewerReadonlyRetryTimer = null;
@@ -597,6 +853,7 @@
         restoreViewerToHostState(reason) {
             if (!this.lastHostPlayback) return null;
             const shouldPlay = this.lastHostPlayback.paused !== true;
+            this.clearDriftCorrection(false);
             window.LibertyDebug.log('[WatchRoomController] restore viewer to host state', { reason });
             return this.applyPlaybackWithLock(
                 this.lastHostPlayback,
