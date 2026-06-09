@@ -857,6 +857,8 @@ export class WatchRoomDurableObject {
         this.broadcastToAll(buildMessage('sync:episode-start', room.roomId, sourceClientId || room.hostId, {
             ...(room.media || {}),
             playback,
+            paused: false,
+            shouldPlay: true,
             status: ROOM_STATUS.PLAYING,
             sourceClientId: sourceClientId || room.hostId,
         }));

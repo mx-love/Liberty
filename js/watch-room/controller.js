@@ -356,10 +356,10 @@
                 ...(payload.playback || {}),
                 currentTime: Number(payload.playback?.currentTime) || 0,
                 playbackRate: Number(payload.playback?.playbackRate || payload.playbackRate) || 1,
-                paused: payload.playback?.paused === true,
+                paused: payload.shouldPlay === true ? false : payload.playback?.paused === true,
                 updatedAt: Number(payload.playback?.updatedAt) || Date.now(),
             };
-            const shouldPlay = playback.paused !== true;
+            const shouldPlay = payload.shouldPlay === true || playback.paused !== true;
 
             this.pendingEpisodeChangeId = '';
             this.clearDriftCorrection(true, 'episode_start');
@@ -747,7 +747,7 @@
 
         handlePlayError(error) {
             console.warn('[WatchRoomController] play failed', error);
-            this.toast('请点击一次播放以加入同步', 'warning');
+            this.toast('浏览器阻止自动播放，请点击播放继续', 'warning');
         }
 
         setLastHostPlayback(playback = {}) {

@@ -55,6 +55,7 @@
     let watchRoomPlayerAdapter = null;
     let watchRoomController = null;
     let pageExitHandlerBound = false;
+    let watchRoomEntryMode = 'create';
 
     const HOST_SYNC_INTERVAL = 5000;
     const HOST_SEEK_DEBOUNCE = 300;
@@ -713,37 +714,60 @@
         if (!content) return;
 
         if (!activeRoom) {
+            if (watchRoomEntryMode === 'join') {
+                content.innerHTML = `
+                    <div class="watch-room-card">
+                        <div>
+                            <h4>加入已有房间</h4>
+                            <p>输入好友发来的 8 位房间码加入。</p>
+                        </div>
+                        <div class="watch-room-join-row">
+                            <input id="watchRoomModalJoinInput" type="text" inputmode="numeric" maxlength="8" placeholder="房间码" autocomplete="off">
+                            <button type="button" class="watch-room-primary" id="joinWatchRoomFromModalBtn">加入</button>
+                        </div>
+                        <button type="button" class="watch-room-secondary" id="backToCreateWatchRoomBtn">返回创建房间</button>
+                    </div>
+                `;
+                const input = content.querySelector('#watchRoomModalJoinInput');
+                input?.addEventListener('input', () => {
+                    input.value = cleanRoomId(input.value).replace(/[^\d]/g, '').slice(0, 8);
+                });
+                input?.addEventListener('keydown', (event) => {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        joinRoomById(input.value);
+                    }
+                });
+                content.querySelector('#joinWatchRoomFromModalBtn')?.addEventListener('click', () => joinRoomById(input?.value || ''));
+                content.querySelector('#backToCreateWatchRoomBtn')?.addEventListener('click', () => {
+                    watchRoomEntryMode = 'create';
+                    renderWatchRoomPanel();
+                });
+                window.setTimeout(() => input?.focus?.(), 0);
+                return;
+            }
+
             content.innerHTML = `
                 <div class="watch-room-card">
                     <div>
                         <h4>创建房间</h4>
-                        <p>当前视频作为房主端，好友准备后一起开始。</p>
+                        <p>创建房间后，把房间码发给好友一起观看。</p>
                     </div>
                     <button type="button" class="watch-room-primary" id="createWatchRoomBtn">创建房间</button>
                 </div>
                 <div class="watch-room-card">
                     <div>
-                        <h4>加入房间</h4>
-                        <p>输入 8 位房间码，跟随房主播放。</p>
+                        <h4>已有房间？</h4>
+                        <p>加入好友发来的房间码。</p>
                     </div>
-                    <div class="watch-room-join-row">
-                        <input id="watchRoomModalJoinInput" type="text" inputmode="numeric" maxlength="8" placeholder="房间码" autocomplete="off">
-                        <button type="button" class="watch-room-primary" id="joinWatchRoomFromModalBtn">加入</button>
-                    </div>
+                    <button type="button" class="watch-room-secondary" id="showJoinWatchRoomBtn">加入已有房间</button>
                 </div>
             `;
-            const input = content.querySelector('#watchRoomModalJoinInput');
-            input?.addEventListener('input', () => {
-                input.value = cleanRoomId(input.value).replace(/[^\d]/g, '').slice(0, 8);
-            });
-            input?.addEventListener('keydown', (event) => {
-                if (event.key === 'Enter') {
-                    event.preventDefault();
-                    joinRoomById(input.value);
-                }
-            });
             content.querySelector('#createWatchRoomBtn')?.addEventListener('click', createRoom);
-            content.querySelector('#joinWatchRoomFromModalBtn')?.addEventListener('click', () => joinRoomById(input?.value || ''));
+            content.querySelector('#showJoinWatchRoomBtn')?.addEventListener('click', () => {
+                watchRoomEntryMode = 'join';
+                renderWatchRoomPanel();
+            });
             return;
         }
 
@@ -827,6 +851,9 @@
     }
 
     function openWatchRoomPanel() {
+        if (!activeRoom) {
+            watchRoomEntryMode = 'create';
+        }
         renderWatchRoomPanel();
         ensureWatchRoomModal().classList.remove('hidden');
     }
@@ -2265,6 +2292,7 @@
         clearStoredRoomSession();
         activeRoom = null;
         watchRoomController = null;
+        watchRoomEntryMode = 'create';
         isApplyingRemoteSync = false;
         viewerInitialSyncComplete = false;
         localTechnicalReady = false;
