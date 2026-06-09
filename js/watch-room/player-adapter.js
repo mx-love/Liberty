@@ -158,6 +158,20 @@
             }
         }
 
+        async loadEpisodeSnapshot(snapshot = {}, options = {}) {
+            const loader = window.LibertyPlayer?.loadEpisodeFromWatchRoomSnapshot;
+            if (typeof loader !== 'function') {
+                return { success: false, error: new Error('Episode snapshot loader is not ready') };
+            }
+
+            try {
+                await loader(snapshot, options);
+                return { success: true };
+            } catch (error) {
+                return { success: false, error };
+            }
+        }
+
         async pause() {
             const art = this.getArt();
             const video = this.getVideo();

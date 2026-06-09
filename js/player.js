@@ -611,6 +611,8 @@ let shortcutHintTimeout = null; // 用于控制快捷键提示显示时间
 let adFilteringEnabled = true; // 默认开启广告过滤
 let progressSaveInterval = null; // 定期保存进度的计时器
 let currentVideoUrl = ''; // 记录当前实际的视频URL
+let isApplyingWatchRoomEpisodeSnapshot = false;
+let pendingWatchRoomEpisodeChangeId = '';
 const isWebkit = (typeof window.webkitConvertPointFromNodeToPage === 'function')
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
 // ===== 【新增】移动端设备检测 =====
@@ -5043,10 +5045,207 @@ function renderEpisodes() {
     episodesList.innerHTML = html;
 }
 
+function getWatchRoomUiApi() {
+    return window.LibertyWatchRoom?.ui || null;
+}
+
+function getActiveWatchRoomForPlayer() {
+    return getWatchRoomUiApi()?.getActiveRoomSnapshot?.() || null;
+}
+
+function normalizeWatchRoomEpisodeEntries(episodes = currentEpisodes) {
+    return (Array.isArray(episodes) ? episodes : []).map((episode, index) => ({
+        index,
+        name: getCurrentEpisodeName(index) || `第 ${index + 1} 集`,
+        url: getPlayerEpisodeUrlValue(episode)
+    }));
+}
+
+function buildWatchRoomEpisodeSnapshot(index) {
+    const episodeIndex = Number(index);
+    const episodes = normalizeWatchRoomEpisodeEntries(currentEpisodes);
+    const target = episodes[episodeIndex];
+    if (!Number.isInteger(episodeIndex) || episodeIndex < 0 || episodeIndex >= episodes.length) return null;
+    if (!target?.url) return null;
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const video = art?.video;
+
+    return {
+        kind: 'episode',
+        title: currentVideoTitle || localStorage.getItem('currentVideoTitle') || '',
+        year: localStorage.getItem('currentVideoYear') || '',
+        sourceCode: urlParams.get('source') || localStorage.getItem('currentSourceCode') || '',
+        vodId: urlParams.get('id') || localStorage.getItem('currentVodId') || '',
+        episodeIndex,
+        episodeName: target.name || `第 ${episodeIndex + 1} 集`,
+        episodeUrl: target.url,
+        episodes,
+        currentTime: 0,
+        playbackRate: Number(video?.playbackRate) || 1,
+        updatedAt: Date.now(),
+        changeId: `episode_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+    };
+}
+
+function interceptWatchRoomEpisodeChange(index, reason = 'manual') {
+    if (isApplyingWatchRoomEpisodeSnapshot) return false;
+
+    const room = getActiveWatchRoomForPlayer();
+    if (!room?.roomId || !['waiting', 'starting', 'playing'].includes(room.status)) return false;
+
+    if (room.role === 'viewer') {
+        getWatchRoomUiApi()?.notifyViewerReadonlyControl?.();
+        return true;
+    }
+
+    if (room.role !== 'host' || room.status !== 'playing') return false;
+
+    const snapshot = buildWatchRoomEpisodeSnapshot(index);
+    if (!snapshot) {
+        showToast('当前集播放地址无效，无法同步切集', 'warning');
+        return true;
+    }
+
+    const sent = getWatchRoomUiApi()?.requestEpisodeChange?.(snapshot);
+    if (!sent) {
+        showToast('一起看尚未连接，请稍后重试', 'warning');
+        return true;
+    }
+
+    pendingWatchRoomEpisodeChangeId = snapshot.changeId;
+    window.LibertyDebug.log('[WatchRoom] episode change requested', {
+        reason,
+        changeId: snapshot.changeId,
+        episodeIndex: snapshot.episodeIndex,
+        episodeUrl: snapshot.episodeUrl
+    });
+    return true;
+}
+
+async function loadEpisodeFromWatchRoomSnapshot(snapshot = {}, options = {}) {
+    const changeId = String(snapshot.changeId || options.changeId || '');
+    const episodeIndex = Number(snapshot.episodeIndex);
+    const episodes = Array.isArray(snapshot.episodes)
+        ? snapshot.episodes.map((episode, index) => ({
+            index,
+            name: episode?.name || episode?.title || `第 ${index + 1} 集`,
+            url: episode?.url || ''
+        }))
+        : [];
+    const episodeUrl = String(snapshot.episodeUrl || episodes[episodeIndex]?.url || '');
+
+    if (!changeId) throw new Error('Missing episode changeId');
+    if (!Number.isInteger(episodeIndex) || episodeIndex < 0 || episodeIndex >= episodes.length) {
+        throw new Error('Invalid episode index');
+    }
+    if (!episodeUrl) throw new Error('Missing episode url');
+
+    isApplyingWatchRoomEpisodeSnapshot = true;
+    pendingWatchRoomEpisodeChangeId = changeId;
+
+    try {
+        if (saveHistoryTimer) {
+            clearTimeout(saveHistoryTimer);
+            saveHistoryTimer = null;
+        }
+        if (progressSaveInterval) {
+            clearInterval(progressSaveInterval);
+            progressSaveInterval = null;
+        }
+
+        currentDanmuCache = { episodeIndex: -1, danmuList: null, timestamp: 0 };
+        if (videoPlayer) videoPlayer.clearDanmuCache();
+
+        try {
+            const danmukuPlugin = art?.plugins?.artplayerPluginDanmuku;
+            if (typeof danmukuPlugin?.clear === 'function') danmukuPlugin.clear();
+        } catch (error) {}
+
+        const errorElement = document.getElementById('error');
+        if (errorElement) errorElement.style.display = 'none';
+        const loadingElement = document.getElementById('player-loading');
+        if (loadingElement) {
+            loadingElement.style.display = 'flex';
+            loadingElement.innerHTML = `
+                <div class="loading-spinner"></div>
+                <div>正在同步切集...</div>
+            `;
+        }
+
+        currentEpisodes = episodes;
+        currentEpisodeIndex = episodeIndex;
+        currentVideoUrl = episodeUrl;
+        videoHasEnded = false;
+        clearVideoProgress();
+
+        try {
+            localStorage.setItem('currentEpisodes', JSON.stringify(episodes));
+            localStorage.setItem('currentEpisodeIndex', String(episodeIndex));
+        } catch (error) {}
+
+        const currentUrl = new URL(window.location.href);
+        currentUrl.searchParams.set('index', episodeIndex);
+        currentUrl.searchParams.set('url', episodeUrl);
+        currentUrl.searchParams.delete('position');
+        window.history.replaceState({}, '', currentUrl.toString());
+
+        if (isWebkit) {
+            if (videoPlayer) videoPlayer.destroyHls();
+            currentHls = null;
+            initPlayer(episodeUrl);
+        } else {
+            if (videoPlayer) {
+                videoPlayer.clearTimer('autoSaveHistory');
+                videoPlayer.clearTimer('danmuSync');
+                videoPlayer.clearTimer('progressSave');
+                videoPlayer.clearTimer('seekDebounce');
+            }
+            if (currentHls) {
+                currentHls.stopLoad();
+                currentHls.detachMedia();
+            }
+            requestAnimationFrame(() => {
+                if (art) art.switch = episodeUrl;
+            });
+        }
+
+        updateEpisodeInfo();
+        updateButtonStates();
+        renderEpisodes();
+        reloadDanmakuForCurrentEpisode('watch-room-episode');
+        document.dispatchEvent(new CustomEvent('liberty:watch-room-video-changed', {
+            detail: { changeId, episodeIndex, episodeUrl }
+        }));
+
+        const readyState = await waitForCurrentVideoReady(8000, {
+            episodeIndex,
+            episodeUrl
+        });
+        if (!readyState.ready) {
+            throw new Error('Episode video is not ready');
+        }
+        return readyState;
+    } finally {
+        if (pendingWatchRoomEpisodeChangeId === changeId) {
+            pendingWatchRoomEpisodeChangeId = '';
+        }
+        isApplyingWatchRoomEpisodeSnapshot = false;
+    }
+}
+
+window.LibertyPlayer = window.LibertyPlayer || {};
+window.LibertyPlayer.loadEpisodeFromWatchRoomSnapshot = loadEpisodeFromWatchRoomSnapshot;
+window.LibertyPlayer.buildWatchRoomEpisodeSnapshot = buildWatchRoomEpisodeSnapshot;
+
 // 播放指定集数
 function playEpisode(index, switchReason = 'manual') {
     // 确保index在有效范围内
     if (index < 0 || index >= currentEpisodes.length) {
+        return;
+    }
+
+    if (interceptWatchRoomEpisodeChange(index, switchReason)) {
         return;
     }
 

@@ -54,6 +54,7 @@
     let waitTargetTime = 0;
     let watchRoomPlayerAdapter = null;
     let watchRoomController = null;
+    let pageExitHandlerBound = false;
 
     const HOST_SYNC_INTERVAL = 5000;
     const HOST_SEEK_DEBOUNCE = 300;
@@ -626,8 +627,8 @@
             <div class="watch-room-dialog" role="dialog" aria-modal="true" aria-labelledby="watchRoomModalTitle">
                 <div class="watch-room-dialog-header">
                     <div>
-                        <h3 id="watchRoomModalTitle" class="watch-room-title">一起看中</h3>
-                        <p class="watch-room-subtitle">已连接房间服务，可等待房主开播并同步播放状态。</p>
+                        <h3 id="watchRoomModalTitle" class="watch-room-title">一起看</h3>
+                        <p class="watch-room-subtitle">创建房间或输入房间码加入</p>
                     </div>
                     <button type="button" class="watch-room-close" data-watch-room-close="true" aria-label="关闭一起看弹窗">&times;</button>
                 </div>
@@ -697,19 +698,54 @@
         const rows = participants.map((participant) => {
             const label = participant.role === 'host' ? '房主' : '观众';
             const readyText = participant.ready ? '已准备' : '未准备';
-            return `<div class="watch-room-current-row">
-                <span>${escapeHtml(label)}</span>
-                <strong>${escapeHtml(participant.name || participant.id || label)} · ${readyText}</strong>
+            return `<div class="watch-room-member-row">
+                <span>${escapeHtml(participant.name || participant.id || label)}</span>
+                <strong>${escapeHtml(label)} · ${readyText}</strong>
             </div>`;
         }).join('');
 
-        return `<div class="watch-room-current">${rows}</div>`;
+        return `<div class="watch-room-members">${rows}</div>`;
     }
 
     function renderWatchRoomPanel() {
         const modal = ensureWatchRoomModal();
         const content = modal.querySelector('#watchRoomModalContent');
-        if (!content || !activeRoom) return;
+        if (!content) return;
+
+        if (!activeRoom) {
+            content.innerHTML = `
+                <div class="watch-room-card">
+                    <div>
+                        <h4>创建房间</h4>
+                        <p>当前视频作为房主端，好友准备后一起开始。</p>
+                    </div>
+                    <button type="button" class="watch-room-primary" id="createWatchRoomBtn">创建房间</button>
+                </div>
+                <div class="watch-room-card">
+                    <div>
+                        <h4>加入房间</h4>
+                        <p>输入 8 位房间码，跟随房主播放。</p>
+                    </div>
+                    <div class="watch-room-join-row">
+                        <input id="watchRoomModalJoinInput" type="text" inputmode="numeric" maxlength="8" placeholder="房间码" autocomplete="off">
+                        <button type="button" class="watch-room-primary" id="joinWatchRoomFromModalBtn">加入</button>
+                    </div>
+                </div>
+            `;
+            const input = content.querySelector('#watchRoomModalJoinInput');
+            input?.addEventListener('input', () => {
+                input.value = cleanRoomId(input.value).replace(/[^\d]/g, '').slice(0, 8);
+            });
+            input?.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    joinRoomById(input.value);
+                }
+            });
+            content.querySelector('#createWatchRoomBtn')?.addEventListener('click', createRoom);
+            content.querySelector('#joinWatchRoomFromModalBtn')?.addEventListener('click', () => joinRoomById(input?.value || ''));
+            return;
+        }
 
         const playbackInfo = getCurrentPlaybackInfo();
         const isHost = activeRoom.role === 'host';
@@ -731,19 +767,31 @@
             });
         }
         content.innerHTML = `
-            <div class="watch-room-room-id" aria-label="房间号">${activeRoom.roomId}</div>
-            <div class="watch-room-meta-grid">
-                <div>
-                    <span class="watch-room-meta-label">在线</span>
-                    <strong>${getParticipantCount()}/${getMaxMembers()}</strong>
+            <div class="watch-room-status-card">
+                <div class="watch-room-code-row">
+                    <div>
+                        <span class="watch-room-meta-label">房间码</span>
+                        <strong class="watch-room-room-id" aria-label="房间号">${activeRoom.roomId}</strong>
+                    </div>
+                    <button type="button" class="watch-room-secondary" id="copyWatchRoomIdBtn">复制</button>
                 </div>
-                <div>
-                    <span class="watch-room-meta-label">身份</span>
-                    <strong>${isHost ? '你是房主' : '你是观众'}</strong>
-                </div>
-                <div>
-                    <span class="watch-room-meta-label">状态</span>
-                    <strong>${getRoomStatusText()}</strong>
+                <div class="watch-room-meta-grid">
+                    <div>
+                        <span class="watch-room-meta-label">身份</span>
+                        <strong>${isHost ? '房主' : '观众'}</strong>
+                    </div>
+                    <div>
+                        <span class="watch-room-meta-label">状态</span>
+                        <strong>${getRoomStatusText()}</strong>
+                    </div>
+                    <div>
+                        <span class="watch-room-meta-label">在线</span>
+                        <strong>${getParticipantCount()}/${getMaxMembers()}</strong>
+                    </div>
+                    ${isViewer ? `<div>
+                        <span class="watch-room-meta-label">我的状态</span>
+                        <strong>${getViewerReadyStatusText()}</strong>
+                    </div>` : ''}
                 </div>
             </div>
             <div class="watch-room-current">
@@ -760,22 +808,9 @@
                     <strong>${formatTime(playbackInfo.currentTime)}</strong>
                 </div>
             </div>
-            <p class="watch-room-help">${isHost
-                ? '把房间号发给好友，好友打开网站后在设置里输入房间号即可加入。'
-                : activeRoom.status === 'waiting'
-                    ? '正在等待房主开始播放。'
-                    : activeRoom.status === 'starting'
-                        ? '准备开播中。'
-                        : '已加入一起看，正在跟随房主播放。'}</p>
+            <div class="watch-room-section-title">成员</div>
             ${renderParticipantsStatus()}
-            ${isViewer ? `<div class="watch-room-current">
-                <div class="watch-room-current-row">
-                    <span>我的状态</span>
-                    <strong>${getViewerReadyStatusText()}</strong>
-                </div>
-            </div>` : ''}
             <div class="watch-room-actions">
-                ${isHost ? '<button type="button" class="watch-room-primary" id="copyWatchRoomIdBtn">复制房间号</button>' : ''}
                 ${isWaitingHost ? `<button type="button" class="watch-room-primary" id="startWatchRoomBtn" ${canStart ? '' : 'disabled'}>${canStart ? '开始一起看' : '等待观众准备'}</button>` : ''}
                 ${isViewer && activeRoom.status === 'waiting' ? `<button type="button" class="watch-room-primary" id="viewerReadyBtn" ${!localUserReady && !getLocalParticipant()?.ready ? '' : 'disabled'}>${viewerReadyButtonText}</button>` : ''}
                 <button type="button" class="${isHost ? 'watch-room-danger' : 'watch-room-primary'}" id="${isHost ? 'endWatchRoomBtn' : 'leaveWatchRoomBtn'}">
@@ -792,11 +827,6 @@
     }
 
     function openWatchRoomPanel() {
-        if (!activeRoom) {
-            createRoom();
-            return;
-        }
-
         renderWatchRoomPanel();
         ensureWatchRoomModal().classList.remove('hidden');
     }
@@ -1955,6 +1985,7 @@
                 return;
             }
             showMessage('一起看连接失败', 'error');
+            clearRoomState();
         });
     }
 
@@ -1983,6 +2014,9 @@
             'sync:pause',
             'sync:seek',
             'sync:state',
+            'sync:episode-prepare',
+            'sync:episode-start',
+            'sync:episode-error',
             'room:ended',
             'room:error',
         ];
@@ -2144,6 +2178,24 @@
         stopHeartbeat();
     }
 
+    function handlePageExit() {
+        if (!activeRoom || !socket) return;
+
+        try {
+            if (socket.readyState === WebSocket.OPEN) {
+                sendSocketMessage({
+                    type: activeRoom.role === 'host' ? 'room:end' : 'room:leave'
+                });
+            }
+        } catch (error) {}
+
+        try {
+            socket.close();
+        } catch (error) {}
+        socket = null;
+        stopHeartbeat();
+    }
+
     async function endRoom() {
         if (!activeRoom) return;
 
@@ -2175,6 +2227,32 @@
         }
         clearRoomState();
         showMessage('已退出一起看', 'info');
+    }
+
+    function getActiveRoomSnapshot() {
+        return activeRoom ? { ...activeRoom } : null;
+    }
+
+    function requestEpisodeChange(snapshot = {}) {
+        const controller = getWatchRoomController();
+        if (controller?.requestEpisodeChange?.(snapshot)) return true;
+
+        if (
+            activeRoom?.role !== 'host'
+            || activeRoom?.status !== 'playing'
+            || socket?.readyState !== WebSocket.OPEN
+        ) {
+            return false;
+        }
+
+        return sendSocketMessage({
+            type: 'host:episode-change',
+            payload: snapshot,
+        });
+    }
+
+    function notifyViewerReadonlyControl() {
+        showMessage('播放控制已由房主托管。', 'info');
     }
 
     function clearRoomState() {
@@ -2289,6 +2367,8 @@
         const messages = {
             ROOM_NOT_FOUND: '房间不存在或已结束',
             ROOM_ENDED: '房间不存在或已结束',
+            ROOM_CLOSED: '房间不存在或已结束',
+            ROOM_EXPIRED: '房间不存在或已结束',
             ROOM_FULL: '房间人数已满',
             INVALID_ROOM_ID: '请输入 8 位房间号',
             HOST_DISCONNECTED: '房主暂时离线',
@@ -2342,9 +2422,15 @@
     function initWatchRoomUI() {
         initIndexWatchRoomUI();
         initPlayerWatchRoomUI();
+        if (!pageExitHandlerBound) {
+            pageExitHandlerBound = true;
+            window.addEventListener('pagehide', handlePageExit);
+            window.addEventListener('beforeunload', handlePageExit);
+        }
     }
 
     document.addEventListener('liberty:player-ready', setupPlayerSyncForRoom);
+    document.addEventListener('liberty:watch-room-video-changed', setupPlayerSyncForRoom);
     document.addEventListener('DOMContentLoaded', initWatchRoomUI);
 
     window.LibertyWatchRoom.ui = {
@@ -2361,6 +2447,9 @@
         leaveRoom,
         joinRoomById,
         joinMockRoomById: joinRoomById,
-        copyRoomId
+        copyRoomId,
+        getActiveRoomSnapshot,
+        requestEpisodeChange,
+        notifyViewerReadonlyControl
     };
 })();

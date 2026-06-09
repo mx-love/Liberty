@@ -4,12 +4,16 @@ const ROOM_STATUS = {
     STARTING: 'starting',
     PLAYING: 'playing',
     ENDED: 'ended',
+    CLOSED: 'closed',
+    EXPIRED: 'expired',
     HOST_DISCONNECTED: 'host_disconnected',
 };
 
 const ERROR_CODE = {
     ROOM_NOT_FOUND: 'ROOM_NOT_FOUND',
     ROOM_ENDED: 'ROOM_ENDED',
+    ROOM_CLOSED: 'ROOM_CLOSED',
+    ROOM_EXPIRED: 'ROOM_EXPIRED',
     ROOM_FULL: 'ROOM_FULL',
     INVALID_ROOM_ID: 'INVALID_ROOM_ID',
     HOST_DISCONNECTED: 'HOST_DISCONNECTED',
@@ -30,6 +34,26 @@ function jsonResponse(data, status = 200) {
 
 function isValidRoomId(roomId) {
     return /^\d{8}$/.test(String(roomId || '')) && roomId !== '00000000';
+}
+
+function isTerminalRoomStatus(status) {
+    return [
+        ROOM_STATUS.ENDED,
+        ROOM_STATUS.CLOSED,
+        ROOM_STATUS.EXPIRED,
+        ROOM_STATUS.HOST_DISCONNECTED,
+    ].includes(status);
+}
+
+function getTerminalRoomError(status) {
+    if (status === ROOM_STATUS.CLOSED) return ERROR_CODE.ROOM_CLOSED;
+    if (status === ROOM_STATUS.EXPIRED) return ERROR_CODE.ROOM_EXPIRED;
+    if (status === ROOM_STATUS.HOST_DISCONNECTED) return ERROR_CODE.HOST_DISCONNECTED;
+    return ERROR_CODE.ROOM_ENDED;
+}
+
+function getTerminalRoomHttpStatus(status) {
+    return status === ROOM_STATUS.HOST_DISCONNECTED ? 409 : 410;
 }
 
 function now() {
@@ -140,6 +164,69 @@ function normalizePreparePayload(payload = {}, previousPlayback = {}) {
     };
 }
 
+function normalizeEpisodeEntry(entry, index) {
+    const source = entry && typeof entry === 'object'
+        ? entry
+        : { url: entry };
+    return {
+        index,
+        name: String(source.name || source.title || source.episodeName || `第 ${index + 1} 集`),
+        url: String(source.url || ''),
+    };
+}
+
+function normalizeEpisodeSnapshot(payload = {}) {
+    const episodeIndex = Number(payload.episodeIndex);
+    const episodes = Array.isArray(payload.episodes)
+        ? payload.episodes.map(normalizeEpisodeEntry)
+        : [];
+    const episode = Number.isInteger(episodeIndex) ? episodes[episodeIndex] : null;
+    const episodeUrl = String(payload.episodeUrl || episode?.url || '');
+    const changeId = String(payload.changeId || '');
+
+    if (!Number.isInteger(episodeIndex) || episodeIndex < 0 || episodeIndex >= episodes.length) {
+        return { success: false, error: 'INVALID_EPISODE_INDEX' };
+    }
+    if (!episodeUrl) {
+        return { success: false, error: 'MISSING_EPISODE_URL' };
+    }
+    if (!episodes.length) {
+        return { success: false, error: 'MISSING_EPISODES' };
+    }
+    if (!changeId) {
+        return { success: false, error: 'MISSING_CHANGE_ID' };
+    }
+
+    return {
+        success: true,
+        snapshot: {
+            kind: 'episode',
+            title: String(payload.title || ''),
+            year: String(payload.year || ''),
+            sourceCode: String(payload.sourceCode || ''),
+            vodId: String(payload.vodId || ''),
+            episodeIndex,
+            episodeName: String(payload.episodeName || episode?.name || `第 ${episodeIndex + 1} 集`),
+            episodeUrl,
+            episodes,
+            currentTime: 0,
+            playbackRate: normalizeNumber(payload.playbackRate, 1) || 1,
+            updatedAt: normalizeNumber(payload.updatedAt, now()),
+            changeId,
+        },
+    };
+}
+
+function buildEpisodePlayback(snapshot = {}, previousPlayback = {}, paused = true) {
+    return {
+        paused,
+        currentTime: 0,
+        duration: 0,
+        playbackRate: normalizeNumber(snapshot.playbackRate, previousPlayback.playbackRate || 1) || 1,
+        updatedAt: now(),
+    };
+}
+
 export class WatchRoomDurableObject {
     constructor(state, env) {
         this.state = state;
@@ -171,6 +258,11 @@ export class WatchRoomDurableObject {
 
     async alarm() {
         console.log('[WatchRoomDO] starting timeout reached');
+        const room = await this.readRoom();
+        if (room?.pendingEpisodeChangeId) {
+            await this.maybeStartEpisodeChange(room.pendingEpisodeChangeId, room.hostId, true);
+            return;
+        }
         await this.maybeEnterPlaying('', true);
     }
 
@@ -202,7 +294,7 @@ export class WatchRoomDurableObject {
         }
 
         const existing = await this.readRoom();
-        if (existing && existing.status !== ROOM_STATUS.ENDED) {
+        if (existing && !isTerminalRoomStatus(existing.status)) {
             return jsonResponse({ success: false, error: 'ROOM_ID_CONFLICT' }, 409);
         }
 
@@ -259,9 +351,15 @@ export class WatchRoomDurableObject {
             return jsonResponse({ success: false, error: ERROR_CODE.ROOM_NOT_FOUND }, 404);
         }
 
-        if (room.status === ROOM_STATUS.ENDED) {
-            console.log('[WatchRoomDO] room ended', roomId);
-            return jsonResponse({ success: false, error: ERROR_CODE.ROOM_ENDED }, 410);
+        if (isTerminalRoomStatus(room.status)) {
+            console.log('[WatchRoomDO] room unavailable', {
+                roomId,
+                status: room.status,
+            });
+            return jsonResponse(
+                { success: false, error: getTerminalRoomError(room.status), status: room.status },
+                getTerminalRoomHttpStatus(room.status)
+            );
         }
 
         if (![ROOM_STATUS.WAITING, ROOM_STATUS.STARTING, ROOM_STATUS.PLAYING].includes(room.status)) {
@@ -296,15 +394,18 @@ export class WatchRoomDurableObject {
             return jsonResponse({ success: false, error: ERROR_CODE.ROOM_NOT_FOUND }, 404);
         }
 
-        if (room.status === ROOM_STATUS.ENDED) {
-            return jsonResponse({ success: false, error: ERROR_CODE.ROOM_ENDED }, 410);
+        if (isTerminalRoomStatus(room.status)) {
+            return jsonResponse(
+                { success: false, error: getTerminalRoomError(room.status), status: room.status },
+                getTerminalRoomHttpStatus(room.status)
+            );
         }
 
         if (clientId !== room.hostId) {
             return jsonResponse({ success: false, error: ERROR_CODE.UNAUTHORIZED_ACTION }, 403);
         }
 
-        await this.endRoom(room, clientId);
+        await this.endRoom(room, clientId, 'host_ended');
         return jsonResponse({ success: true, roomId: room.roomId, status: ROOM_STATUS.ENDED });
     }
 
@@ -326,15 +427,14 @@ export class WatchRoomDurableObject {
             return jsonResponse({ success: false, error: ERROR_CODE.ROOM_NOT_FOUND }, 404);
         }
 
-        if (room.status === ROOM_STATUS.ENDED) {
-            return jsonResponse({ success: false, error: ERROR_CODE.ROOM_ENDED }, 410);
+        if (isTerminalRoomStatus(room.status)) {
+            return jsonResponse(
+                { success: false, error: getTerminalRoomError(room.status), status: room.status },
+                getTerminalRoomHttpStatus(room.status)
+            );
         }
 
         const existingParticipant = room.participants?.[clientId];
-
-        if (room.status === ROOM_STATUS.HOST_DISCONNECTED && role !== 'host') {
-            return jsonResponse({ success: false, error: ERROR_CODE.HOST_DISCONNECTED }, 409);
-        }
 
         if (
             role === 'viewer'
@@ -381,9 +481,6 @@ export class WatchRoomDurableObject {
         };
 
         if (role === 'host') {
-            if (room.status === ROOM_STATUS.HOST_DISCONNECTED) {
-                room.status = ROOM_STATUS.WAITING;
-            }
             room.hostDisconnectedAt = null;
         }
 
@@ -414,6 +511,12 @@ export class WatchRoomDurableObject {
                 status: room.status,
                 media: room.media || {},
                 playback: room.playback || {},
+            }));
+        } else if (role === 'viewer' && room.status === ROOM_STATUS.STARTING && room.pendingEpisodeChangeId) {
+            socket.send(buildMessage('sync:episode-prepare', room.roomId, clientId, {
+                ...(room.media || {}),
+                playback: room.playback || {},
+                status: ROOM_STATUS.STARTING,
             }));
         } else if (role === 'viewer' && room.status === ROOM_STATUS.STARTING) {
             socket.send(buildMessage('sync:prepare', room.roomId, clientId, {
@@ -452,7 +555,7 @@ export class WatchRoomDurableObject {
         }
 
         const room = await this.readRoom();
-        if (!room || room.status === ROOM_STATUS.ENDED) {
+        if (!room || isTerminalRoomStatus(room.status)) {
             this.sendError(socket, ERROR_CODE.ROOM_ENDED, 'Room has ended');
             return;
         }
@@ -477,7 +580,7 @@ export class WatchRoomDurableObject {
                 return;
             }
 
-            await this.endRoom(room, session.clientId);
+            await this.endRoom(room, session.clientId, 'host_ended');
             return;
         }
 
@@ -491,8 +594,18 @@ export class WatchRoomDurableObject {
             return;
         }
 
+        if (message.type === 'client:episode-ready') {
+            await this.handleClientEpisodeReady(room, session, message);
+            return;
+        }
+
         if (message.type === 'host:start') {
             await this.handleHostStart(socket, room, session, message);
+            return;
+        }
+
+        if (message.type === 'host:episode-change') {
+            await this.handleHostEpisodeChange(socket, room, session, message);
             return;
         }
 
@@ -629,6 +742,127 @@ export class WatchRoomDurableObject {
         }, 3000);
     }
 
+    getOnlineClientIds() {
+        return [...this.sessions.values()]
+            .map((session) => session.clientId)
+            .filter(Boolean);
+    }
+
+    async handleHostEpisodeChange(socket, room, session, message) {
+        console.log('[WatchRoomDO] host:episode-change received', {
+            roomId: room.roomId,
+            clientId: session.clientId,
+            role: session.role,
+            status: room.status,
+        });
+
+        if (session.role !== 'host' || session.clientId !== room.hostId) {
+            this.sendError(socket, ERROR_CODE.UNAUTHORIZED_ACTION, 'Only host can change episode');
+            return;
+        }
+
+        if (room.status !== ROOM_STATUS.PLAYING) {
+            this.sendError(socket, ERROR_CODE.UNAUTHORIZED_ACTION, 'Room is not playing');
+            return;
+        }
+
+        const normalized = normalizeEpisodeSnapshot(message.payload || {});
+        if (!normalized.success) {
+            this.sendError(socket, normalized.error, 'Invalid episode snapshot');
+            return;
+        }
+
+        const snapshot = {
+            ...normalized.snapshot,
+            updatedAt: now(),
+        };
+        const playback = buildEpisodePlayback(snapshot, room.playback || {}, true);
+
+        room.status = ROOM_STATUS.STARTING;
+        room.media = snapshot;
+        room.playback = playback;
+        room.pendingEpisodeChangeId = snapshot.changeId;
+        room.episodeReady = {};
+        room.episodeStartedAt = now();
+
+        Object.values(room.participants || {}).forEach((participant) => {
+            participant.startingReady = false;
+        });
+
+        await this.writeRoom(room);
+        this.broadcastToAll(buildMessage('sync:episode-prepare', room.roomId, session.clientId, {
+            ...snapshot,
+            playback,
+            status: ROOM_STATUS.STARTING,
+            sourceClientId: session.clientId,
+        }));
+        await this.broadcastParticipants(room);
+        await this.state.storage.setAlarm(now() + 3000);
+
+        setTimeout(() => {
+            this.maybeStartEpisodeChange(snapshot.changeId, room.hostId, true).catch((error) => {
+                console.warn('[WatchRoomDO] episode change timeout failed', error?.message || String(error));
+            });
+        }, 3000);
+    }
+
+    async handleClientEpisodeReady(room, session, message) {
+        const changeId = String(message.payload?.changeId || '');
+        if (
+            room.status !== ROOM_STATUS.STARTING
+            || !room.pendingEpisodeChangeId
+            || changeId !== room.pendingEpisodeChangeId
+        ) {
+            return;
+        }
+
+        room.episodeReady = room.episodeReady || {};
+        room.episodeReady[session.clientId] = now();
+        if (room.participants?.[session.clientId]) {
+            room.participants[session.clientId].startingReady = true;
+            room.participants[session.clientId].lastSeenAt = now();
+        }
+        await this.writeRoom(room);
+        await this.broadcastParticipants(room);
+        await this.maybeStartEpisodeChange(changeId, room.hostId, false);
+    }
+
+    async maybeStartEpisodeChange(changeId, sourceClientId, force = false) {
+        const room = await this.readRoom();
+        if (
+            !room
+            || room.status !== ROOM_STATUS.STARTING
+            || room.pendingEpisodeChangeId !== changeId
+        ) {
+            return;
+        }
+
+        const ready = room.episodeReady || {};
+        const onlineClientIds = this.getOnlineClientIds();
+        const allReady = onlineClientIds.length === 0
+            || onlineClientIds.every((clientId) => ready[clientId]);
+        if (!force && !allReady) return;
+
+        const playback = buildEpisodePlayback(room.media || {}, room.playback || {}, false);
+        room.status = ROOM_STATUS.PLAYING;
+        room.playback = playback;
+        delete room.pendingEpisodeChangeId;
+        delete room.episodeReady;
+        delete room.episodeStartedAt;
+        await this.writeRoom(room);
+        try {
+            await this.state.storage.deleteAlarm();
+        } catch (error) {}
+
+        this.broadcastToAll(buildMessage('sync:episode-start', room.roomId, sourceClientId || room.hostId, {
+            ...(room.media || {}),
+            playback,
+            status: ROOM_STATUS.PLAYING,
+            sourceClientId: sourceClientId || room.hostId,
+        }));
+        await this.broadcastParticipants(room);
+    }
+
     async handleViewerReady(room, session, message) {
         if (session.role !== 'viewer') {
             this.sendErrorByClientId(session.clientId, ERROR_CODE.UNAUTHORIZED_ACTION, 'Only viewer can become ready');
@@ -652,6 +886,7 @@ export class WatchRoomDurableObject {
 
     async handleClientReady(room, session, message) {
         if (room.status !== ROOM_STATUS.STARTING) return;
+        if (room.pendingEpisodeChangeId) return;
 
         if (room.participants?.[session.clientId]) {
             room.participants[session.clientId].startingReady = true;
@@ -683,6 +918,7 @@ export class WatchRoomDurableObject {
     async maybeEnterPlaying(sourceClientId, force = false) {
         const room = await this.readRoom();
         if (!room || room.status !== ROOM_STATUS.STARTING) return;
+        if (room.pendingEpisodeChangeId) return;
         const readyState = getStartingReadyState(room);
         console.log('[WatchRoomDO] starting ready state', readyState);
         if (!force && !this.areStartingClientsReady(room)) return;
@@ -732,26 +968,38 @@ export class WatchRoomDurableObject {
         this.sessions.delete(socket);
 
         const room = await this.readRoom();
-        if (!room || room.status === ROOM_STATUS.ENDED) return;
+        if (!room || isTerminalRoomStatus(room.status)) return;
 
-        if (session.role === 'host' && session.clientId === room.hostId && disconnected) {
-            room.status = ROOM_STATUS.HOST_DISCONNECTED;
-            room.hostDisconnectedAt = now();
-            // TODO: 后续阶段通过 alarm 或外部请求补齐 60 秒宽限后的自动结束逻辑。
-        } else {
-            delete room.participants[session.clientId];
+        if (session.role === 'host' && session.clientId === room.hostId) {
+            await this.endRoom(
+                room,
+                session.clientId,
+                disconnected ? 'host_disconnected' : 'host_left'
+            );
+            return;
+        }
+
+        delete room.participants[session.clientId];
+
+        if (Object.keys(room.participants || {}).length === 0) {
+            room.status = ROOM_STATUS.EXPIRED;
+            room.expiredAt = now();
+            await this.writeRoom(room);
+            return;
         }
 
         await this.writeRoom(room);
         await this.broadcastParticipants(room);
     }
 
-    async endRoom(room, clientId) {
+    async endRoom(room, clientId, reason = 'host_ended') {
         room.status = ROOM_STATUS.ENDED;
+        room.endedAt = now();
+        room.endReason = reason;
         await this.writeRoom(room);
 
         const message = buildMessage('room:ended', room.roomId, clientId, {
-            reason: 'host_ended',
+            reason,
         });
 
         for (const socket of this.sessions.keys()) {

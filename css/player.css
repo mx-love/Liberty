@@ -1020,11 +1020,13 @@ textarea:focus {
 
 .watch-room-dialog {
     position: relative;
-    width: min(440px, 96vw);
-    max-height: min(680px, 92vh);
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    width: min(500px, calc(100vw - 32px));
+    max-height: min(680px, 88vh);
+    overflow: hidden;
     border: 1px solid #333;
-    border-radius: 12px;
+    border-radius: 10px;
     background: #151515;
     color: #fff;
     box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
@@ -1065,19 +1067,84 @@ textarea:focus {
 }
 
 .watch-room-dialog-body {
+    min-height: 0;
+    overflow-y: auto;
     padding: 18px;
 }
 
-.watch-room-room-id {
-    padding: 14px 16px;
+.watch-room-card,
+.watch-room-status-card,
+.watch-room-current,
+.watch-room-members {
+    border: 1px solid #2d2d2d;
+    border-radius: 8px;
+    background: #1b1b1b;
+}
+
+.watch-room-card {
+    display: grid;
+    gap: 14px;
+    padding: 14px;
+}
+
+.watch-room-card + .watch-room-card,
+.watch-room-current,
+.watch-room-section-title,
+.watch-room-members {
+    margin-top: 12px;
+}
+
+.watch-room-card h4 {
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.watch-room-card p {
+    margin-top: 4px;
+    color: #9ca3af;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.watch-room-join-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+}
+
+.watch-room-join-row input {
+    min-width: 0;
+    min-height: 42px;
+    border: 1px solid #333;
+    border-radius: 8px;
+    background: #101010;
+    padding: 0 12px;
+    color: #fff;
+    font-size: 16px;
+}
+
+.watch-room-status-card {
+    padding: 14px;
+}
+
+.watch-room-code-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     border: 1px solid rgba(96, 165, 250, 0.45);
-    border-radius: 10px;
+    border-radius: 8px;
     background: rgba(37, 99, 235, 0.16);
+    padding: 12px;
+}
+
+.watch-room-room-id {
+    display: block;
+    margin-top: 2px;
     color: #bfdbfe;
-    font-size: clamp(28px, 9vw, 40px);
+    font-size: 30px;
     font-weight: 800;
     line-height: 1;
-    text-align: center;
     letter-spacing: 0.08em;
 }
 
@@ -1088,15 +1155,8 @@ textarea:focus {
     margin-top: 14px;
 }
 
-.watch-room-meta-grid > div,
-.watch-room-current {
-    border: 1px solid #2d2d2d;
-    border-radius: 10px;
-    background: #1b1b1b;
-}
-
 .watch-room-meta-grid > div {
-    padding: 12px;
+    padding: 10px 0 0;
 }
 
 .watch-room-meta-label,
@@ -1107,7 +1167,6 @@ textarea:focus {
 }
 
 .watch-room-current {
-    margin-top: 14px;
     padding: 12px;
 }
 
@@ -1128,11 +1187,41 @@ textarea:focus {
     overflow-wrap: anywhere;
 }
 
-.watch-room-help {
-    margin-top: 14px;
+.watch-room-section-title {
+    color: #9ca3af;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.watch-room-members {
+    max-height: 180px;
+    overflow-y: auto;
+    padding: 6px 12px;
+}
+
+.watch-room-member-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 0;
+}
+
+.watch-room-member-row + .watch-room-member-row {
+    border-top: 1px solid #2a2a2a;
+}
+
+.watch-room-member-row span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.watch-room-member-row strong {
+    flex: 0 0 auto;
     color: #d1d5db;
-    font-size: 13px;
-    line-height: 1.7;
+    font-size: 12px;
 }
 
 .watch-room-actions {
@@ -1160,6 +1249,20 @@ textarea:focus {
     background: #1d4ed8;
 }
 
+.watch-room-secondary {
+    min-height: 36px;
+    border: 1px solid rgba(147, 197, 253, 0.35);
+    border-radius: 8px;
+    background: rgba(30, 64, 175, 0.35);
+    padding: 8px 12px;
+    color: #dbeafe;
+    font-size: 13px;
+}
+
+.watch-room-secondary:hover {
+    background: rgba(30, 64, 175, 0.55);
+}
+
 .watch-room-danger {
     border: 1px solid rgba(248, 113, 113, 0.45);
     background: rgba(127, 29, 29, 0.28);
@@ -1171,8 +1274,15 @@ textarea:focus {
 }
 
 @media (max-width: 480px) {
+    .watch-room-modal {
+        align-items: flex-end;
+        padding: 0 12px max(12px, env(safe-area-inset-bottom));
+    }
+
     .watch-room-dialog {
-        border-radius: 10px;
+        width: calc(100vw - 24px);
+        max-height: min(82vh, 680px);
+        border-radius: 12px 12px 10px 10px;
     }
 
     .watch-room-dialog-header,
@@ -1185,9 +1295,32 @@ textarea:focus {
         grid-template-columns: 1fr;
     }
 
+    .watch-room-join-row {
+        grid-template-columns: 1fr;
+    }
+
+    .watch-room-code-row {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .watch-room-actions {
+        flex-direction: column;
+    }
+
+    .watch-room-room-id {
+        font-size: 28px;
+        overflow-wrap: anywhere;
+    }
+
     .watch-room-current-row {
         grid-template-columns: 1fr;
         gap: 4px;
+    }
+
+    .watch-room-actions button,
+    .watch-room-secondary {
+        width: 100%;
     }
 }
 

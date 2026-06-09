@@ -79,6 +79,7 @@
             this.isSoftDriftCorrecting = false;
             this.activeDriftCorrection = null;
             this.remoteSyncUnlockTimer = null;
+            this.pendingEpisodeChangeId = '';
         }
 
         setContext(context = {}) {
@@ -114,6 +115,9 @@
             if (type === 'sync:pause') return this.handleSyncPause(payload);
             if (type === 'sync:seek') return this.handleSyncSeek(payload);
             if (type === 'sync:state') return this.handleSyncState(payload);
+            if (type === 'sync:episode-prepare') return this.handleSyncEpisodePrepare(payload);
+            if (type === 'sync:episode-start') return this.handleSyncEpisodeStart(payload);
+            if (type === 'sync:episode-error') return this.handleSyncEpisodeError(payload);
             if (type === 'room:ended') return this.handleRoomEnded(payload);
             if (type === 'room:error') return this.handleRoomError(payload);
             return null;
@@ -229,6 +233,7 @@
 
         handleSyncStart(payload = {}) {
             window.LibertyDebug.log('[WatchRoomController] sync start', payload);
+            this.pendingEpisodeChangeId = '';
             this.clearDriftCorrection(false);
             this.state = {
                 ...this.state,
@@ -278,6 +283,104 @@
                 return this.applyPlaybackWithLock({ ...payload, paused: true }, { shouldPlay: false, forceSeek: true }, false);
             }
             return this.applySyncStateDrift({ ...payload, paused: false });
+        }
+
+        requestEpisodeChange(snapshot = {}) {
+            if (this.state.role !== 'host') return false;
+            if (this.state.status !== 'playing') return false;
+            if (!this.state.connected) return false;
+            if (!snapshot?.changeId || !snapshot?.episodeUrl) return false;
+
+            window.LibertyDebug.log('[WatchRoomController] request episode change', {
+                changeId: snapshot.changeId,
+                episodeIndex: snapshot.episodeIndex,
+            });
+            return this.socketSend({
+                type: 'host:episode-change',
+                payload: snapshot,
+            });
+        }
+
+        async handleSyncEpisodePrepare(payload = {}) {
+            if (!['host', 'viewer'].includes(this.state.role)) return null;
+            const changeId = String(payload.changeId || '');
+            if (!changeId) return null;
+            if (this.pendingEpisodeChangeId && this.pendingEpisodeChangeId === changeId) return null;
+
+            this.pendingEpisodeChangeId = changeId;
+            this.clearDriftCorrection(true, 'episode_prepare');
+            this.beginRemoteSyncLock();
+            this.state = {
+                ...this.state,
+                status: 'starting',
+                media: payload,
+                playback: payload.playback || this.state.playback,
+            };
+            this.render(this.getViewModel());
+            this.reconcilePlaybackControls();
+
+            try {
+                await this.player?.pause?.();
+                const result = await this.player?.loadEpisodeSnapshot?.(payload, {
+                    changeId,
+                    role: this.state.role,
+                });
+                if (result?.success === false) {
+                    throw result.error || new Error('Episode load failed');
+                }
+                if (this.pendingEpisodeChangeId !== changeId) return result;
+                this.socketSend({
+                    type: 'client:episode-ready',
+                    payload: {
+                        changeId,
+                        readyAt: Date.now(),
+                    },
+                });
+                return result || { success: true };
+            } catch (error) {
+                console.warn('[WatchRoomController] episode prepare failed', error);
+                this.toast('切集加载失败，等待房间同步恢复', 'warning');
+                return { success: false, error };
+            } finally {
+                this.scheduleRemoteSyncUnlock();
+            }
+        }
+
+        handleSyncEpisodeStart(payload = {}) {
+            const changeId = String(payload.changeId || '');
+            if (this.pendingEpisodeChangeId && changeId && this.pendingEpisodeChangeId !== changeId) {
+                return null;
+            }
+
+            const playback = {
+                ...(payload.playback || {}),
+                currentTime: Number(payload.playback?.currentTime) || 0,
+                playbackRate: Number(payload.playback?.playbackRate || payload.playbackRate) || 1,
+                paused: payload.playback?.paused === true,
+                updatedAt: Number(payload.playback?.updatedAt) || Date.now(),
+            };
+            const shouldPlay = playback.paused !== true;
+
+            this.pendingEpisodeChangeId = '';
+            this.clearDriftCorrection(true, 'episode_start');
+            this.state = {
+                ...this.state,
+                status: 'playing',
+                media: payload,
+                playback,
+                playerReady: true,
+            };
+            this.setLastHostPlayback(playback);
+            this.render(this.getViewModel());
+            this.reconcilePlaybackControls();
+            return this.applyPlaybackWithLock(playback, { shouldPlay, forceSeek: true }, shouldPlay);
+        }
+
+        handleSyncEpisodeError(payload = {}) {
+            if (payload?.message) {
+                this.toast(payload.message, 'warning');
+            }
+            return null;
         }
 
         handleRoomEnded(payload = {}) {
@@ -359,6 +462,7 @@
             }
             this.lastHostPlayback = null;
             this.lastViewerReadonlyToastAt = 0;
+            this.pendingEpisodeChangeId = '';
             this.state = {
                 ...DEFAULT_STATE,
                 status: 'ended',
