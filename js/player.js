@@ -527,11 +527,8 @@ function onVisibilityChange() {
 
                 if (cachedDanmu && cachedDanmu.length > 0 && 
                     currentDanmuCache.episodeIndex === currentEpisodeIndex) {
-                    // ✅ 使用缓存，不重新 config 避免闪烁，直接 show + seek
-                    // 只有弹幕真的被隐藏了才需要 show，不需要重新 config/load
-                    if (typeof danmukuPlugin.show === 'function') {
-                        danmukuPlugin.show();
-                    }
+                    // ✅ 使用缓存，不重新 config 避免闪烁，按用户开关状态恢复显示
+                    applyDanmakuVisibility('visibility-restore-cache');
 
                     // 同步到当前播放位置（防止弹幕时间轴偏移）
                     if (typeof danmukuPlugin.seek === 'function') {
@@ -554,9 +551,7 @@ function onVisibilityChange() {
                                     danmukuPlugin.seek(art.video.currentTime);
                                 }
 
-                                if (typeof danmukuPlugin.show === 'function') {
-                                    danmukuPlugin.show();
-                                }
+                                applyDanmakuVisibility('visibility-restore-reload');
 
                                 danmuDebugLog('弹幕已恢复（重新加载）');
                             }
@@ -1377,6 +1372,7 @@ window.debugDanmuState = function () {
         persistentBindingEnabled: false,
         artReady: Boolean(window.LibertyPlayer?.art),
         hasDanmukuPlugin: Boolean(window.LibertyPlayer?.art?.plugins?.artplayerPluginDanmuku),
+        danmakuVisible: isDanmakuVisible,
     };
 };
 
@@ -1409,6 +1405,29 @@ function saveDanmuConfig(config) {
         danmuDisplayConfig = { ...danmuDisplayConfig, ...config };
         localStorage.setItem('danmuDisplayConfig', JSON.stringify(danmuDisplayConfig));
     } catch (e) {}
+}
+
+let isDanmakuVisible = true;
+
+function getDanmukuPlugin() {
+    return art?.plugins?.artplayerPluginDanmuku || null;
+}
+
+function applyDanmakuVisibility(reason = 'sync') {
+    const danmukuPlugin = getDanmukuPlugin();
+    if (!danmukuPlugin) return;
+
+    const shouldShow = isDanmakuVisible && !document.hidden;
+    const action = shouldShow ? 'show' : 'hide';
+    if (typeof danmukuPlugin[action] === 'function') {
+        danmukuPlugin[action]();
+    }
+    danmuDebugLog('[DanmuDebug] apply danmaku visibility', {
+        reason,
+        visible: isDanmakuVisible,
+        action,
+        documentHidden: document.hidden
+    });
 }
 
 // ✅ 新增：临时详情缓存（Map自动管理大小）
@@ -3334,6 +3353,7 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
     try {
         danmukuPlugin.config({
             danmuku,
+            visible: isDanmakuVisible,
             synchronousPlayback: true
         });
         danmukuPlugin.load();
@@ -3364,9 +3384,7 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
         danmukuPlugin.seek(currentTime);
     }
 
-    if (typeof danmukuPlugin.show === 'function') {
-        danmukuPlugin.show();
-    }
+    applyDanmakuVisibility(`${reason}:after-apply`);
 
     danmuDebugLog('[DanmuDebug] apply danmaku to artplayer success', {
         displayEpisode: episodeIndex + 1,
@@ -4528,10 +4546,21 @@ function initPlayerInternal(videoUrl) {
 		    if (config.fontSize !== undefined) toSave.fontSize = config.fontSize;
 		    if (config.color !== undefined) toSave.color = config.color;
 		    if (config.mode !== undefined) toSave.mode = config.mode;
+		    if (config.visible !== undefined && !document.hidden) {
+		        isDanmakuVisible = Boolean(config.visible);
+		    }
 		    if (Object.keys(toSave).length > 0) {
 		        saveDanmuConfig(toSave);
 		        danmuDebugLog('✅ 弹幕显示设置已保存:', toSave);;
 		    }
+		});
+
+		art.on('artplayerPluginDanmuku:show', () => {
+		    if (!document.hidden) isDanmakuVisible = true;
+		});
+
+		art.on('artplayerPluginDanmuku:hide', () => {
+		    if (!document.hidden) isDanmakuVisible = false;
 		});
 
 		// ============================================
@@ -6517,6 +6546,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
             });
             danmukuPlugin.config({
                 danmuku: newDanmuku,
+                visible: isDanmakuVisible,
                 synchronousPlayback: true
             });
 
@@ -6529,9 +6559,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
             }
             
 
-            if (typeof danmukuPlugin.show === 'function') {
-                danmukuPlugin.show();
-            }
+            applyDanmakuVisibility('manual-source');
 
             showToast(`✓ 已切换到: ${sourceName} (${newDanmuku.length}条)`, 'success');
             danmuDebugLog('[DanmuDebug] apply danmaku to artplayer success', {
