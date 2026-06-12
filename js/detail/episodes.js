@@ -18,7 +18,11 @@
             .toString()
             .replace(/\\/g, '\\\\')
             .replace(/'/g, "\\'")
-            .replace(/\r?\n/g, ' ');
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\n')
+            .replace(/\r/g, '\\r')
+            .replace(/</g, '\\x3C')
+            .replace(/>/g, '\\x3E');
     }
 
     function getOrderedEpisodes(episodes = [], reversed = false) {
@@ -70,7 +74,7 @@
     }
 
     function updateOrderToggleButton(sourceCode, vodId, reversed = false) {
-        const toggleBtn = document.querySelector(`button[onclick="toggleEpisodeOrder('${sourceCode}', '${vodId}')"]`);
+        const toggleBtn = document.querySelector(`button[onclick="toggleEpisodeOrder('${defaultEscapeJsString(sourceCode)}', '${defaultEscapeJsString(vodId)}')"]`);
         if (!toggleBtn) return;
 
         const label = toggleBtn.querySelector('span');

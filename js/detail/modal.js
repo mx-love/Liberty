@@ -11,6 +11,18 @@
             .replace(/'/g, '&#39;');
     }
 
+    function defaultEscapeJsString(value) {
+        return (value || '')
+            .toString()
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\n')
+            .replace(/\r/g, '\\r')
+            .replace(/</g, '\\x3C')
+            .replace(/>/g, '\\x3E');
+    }
+
     function renderEpisodeActions(options = {}) {
         const {
             sourceCode = '',
@@ -18,7 +30,8 @@
             episodes = [],
             episodesReversed = false,
             sourceName = '',
-            escapeHtml = defaultEscapeHtml
+            escapeHtml = defaultEscapeHtml,
+            escapeJsString = defaultEscapeJsString
         } = options;
 
         const summary = window.LibertyDetail?.playSources?.getEpisodeSummary
@@ -28,7 +41,7 @@
         return `
                 <div class="detail-episode-actions flex flex-wrap items-center justify-between mb-4 gap-2">
                     <div class="episode-toolbar flex items-center gap-2">
-                        <button onclick="toggleEpisodeOrder('${sourceCode}', '${vodId}')" 
+                        <button onclick="toggleEpisodeOrder('${escapeJsString(sourceCode)}', '${escapeJsString(vodId)}')"
                                 class="px-3 py-1.5 bg-[#333] hover:bg-[#444] border border-[#444] rounded text-sm transition-colors flex items-center gap-1">
                             <svg class="w-4 h-4 transform ${episodesReversed ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path>

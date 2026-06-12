@@ -38,6 +38,39 @@ function danmuDebugWarn(...args) {
     if (isDanmuDebugEnabled()) console.warn(...args);
 }
 
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function escapeJsString(value) {
+    return String(value ?? '')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/</g, '\\x3C')
+        .replace(/>/g, '\\x3E');
+}
+
+function getSafeImageUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+        const url = new URL(raw, window.location.href);
+        return /^(https?:|data:image\/)/i.test(url.protocol === 'data:' ? raw : url.protocol)
+            ? (url.protocol === 'data:' ? raw : url.href)
+            : '';
+    } catch (error) {
+        return '';
+    }
+}
+
 function safeLocalStorageGet(key, fallback = '[]') {
     try {
         const storageUtils = window.LibertyUtils?.storage;
@@ -6015,7 +6048,7 @@ function renderResourceInfoBar() {
 
     container.innerHTML = `
       <div class="resource-info-bar-left flex">
-        <span>${resourceName}</span>
+        <span>${escapeHtml(resourceName)}</span>
         <span class="resource-info-bar-videos">${currentEpisodes.length} 个视频</span>
       </div>
       <button class="resource-switch-btn flex" id="switchResourceBtn" onclick="showSwitchResourceModal()">
@@ -6166,7 +6199,7 @@ async function showSwitchResourceModal() {
     const modalTitle = document.getElementById('modalTitle');
     const modalContent = document.getElementById('modalContent');
 
-    modalTitle.innerHTML = `<span class="break-words">${currentVideoTitle}</span>`;
+    modalTitle.innerHTML = `<span class="break-words">${escapeHtml(currentVideoTitle)}</span>`;
     modalContent.innerHTML = '<div style="text-align:center;padding:20px;color:#aaa;grid-column:1/-1;">正在加载资源列表...</div>';
     modal.classList.remove('hidden');
 
@@ -6274,15 +6307,21 @@ async function showSwitchResourceModal() {
         const isCurrentSource = String(sourceKey) === String(currentSourceCode) && String(result.vod_id) === String(currentVideoId);
         const sourceName = resourceOptions.find(opt => opt.key === sourceKey)?.name || '未知资源';
         const speedResult = speedResults[sourceKey] || { speed: -1, error: '未测试' };
+        const safeSourceKey = escapeJsString(sourceKey);
+        const safeVodId = escapeJsString(result.vod_id || '');
+        const safeVodName = escapeHtml(result.vod_name || '未知资源');
+        const safeSourceName = escapeHtml(sourceName);
+        const safeImageUrl = getSafeImageUrl(result.vod_pic || '');
 
         html += `
             <div class="relative group ${isCurrentSource ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:scale-105 transition-transform'}" 
-                 ${!isCurrentSource ? `onclick="switchToResource('${sourceKey}', '${result.vod_id}')"` : ''}>
+                 ${!isCurrentSource ? `onclick="switchToResource('${safeSourceKey}', '${safeVodId}')"` : ''}>
                 <div class="aspect-[2/3] rounded-lg overflow-hidden bg-gray-800 relative">
-                    <img src="${result.vod_pic}" 
-                         alt="${result.vod_name}"
+                    ${safeImageUrl ? `<img src="${escapeHtml(safeImageUrl)}"
+                         alt="${safeVodName}"
                          class="w-full h-full object-cover"
-                         onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNjY2IiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHJlY3QgeD0iMyIgeT0iMyIgd2lkdGg9IjE4IiBoZWlnaHQ9IjE4IiByeD0iMiIgcnk9IjIiPjwvcmVjdD48cGF0aCBkPSJNMjEgMTV2NGEyIDIgMCAwIDEtMiAySDVhMiAyIDAgMCAxLTItMnYtNCI+PC9wYXRoPjxwb2x5bGluZSBwb2ludHM9IjE3IDggMTIgMyA3IDgiPjwvcG9seWxpbmU+PHBhdGggZD0iTTEyIDN2MTIiPjwvcGF0aD48L3N2Zz4='">
+                         onerror="this.style.display='none';this.nextElementSibling?.classList.remove('hidden');">` : ''}
+                    <div class="${safeImageUrl ? 'hidden ' : ''}w-full h-full flex items-center justify-center text-gray-500 text-xs">无封面</div>
                     
                     <!-- 速率显示在图片右上角 -->
                     <div class="absolute top-1 right-1 speed-badge bg-black bg-opacity-75">
@@ -6290,8 +6329,8 @@ async function showSwitchResourceModal() {
                     </div>
                 </div>
                 <div class="mt-2">
-                    <div class="text-xs font-medium text-gray-200 truncate">${result.vod_name}</div>
-                    <div class="text-[10px] text-gray-400 truncate">${sourceName}</div>
+                    <div class="text-xs font-medium text-gray-200 truncate">${safeVodName}</div>
+                    <div class="text-[10px] text-gray-400 truncate">${safeSourceName}</div>
                     <div class="text-[10px] text-gray-500 mt-1">
                         ${speedResult.episodes ? `${speedResult.episodes}集` : ''}
                     </div>
@@ -6480,23 +6519,27 @@ async function showDanmuSourceModal() {
 		// 🔥 强制转换为字符串比较
 		const isActive = (String(currentDanmuAnimeId) === String(source.animeId));
 		const typeInfo = source.typeDescription || source.type;
+        const safeAnimeId = escapeJsString(source.animeId || '');
+        const safeAnimeTitleArg = escapeJsString(encodeURIComponent(source.animeTitle || ''));
+        const safeAnimeTitle = escapeHtml(source.animeTitle || '未知弹幕源');
+        const safeTypeInfo = escapeHtml(typeInfo || '未知类型');
 
 		const similarityPercent = Math.round(Math.min(100, (Number(source.titleScore || 0) / 60) * 100));
 
 		html += `
 			<button
-				onclick="switchDanmuSource('${source.animeId}', '${encodeURIComponent(source.animeTitle)}')"
+				onclick="switchDanmuSource('${safeAnimeId}', '${safeAnimeTitleArg}')"
 				class="danmu-source-button w-full text-left px-4 py-3 rounded-lg transition-all ${
 					isActive 
 						? 'bg-blue-600 text-white shadow-lg border-2 border-blue-400' 
 						: 'bg-gray-800 hover:bg-gray-700 text-gray-200 border-2 border-transparent'
 				}">
                     <div class="flex items-center justify-between gap-2 min-w-0">
-                        <div class="danmu-source-name font-medium min-w-0">${source.animeTitle}</div>
+                        <div class="danmu-source-name font-medium min-w-0">${safeAnimeTitle}</div>
                         ${isActive ? '<span class="danmu-source-badge text-yellow-300 text-sm shrink-0">✓ 当前使用</span>' : ''}
                     </div>
                     <div class="danmu-source-meta text-sm opacity-75 mt-1">
-                        ${typeInfo} · ${source.episodeCount} 集 · 相似度: ${similarityPercent}%
+                        ${safeTypeInfo} · ${Number(source.episodeCount || 0)} 集 · 相似度: ${similarityPercent}%
                     </div>
                 </button>
             `;

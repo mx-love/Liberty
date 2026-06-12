@@ -18,7 +18,11 @@
             .toString()
             .replace(/\\/g, '\\\\')
             .replace(/'/g, "\\'")
-            .replace(/\r?\n/g, ' ');
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\n')
+            .replace(/\r/g, '\\r')
+            .replace(/</g, '\\x3C')
+            .replace(/>/g, '\\x3E');
     }
 
     function isWebPagePlaySource(source = {}) {

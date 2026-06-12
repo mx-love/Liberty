@@ -1,4 +1,24 @@
 // UI相关函数
+function escapeHistoryHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function escapeHistoryJsString(value) {
+    return String(value ?? '')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/</g, '\\x3C')
+        .replace(/>/g, '\\x3E');
+}
+
 function toggleSettings(e) {
     // 强化的密码保护校验 - 防止绕过
     try {
@@ -392,15 +412,10 @@ function loadViewingHistory() {
 
     // 渲染历史记录
     historyList.innerHTML = history.map(item => {
-        // 防止XSS
-        const safeTitle = item.title
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
-
-        const safeSource = item.sourceName ?
-            item.sourceName.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;') :
-            '未知来源';
+        const safeTitle = escapeHistoryHtml(item.title || '');
+        const safeTitleForJs = escapeHistoryJsString(item.title || '');
+        const safeUrlForJs = escapeHistoryJsString(item.url || '');
+        const safeSource = item.sourceName ? escapeHistoryHtml(item.sourceName) : '未知来源';
 
         const episodeText = item.episodeIndex !== undefined ?
             `第${item.episodeIndex + 1}集` : '';
@@ -437,7 +452,7 @@ function loadViewingHistory() {
 
         // 构建历史记录项HTML，添加删除按钮，需要放在position:relative的容器中
         return `
-            <div class="history-item cursor-pointer relative group" onclick="playFromHistory('${item.url}', '${safeTitle}', ${item.episodeIndex || 0}, ${item.playbackPosition || 0})">
+            <div class="history-item cursor-pointer relative group" onclick="playFromHistory('${safeUrlForJs}', '${safeTitleForJs}', ${item.episodeIndex || 0}, ${item.playbackPosition || 0})">
                 <button onclick="event.stopPropagation(); deleteHistoryItem('${safeURL}')"
                         class="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 text-gray-400 hover:text-red-400 p-1 rounded-full hover:bg-gray-800 z-10"
                         title="删除记录">
