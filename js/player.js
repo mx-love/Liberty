@@ -529,6 +529,10 @@ function onVisibilityChange() {
                     currentDanmuCache.episodeIndex === currentEpisodeIndex) {
                     // ✅ 使用缓存，不重新 config 避免闪烁，按用户开关状态恢复显示
                     applyDanmakuVisibility('visibility-restore-cache');
+                    logDanmuVisibilityState('visibilitychange-restore-cache', {
+                        loadedCount: cachedDanmu.length,
+                        pluginApplied: true
+                    });
 
                     // 同步到当前播放位置（防止弹幕时间轴偏移）
                     if (typeof danmukuPlugin.seek === 'function') {
@@ -552,6 +556,10 @@ function onVisibilityChange() {
                                 }
 
                                 applyDanmakuVisibility('visibility-restore-reload');
+                                logDanmuVisibilityState('visibilitychange-restore-reload', {
+                                    loadedCount: danmuku.length,
+                                    pluginApplied: true
+                                });
 
                                 danmuDebugLog('弹幕已恢复（重新加载）');
                             }
@@ -1413,9 +1421,51 @@ function getDanmukuPlugin() {
     return art?.plugins?.artplayerPluginDanmuku || null;
 }
 
+function isDanmuVisibilityDebugEnabled() {
+    try {
+        return localStorage.getItem('LIBRETV_DANMU_DEBUG') === '1';
+    } catch (error) {
+        return false;
+    }
+}
+
+function getDanmuPluginVisibleState(danmukuPlugin = getDanmukuPlugin()) {
+    try {
+        if (!danmukuPlugin) return null;
+        if (typeof danmukuPlugin.visible === 'boolean') return danmukuPlugin.visible;
+        if (typeof danmukuPlugin.option?.visible === 'boolean') return danmukuPlugin.option.visible;
+        if (typeof danmukuPlugin.options?.visible === 'boolean') return danmukuPlugin.options.visible;
+    } catch (error) {}
+    return null;
+}
+
+function logDanmuVisibilityState(reason, details = {}) {
+    if (!isDanmuVisibilityDebugEnabled()) return;
+    const danmukuPlugin = getDanmukuPlugin();
+    console.log('[DanmuDebug] danmaku visibility state', {
+        reason,
+        isDanmakuVisible,
+        danmuDisplayConfig: { ...danmuDisplayConfig },
+        loadedCount: currentDanmuCache?.danmuList?.length ?? null,
+        pluginApplied: Boolean(danmukuPlugin),
+        pluginVisible: getDanmuPluginVisibleState(danmukuPlugin),
+        episodeIndex: currentEpisodeIndex,
+        episodeId: lastDanmuMatchInfo?.episodeId || null,
+        sourceName: lastDanmuMatchInfo?.sourceName || currentDanmuSourceName || null,
+        matchMode: lastDanmuMatchInfo?.matchMode || null,
+        ...details
+    });
+}
+
 function applyDanmakuVisibility(reason = 'sync') {
     const danmukuPlugin = getDanmukuPlugin();
-    if (!danmukuPlugin) return;
+    if (!danmukuPlugin) {
+        logDanmuVisibilityState(reason, {
+            pluginApplied: false,
+            pluginVisible: null
+        });
+        return;
+    }
 
     const shouldShow = isDanmakuVisible && !document.hidden;
     const action = shouldShow ? 'show' : 'hide';
@@ -1427,6 +1477,11 @@ function applyDanmakuVisibility(reason = 'sync') {
         visible: isDanmakuVisible,
         action,
         documentHidden: document.hidden
+    });
+    logDanmuVisibilityState(reason, {
+        action,
+        pluginApplied: true,
+        pluginVisible: getDanmuPluginVisibleState(danmukuPlugin)
     });
 }
 
@@ -3300,6 +3355,11 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
             pluginApplied: false,
             failReason: 'plugin-missing'
         });
+        logDanmuVisibilityState(`${reason}:reload-complete`, {
+            loadedCount: 0,
+            pluginApplied: false,
+            failReason: 'plugin-missing'
+        });
         return;
     }
 
@@ -3338,6 +3398,11 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
             pluginApplied: false,
             failReason: 'empty-danmaku'
         });
+        logDanmuVisibilityState(`${reason}:reload-complete`, {
+            loadedCount: 0,
+            pluginApplied: true,
+            failReason: 'empty-danmaku'
+        });
         return;
     }
 
@@ -3364,6 +3429,11 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
         });
         logDanmuEpisodeSummary(reason, {
             episodeIndex,
+            loadedCount: danmuku.length,
+            pluginApplied: false,
+            failReason: 'plugin-apply-failed'
+        });
+        logDanmuVisibilityState(`${reason}:reload-complete`, {
             loadedCount: danmuku.length,
             pluginApplied: false,
             failReason: 'plugin-apply-failed'
@@ -3402,6 +3472,10 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
     });
     logDanmuEpisodeSummary(reason, {
         episodeIndex,
+        loadedCount: danmuku.length,
+        pluginApplied: true
+    });
+    logDanmuVisibilityState(`${reason}:reload-complete`, {
         loadedCount: danmuku.length,
         pluginApplied: true
     });
@@ -4548,6 +4622,9 @@ function initPlayerInternal(videoUrl) {
 		    if (config.mode !== undefined) toSave.mode = config.mode;
 		    if (config.visible !== undefined && !document.hidden) {
 		        isDanmakuVisible = Boolean(config.visible);
+		        logDanmuVisibilityState('user-config-visible', {
+		            pluginVisible: Boolean(config.visible)
+		        });
 		    }
 		    if (Object.keys(toSave).length > 0) {
 		        saveDanmuConfig(toSave);
@@ -4556,11 +4633,21 @@ function initPlayerInternal(videoUrl) {
 		});
 
 		art.on('artplayerPluginDanmuku:show', () => {
-		    if (!document.hidden) isDanmakuVisible = true;
+		    if (!document.hidden) {
+		        isDanmakuVisible = true;
+		        logDanmuVisibilityState('user-show', {
+		            pluginVisible: true
+		        });
+		    }
 		});
 
 		art.on('artplayerPluginDanmuku:hide', () => {
-		    if (!document.hidden) isDanmakuVisible = false;
+		    if (!document.hidden) {
+		        isDanmakuVisible = false;
+		        logDanmuVisibilityState('user-hide', {
+		            pluginVisible: false
+		        });
+		    }
 		});
 
 		// ============================================
@@ -6569,6 +6656,13 @@ async function switchDanmuSource(animeId, encodedSourceName) {
             logDanmuEpisodeSummary('manual-source', {
                 loadedCount: newDanmuku.length,
                 pluginApplied: true
+            });
+            logDanmuVisibilityState('manual-source-complete', {
+                loadedCount: newDanmuku.length,
+                pluginApplied: true,
+                episodeId: matchedEpisode.episodeId,
+                sourceName,
+                matchMode: 'manual-source'
             });
         }
 
