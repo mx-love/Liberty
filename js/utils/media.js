@@ -23,6 +23,70 @@
         return episodes.map(getEpisodeUrl).filter(Boolean);
     }
 
+    function normalizeShortDramaText(value = '') {
+        return String(value || '').toLowerCase().replace(/\s+/g, '');
+    }
+
+    function getShortDramaReasons(resource = {}) {
+        const title = resource.title || resource.name || resource.vod_name || '';
+        const type = resource.type || resource.class || resource.category || resource.type_name || '';
+        const remarks = resource.remarks || resource.note || resource.vod_remarks || resource.vod_blurb || '';
+        const sourceName = resource.sourceName || resource.source_name || '';
+        const episodeCount = Number(resource.episodeCount || resource.episodesCount || resource.totalEpisodes || (
+            Array.isArray(resource.episodes) ? resource.episodes.length : 0
+        ));
+        const duration = Number(resource.duration || resource.vod_duration || 0);
+
+        const fields = [
+            ['title', title],
+            ['type', type],
+            ['remarks', remarks],
+            ['sourceName', sourceName],
+        ];
+        const strongKeywords = [
+            '短剧',
+            '微短剧',
+            '微剧',
+            '竖屏',
+            '竖版',
+            '短视频剧',
+            '小剧场',
+            '爽文剧',
+            'minidrama',
+            'shortdrama',
+            'verticaldrama',
+        ];
+        const reasons = [];
+
+        fields.forEach(([field, value]) => {
+            const text = normalizeShortDramaText(value);
+            if (!text) return;
+            strongKeywords.forEach((keyword) => {
+                if (text.includes(keyword)) {
+                    reasons.push(`${field}:keyword:${keyword}`);
+                }
+            });
+        });
+
+        if (Number.isFinite(episodeCount) && episodeCount >= 60 && reasons.length > 0) {
+            reasons.push(`episodeCount:${episodeCount}`);
+        }
+
+        if (Number.isFinite(duration) && duration > 0 && duration <= 600 && reasons.length > 0) {
+            reasons.push(`duration:${duration}`);
+        }
+
+        return [...new Set(reasons)];
+    }
+
+    function isShortDramaResource(resource = {}) {
+        const reasons = getShortDramaReasons(resource);
+        return {
+            isShortDrama: reasons.length > 0,
+            reasons
+        };
+    }
+
     function isHlsUrl(url = '') {
         return String(url || '').toLowerCase().split('?')[0].endsWith('.m3u8');
     }
@@ -94,6 +158,8 @@
         getEpisodeName,
         hasPlayableEpisodes,
         normalizeEpisodeUrls,
+        getShortDramaReasons,
+        isShortDramaResource,
         isHlsUrl,
         isDirectMediaUrl,
         isLikelyWebPageUrl,

@@ -6135,6 +6135,28 @@ function formatSpeedDisplay(speedResult) {
     return `<span class="${className}">${icon} ${speed}ms${note}</span>`;
 }
 
+function getPlayerShortDramaCheck(resource = {}) {
+    const checker = window.LibertyUtils?.media?.isShortDramaResource;
+    if (typeof checker === 'function') return checker(resource);
+    return { isShortDrama: false, reasons: [] };
+}
+
+function logSwitchResourceCandidateQuality(candidate = {}, action = 'kept', shortDramaInfo = {}) {
+    window.LibertyDebug.log('[ResourceSwitch] candidate quality', {
+        title: candidate.vod_name || candidate.title || candidate.name || '',
+        sourceName: candidate.sourceName || candidate.source_name || '',
+        episodeCount: candidate.episodeCount || candidate.episodesCount || (
+            Array.isArray(candidate.episodes) ? candidate.episodes.length : 0
+        ),
+        type: candidate.type_name || candidate.type || candidate.category || '',
+        remarks: candidate.vod_remarks || candidate.remarks || candidate.note || '',
+        duration: candidate.duration || candidate.vod_duration || '',
+        isShortDrama: Boolean(shortDramaInfo.isShortDrama),
+        shortDramaReasons: shortDramaInfo.reasons || [],
+        action
+    });
+}
+
 async function showSwitchResourceModal() {
     const urlParams = new URLSearchParams(window.location.search);
     const currentSourceCode = urlParams.get('source');
@@ -6174,6 +6196,42 @@ async function showSwitchResourceModal() {
         })
         allResults[opt.key] = result;
     }));
+
+    const currentSourceName = resourceOptions.find(opt => String(opt.key) === String(currentSourceCode))?.name || currentSourceCode || '';
+    const currentShortDramaInfo = getPlayerShortDramaCheck({
+        title: currentVideoTitle,
+        sourceCode: currentSourceCode,
+        sourceName: currentSourceName,
+        episodeCount: currentEpisodes?.length || 0,
+        episodes: currentEpisodes || []
+    });
+
+    if (!currentShortDramaInfo.isShortDrama) {
+        Object.entries(allResults).forEach(([sourceKey, result]) => {
+            if (!result) return;
+            const sourceName = resourceOptions.find(opt => opt.key === sourceKey)?.name || '未知资源';
+            const candidate = {
+                ...result,
+                sourceCode: sourceKey,
+                sourceName,
+                episodeCount: result.episodeCount || result.episodesCount || 0
+            };
+            const shortDramaInfo = getPlayerShortDramaCheck(candidate);
+            if (shortDramaInfo.isShortDrama) {
+                logSwitchResourceCandidateQuality(candidate, 'filtered', shortDramaInfo);
+                delete allResults[sourceKey];
+                return;
+            }
+            logSwitchResourceCandidateQuality(candidate, 'kept', shortDramaInfo);
+        });
+    } else {
+        window.LibertyDebug.log('[ResourceSwitch] current video is short drama, keep short-drama candidates', {
+            title: currentVideoTitle,
+            sourceName: currentSourceName,
+            episodeCount: currentEpisodes?.length || 0,
+            shortDramaReasons: currentShortDramaInfo.reasons || []
+        });
+    }
 
     // 更新状态显示：开始速率测试
     modalContent.innerHTML = '<div style="text-align:center;padding:20px;color:#aaa;grid-column:1/-1;">正在测试各资源速率...</div>';
