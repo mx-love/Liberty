@@ -650,7 +650,7 @@ let currentVideoUrl = ''; // 记录当前实际的视频URL
 let isApplyingWatchRoomEpisodeSnapshot = false;
 let pendingWatchRoomEpisodeChangeId = '';
 const isWebkit = (typeof window.webkitConvertPointFromNodeToPage === 'function')
-Artplayer.FULLSCREEN_WEB_IN_BODY = true;
+Artplayer.FULLSCREEN_WEB_IN_BODY = false;
 // ===== 【新增】移动端设备检测 =====
 const isMobileDevice = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 const isIOSDevice = /iPhone|iPad|iPod/i.test(navigator.userAgent);
