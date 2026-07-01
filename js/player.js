@@ -683,16 +683,28 @@ function refreshPlayerViewport(reason = 'resize') {
     playerViewportRefreshTimer = setTimeout(() => {
         requestAnimationFrame(() => {
             try {
+                let didResize = false;
                 applyInlineVideoAttributes(art?.video);
                 if (isMobileDevice && art && 'mini' in art) {
                     art.mini = false;
                 }
                 if (art && typeof art.resize === 'function') {
                     art.resize();
+                    didResize = true;
                 }
+                logDanmakuRuntimeDebug(reason, {
+                    calledHelper: 'refreshPlayerViewport',
+                    didResize,
+                    eventType: 'viewport',
+                });
                 scheduleDanmakuLayoutRefresh(reason);
             } catch (error) {
                 console.warn('播放器尺寸刷新失败:', reason, error);
+                logDanmakuRuntimeDebug(reason, {
+                    calledHelper: 'refreshPlayerViewport',
+                    failed: true,
+                    error: error?.message || String(error),
+                });
             }
         });
     }, 120);
@@ -1572,16 +1584,23 @@ async function applyDanmakuRuntimeState({
     if (!danmukuPlugin) return false;
 
     try {
+        let didConfig = false;
+        let didLoad = false;
+        let didReset = false;
+
         if (typeof danmukuPlugin.config === 'function') {
             danmukuPlugin.config(getDanmakuRuntimeConfig(
                 danmuku !== undefined ? { danmuku } : {}
             ));
+            didConfig = true;
         }
 
         if (reload && typeof danmukuPlugin.load === 'function') {
             await danmukuPlugin.load();
+            didLoad = true;
         } else if ((reload || relayout) && typeof danmukuPlugin.reset === 'function') {
             danmukuPlugin.reset();
+            didReset = true;
         }
 
         if (reload || relayout) {
@@ -1591,21 +1610,55 @@ async function applyDanmakuRuntimeState({
         if (syncVisibility) {
             applyDanmakuVisibility(`${reason}:after-runtime-refresh`);
         }
+        logDanmakuRuntimeDebug(reason, {
+            calledHelper: 'applyDanmakuRuntimeState',
+            didConfig,
+            didLoad,
+            didReset,
+            eventType: reload ? 'reload' : (relayout ? 'relayout' : 'config'),
+        });
         return true;
     } catch (error) {
         console.warn('弹幕运行时刷新失败:', reason, error);
+        logDanmakuRuntimeDebug(reason, {
+            calledHelper: 'applyDanmakuRuntimeState',
+            failed: true,
+            error: error?.message || String(error),
+        });
         return false;
     }
 }
 
 async function refreshDanmakuRuntimeLayout(reason = 'layout', options = {}) {
     const currentLayoutState = getDanmakuLayoutState();
+    const isViewportRefresh = reason.startsWith('viewport-');
     const shouldRelayout = Boolean(options.force) ||
         !lastDanmakuLayoutState ||
         currentLayoutState.height !== lastDanmakuLayoutState.height ||
         currentLayoutState.displayArea !== lastDanmakuLayoutState.displayArea;
 
-    if (!shouldRelayout) return false;
+    if (!shouldRelayout) {
+        logDanmakuRuntimeDebug(reason, {
+            calledHelper: 'refreshDanmakuRuntimeLayout',
+            didReset: false,
+            skipped: true,
+            eventType: 'layout-check',
+        });
+        return false;
+    }
+
+    if (isViewportRefresh && !options.force) {
+        markDanmakuLayoutState();
+        applyDanmakuVisibility(`${reason}:after-layout-sync`);
+        logDanmakuRuntimeDebug(reason, {
+            calledHelper: 'refreshDanmakuRuntimeLayout',
+            didConfig: false,
+            didLoad: false,
+            didReset: false,
+            eventType: 'viewport-sync',
+        });
+        return true;
+    }
 
     return applyDanmakuRuntimeState({
         reason,
@@ -1644,6 +1697,21 @@ function isDanmuVisibilityDebugEnabled() {
     } catch (error) {
         return false;
     }
+}
+
+function logDanmakuRuntimeDebug(reason, details = {}) {
+    if (!isDanmuVisibilityDebugEnabled()) return;
+    console.log('[DanmuDebug] runtime', {
+        reason,
+        ts: Date.now(),
+        isPlaying: Boolean(art?.playing),
+        currentTime: art?.video?.currentTime ?? null,
+        displayArea: danmuDisplayConfig.displayArea,
+        visible: isDanmuUserVisibleEnabled(),
+        fullscreen: Boolean(art?.fullscreen),
+        fullscreenWeb: Boolean(art?.fullscreenWeb),
+        ...details,
+    });
 }
 
 function getDanmuPluginVisibleState(danmukuPlugin = getDanmukuPlugin()) {
