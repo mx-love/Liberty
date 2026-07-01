@@ -1579,6 +1579,13 @@ function getDanmuDisplayAreaOption(value = danmuDisplayConfig.displayArea) {
     return DANMU_DISPLAY_AREA_OPTIONS.find(option => option.value === normalizedValue) || DANMU_DISPLAY_AREA_OPTIONS[0];
 }
 
+function getDanmuDisplayAreaSteps() {
+    return DANMU_DISPLAY_AREA_OPTIONS.map(option => ({
+        name: option.label,
+        value: getDanmuTrackMargin(option.value)
+    }));
+}
+
 function getDanmuTrackMargin(displayArea = danmuDisplayConfig.displayArea) {
     const option = getDanmuDisplayAreaOption(displayArea);
     const topMargin = isMobileDevice ? 5 : 10;
@@ -1589,15 +1596,13 @@ function getDanmuTrackMargin(displayArea = danmuDisplayConfig.displayArea) {
     return [topMargin, bottomMargin];
 }
 
-function syncDanmuDisplayAreaControls(root = art?.template?.$player || document) {
-    if (!root?.querySelectorAll) return;
+function getDanmuDisplayAreaByMargin(margin) {
+    if (!Array.isArray(margin) || margin.length < 2) return null;
 
-    const activeValue = normalizeDanmuDisplayArea(danmuDisplayConfig.displayArea);
-    root.querySelectorAll('.libretv-danmu-area-option').forEach(button => {
-        const isActive = button.dataset.value === activeValue;
-        button.classList.toggle('is-active', isActive);
-        button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-    });
+    return DANMU_DISPLAY_AREA_OPTIONS.find(option => {
+        const expectedMargin = getDanmuTrackMargin(option.value);
+        return expectedMargin[0] === margin[0] && expectedMargin[1] === margin[1];
+    })?.value || null;
 }
 
 async function refreshDanmakuDisplayAreaLayout(reason = 'display-area') {
@@ -1645,72 +1650,6 @@ function scheduleDanmakuLayoutRefresh(reason = 'resize') {
     danmakuLayoutRefreshTimer = setTimeout(() => {
         refreshDanmakuDisplayAreaLayout(`viewport-${reason}`);
     }, reason === 'resize' ? 220 : 140);
-}
-
-async function updateDanmuDisplayArea(displayArea, reason = 'user-display-area') {
-    const normalizedValue = normalizeDanmuDisplayArea(displayArea);
-    const hasChanged = normalizedValue !== danmuDisplayConfig.displayArea;
-
-    if (hasChanged) {
-        saveDanmuConfig({ displayArea: normalizedValue });
-    }
-
-    syncDanmuDisplayAreaControls();
-
-    if (!hasChanged) return;
-
-    await refreshDanmakuDisplayAreaLayout(reason);
-}
-
-function ensureDanmuDisplayAreaSetting(attempt = 0) {
-    const playerRoot = art?.template?.$player || document;
-    const panel = playerRoot?.querySelector?.('.artplayer-plugin-danmuku .apd-config-panel .apd-config-panel-inner');
-
-    if (!panel) {
-        if (attempt < 10) {
-            setTimeout(() => ensureDanmuDisplayAreaSetting(attempt + 1), 150);
-        }
-        return;
-    }
-
-    let section = panel.querySelector('.libretv-danmu-area-setting');
-    if (!section) {
-        section = document.createElement('div');
-        section.className = 'libretv-danmu-area-setting';
-
-        const label = document.createElement('div');
-        label.className = 'libretv-danmu-area-label';
-        label.textContent = '显示区域';
-
-        const options = document.createElement('div');
-        options.className = 'libretv-danmu-area-options';
-
-        DANMU_DISPLAY_AREA_OPTIONS.forEach(option => {
-            const button = document.createElement('button');
-            button.type = 'button';
-            button.className = 'libretv-danmu-area-option';
-            button.dataset.value = option.value;
-            button.textContent = option.label;
-            button.addEventListener('click', async event => {
-                event.preventDefault();
-                event.stopPropagation();
-                await updateDanmuDisplayArea(option.value, 'user-display-area');
-            });
-            options.appendChild(button);
-        });
-
-        section.appendChild(label);
-        section.appendChild(options);
-
-        const otherSettings = panel.querySelector('.apd-config-other');
-        if (otherSettings) {
-            panel.insertBefore(section, otherSettings);
-        } else {
-            panel.appendChild(section);
-        }
-    }
-
-    syncDanmuDisplayAreaControls(panel);
 }
 
 function isDanmuVisibilityDebugEnabled() {
@@ -4605,6 +4544,11 @@ function initPlayerInternal(videoUrl) {
 				mode: danmuDisplayConfig.mode,
 				modes: [0, 1, 2],
 				margin: getDanmuTrackMargin(),
+				MARGIN: {
+					min: 0,
+					max: DANMU_DISPLAY_AREA_OPTIONS.length - 1,
+					steps: getDanmuDisplayAreaSteps(),
+				},
 				antiOverlap: true,
 				useWorker: true,
 				synchronousPlayback: true,
@@ -4913,7 +4857,6 @@ function initPlayerInternal(videoUrl) {
 		applyInlineVideoAttributes(art.video);
 		refreshPlayerViewport('art-ready');
 		bindNativeFullscreenHandoff(art);
-		ensureDanmuDisplayAreaSetting();
 
 		// ✅ 监听弹幕插件配置变更，持久化用户设置
 		// ArtPlayer 弹幕插件会在用户通过设置面板修改时触发 artplayerPluginDanmuku:config
@@ -4924,6 +4867,12 @@ function initPlayerInternal(videoUrl) {
 		    if (config.fontSize !== undefined) toSave.fontSize = config.fontSize;
 		    if (config.color !== undefined) toSave.color = config.color;
 		    if (config.mode !== undefined) toSave.mode = config.mode;
+		    if (config.margin !== undefined) {
+		        const displayArea = getDanmuDisplayAreaByMargin(config.margin);
+		        if (displayArea) {
+		            toSave.displayArea = displayArea;
+		        }
+		    }
 		    if (config.visible !== undefined && !document.hidden) {
 		        isDanmakuVisible = Boolean(config.visible);
 		        logDanmuVisibilityState('user-config-visible', {
