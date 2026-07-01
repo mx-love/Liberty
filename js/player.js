@@ -580,6 +580,8 @@ function onVisibilityChange() {
                             if (danmuku && danmuku.length > 0) {
                                 danmukuPlugin.config({ 
                                     danmuku: danmuku,
+                                    margin: getDanmuTrackMargin(),
+                                    visible: isDanmakuVisible,
                                     synchronousPlayback: true 
                                 });
                                 danmukuPlugin.load();
@@ -658,6 +660,7 @@ const isAndroidDevice = /Android/i.test(navigator.userAgent);
 
 let playerViewportRefreshBound = false;
 let playerViewportRefreshTimer = null;
+let danmakuLayoutRefreshTimer = null;
 let fullscreenHandoffCleanup = null;
 const FULLSCREEN_DEBUG_STORAGE_KEY = 'LIBRETV_FULLSCREEN_DEBUG';
 
@@ -768,6 +771,7 @@ function refreshPlayerViewport(reason = 'resize') {
                 if (art && typeof art.resize === 'function') {
                     art.resize();
                 }
+                scheduleDanmakuLayoutRefresh(reason);
             } catch (error) {
                 console.warn('播放器尺寸刷新失败:', reason, error);
             }
@@ -1517,12 +1521,21 @@ window.debugDanmuState = function () {
 };
 
 // ✅ 弹幕显示配置（跨集持久化，不随切集重置）
+const DEFAULT_DANMU_DISPLAY_AREA = 'quarter';
+const DANMU_DISPLAY_AREA_OPTIONS = [
+    { value: 'quarter', label: '1/4', desktopBottom: '75%', mobileBottom: '80%' },
+    { value: 'half', label: '半屏', bottom: '50%' },
+    { value: 'threeQuarter', label: '3/4', bottom: '25%' },
+    { value: 'full', label: '满屏', bottom: '0%' },
+];
+
 let danmuDisplayConfig = {
     speed: 5,
     opacity: 1,
     fontSize: null, // null = 使用默认值
     color: '#FFFFFF',
     mode: 0,
+    displayArea: DEFAULT_DANMU_DISPLAY_AREA,
 };
 
 // 从 localStorage 恢复弹幕配置
@@ -1534,6 +1547,7 @@ let danmuDisplayConfig = {
             danmuDisplayConfig = { ...danmuDisplayConfig, ...parsed };
         }
     } catch (e) {}
+    danmuDisplayConfig.displayArea = normalizeDanmuDisplayArea(danmuDisplayConfig.displayArea);
 })();
 
 // 保存弹幕配置到 localStorage
@@ -1542,6 +1556,7 @@ function saveDanmuConfig(config) {
         const hasChange = Object.keys(config).some(
             key => danmuDisplayConfig[key] !== config[key]
         );
+        if (!hasChange) return;
         danmuDisplayConfig = { ...danmuDisplayConfig, ...config };
         localStorage.setItem('danmuDisplayConfig', JSON.stringify(danmuDisplayConfig));
     } catch (e) {}
@@ -1551,6 +1566,151 @@ let isDanmakuVisible = true;
 
 function getDanmukuPlugin() {
     return art?.plugins?.artplayerPluginDanmuku || null;
+}
+
+function normalizeDanmuDisplayArea(value) {
+    return DANMU_DISPLAY_AREA_OPTIONS.some(option => option.value === value)
+        ? value
+        : DEFAULT_DANMU_DISPLAY_AREA;
+}
+
+function getDanmuDisplayAreaOption(value = danmuDisplayConfig.displayArea) {
+    const normalizedValue = normalizeDanmuDisplayArea(value);
+    return DANMU_DISPLAY_AREA_OPTIONS.find(option => option.value === normalizedValue) || DANMU_DISPLAY_AREA_OPTIONS[0];
+}
+
+function getDanmuTrackMargin(displayArea = danmuDisplayConfig.displayArea) {
+    const option = getDanmuDisplayAreaOption(displayArea);
+    const topMargin = isMobileDevice ? 5 : 10;
+    const bottomMargin = isMobileDevice
+        ? (option.mobileBottom || option.bottom || '0%')
+        : (option.desktopBottom || option.bottom || '0%');
+
+    return [topMargin, bottomMargin];
+}
+
+function syncDanmuDisplayAreaControls(root = art?.template?.$player || document) {
+    if (!root?.querySelectorAll) return;
+
+    const activeValue = normalizeDanmuDisplayArea(danmuDisplayConfig.displayArea);
+    root.querySelectorAll('.libretv-danmu-area-option').forEach(button => {
+        const isActive = button.dataset.value === activeValue;
+        button.classList.toggle('is-active', isActive);
+        button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+}
+
+async function refreshDanmakuDisplayAreaLayout(reason = 'display-area') {
+    const danmukuPlugin = getDanmukuPlugin();
+    if (!danmukuPlugin) return false;
+
+    try {
+        if (typeof danmukuPlugin.config === 'function') {
+            danmukuPlugin.config({
+                margin: getDanmuTrackMargin(),
+                visible: isDanmakuVisible,
+                synchronousPlayback: true
+            });
+        }
+
+        if (typeof danmukuPlugin.load === 'function') {
+            await danmukuPlugin.load();
+        } else if (typeof danmukuPlugin.reset === 'function') {
+            danmukuPlugin.reset();
+        }
+
+        applyDanmakuVisibility(`${reason}:after-layout-refresh`);
+        return true;
+    } catch (error) {
+        console.warn('弹幕显示区域刷新失败:', reason, error);
+        return false;
+    }
+}
+
+function shouldRefreshDanmakuLayoutOnViewportChange(reason) {
+    return [
+        'resize',
+        'orientationchange',
+        'fullscreenchange',
+        'webkitfullscreenchange',
+        'fullscreen',
+        'fullscreenWeb'
+    ].includes(reason);
+}
+
+function scheduleDanmakuLayoutRefresh(reason = 'resize') {
+    if (!shouldRefreshDanmakuLayoutOnViewportChange(reason)) return;
+
+    clearTimeout(danmakuLayoutRefreshTimer);
+    danmakuLayoutRefreshTimer = setTimeout(() => {
+        refreshDanmakuDisplayAreaLayout(`viewport-${reason}`);
+    }, reason === 'resize' ? 220 : 140);
+}
+
+async function updateDanmuDisplayArea(displayArea, reason = 'user-display-area') {
+    const normalizedValue = normalizeDanmuDisplayArea(displayArea);
+    const hasChanged = normalizedValue !== danmuDisplayConfig.displayArea;
+
+    if (hasChanged) {
+        saveDanmuConfig({ displayArea: normalizedValue });
+    }
+
+    syncDanmuDisplayAreaControls();
+
+    if (!hasChanged) return;
+
+    await refreshDanmakuDisplayAreaLayout(reason);
+}
+
+function ensureDanmuDisplayAreaSetting(attempt = 0) {
+    const playerRoot = art?.template?.$player || document;
+    const panel = playerRoot?.querySelector?.('.artplayer-plugin-danmuku .apd-config-panel .apd-config-panel-inner');
+
+    if (!panel) {
+        if (attempt < 10) {
+            setTimeout(() => ensureDanmuDisplayAreaSetting(attempt + 1), 150);
+        }
+        return;
+    }
+
+    let section = panel.querySelector('.libretv-danmu-area-setting');
+    if (!section) {
+        section = document.createElement('div');
+        section.className = 'libretv-danmu-area-setting';
+
+        const label = document.createElement('div');
+        label.className = 'libretv-danmu-area-label';
+        label.textContent = '显示区域';
+
+        const options = document.createElement('div');
+        options.className = 'libretv-danmu-area-options';
+
+        DANMU_DISPLAY_AREA_OPTIONS.forEach(option => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'libretv-danmu-area-option';
+            button.dataset.value = option.value;
+            button.textContent = option.label;
+            button.addEventListener('click', async event => {
+                event.preventDefault();
+                event.stopPropagation();
+                await updateDanmuDisplayArea(option.value, 'user-display-area');
+            });
+            options.appendChild(button);
+        });
+
+        section.appendChild(label);
+        section.appendChild(options);
+
+        const otherSettings = panel.querySelector('.apd-config-other');
+        if (otherSettings) {
+            panel.insertBefore(section, otherSettings);
+        } else {
+            panel.appendChild(section);
+        }
+    }
+
+    syncDanmuDisplayAreaControls(panel);
 }
 
 function isDanmuVisibilityDebugEnabled() {
@@ -3361,6 +3521,7 @@ function clearCurrentDanmukuPlugin(reason = 'clear') {
     if (typeof danmukuPlugin.config === 'function') {
         danmukuPlugin.config({
             danmuku: [],
+            margin: getDanmuTrackMargin(),
             synchronousPlayback: true
         });
     }
@@ -3558,6 +3719,7 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
     try {
         danmukuPlugin.config({
             danmuku,
+            margin: getDanmuTrackMargin(),
             visible: isDanmakuVisible,
             synchronousPlayback: true
         });
@@ -4442,7 +4604,7 @@ function initPlayerInternal(videoUrl) {
 				color: danmuDisplayConfig.color,
 				mode: danmuDisplayConfig.mode,
 				modes: [0, 1, 2],
-				margin: isMobileDevice ? [5, '80%'] : [10, '75%'],
+				margin: getDanmuTrackMargin(),
 				antiOverlap: true,
 				useWorker: true,
 				synchronousPlayback: true,
@@ -4751,6 +4913,7 @@ function initPlayerInternal(videoUrl) {
 		applyInlineVideoAttributes(art.video);
 		refreshPlayerViewport('art-ready');
 		bindNativeFullscreenHandoff(art);
+		ensureDanmuDisplayAreaSetting();
 
 		// ✅ 监听弹幕插件配置变更，持久化用户设置
 		// ArtPlayer 弹幕插件会在用户通过设置面板修改时触发 artplayerPluginDanmuku:config
@@ -4971,6 +5134,7 @@ function initPlayerInternal(videoUrl) {
     art.on('fullscreenWeb', function (isFullScreen) {
         logFullscreenDebug('art-fullscreen-web');
         handleFullScreen(isFullScreen, true);
+        refreshPlayerViewport('fullscreenWeb');
 
         // 进入网页全屏时，确保焦点在播放器上，使快捷键生效
         if (isFullScreen) {
@@ -6716,6 +6880,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
         if (typeof danmukuPlugin.config === 'function') {
             danmukuPlugin.config({
                 danmuku: [],
+                margin: getDanmuTrackMargin(),
                 synchronousPlayback: true
             });
         }
@@ -6848,6 +7013,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
             });
             danmukuPlugin.config({
                 danmuku: newDanmuku,
+                margin: getDanmuTrackMargin(),
                 visible: isDanmakuVisible,
                 synchronousPlayback: true
             });
