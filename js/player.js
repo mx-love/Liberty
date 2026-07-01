@@ -863,6 +863,13 @@ const DANMU_CONFIG = {
     }
 };
 
+const MAX_DANMAKU = 6666;
+
+function limitDanmakuList(list = []) {
+    if (!Array.isArray(list)) return [];
+    return list.length > MAX_DANMAKU ? list.slice(0, MAX_DANMAKU) : list;
+}
+
 function getDanmuBaseUrl() {
     return (DANMU_CONFIG.baseUrl || '').replace(/\/+$/, '');
 }
@@ -2259,7 +2266,10 @@ async function fetchDanmaku(episodeId, episodeIndex, options = {}) {
     };
 
     if (sessionDanmuCommentSuccessCache.has(cacheKey)) {
-        const cached = sessionDanmuCommentSuccessCache.get(cacheKey) || [];
+        const cached = limitDanmakuList(sessionDanmuCommentSuccessCache.get(cacheKey) || []);
+        if (cached.length !== (sessionDanmuCommentSuccessCache.get(cacheKey) || []).length) {
+            sessionDanmuCommentSuccessCache.set(cacheKey, cached);
+        }
         lastDanmuFetchStats = {
             ...lastDanmuFetchStats,
             rawCount: cached.length,
@@ -2434,6 +2444,7 @@ async function fetchDanmaku(episodeId, episodeIndex, options = {}) {
 
     const finalDanmaku = [];
     parsedComments.forEach(item => processDanmakuOptimized(item, finalDanmaku));
+    const limitedDanmaku = limitDanmakuList(finalDanmaku);
 
     lastDanmuFetchStats = {
         episodeId,
@@ -2442,32 +2453,35 @@ async function fetchDanmaku(episodeId, episodeIndex, options = {}) {
         rawCount: totalComments,
         validCount: parsedComments.length,
         convertedCount: finalDanmaku.length,
-        loadedCount: finalDanmaku.length,
-        failReason: finalDanmaku.length > 0 ? '' : 'empty_comment',
+        loadedCount: limitedDanmaku.length,
+        failReason: limitedDanmaku.length > 0 ? '' : 'empty_comment',
         rateLimited: false,
         updatedAt: Date.now()
     };
 
-    if (finalDanmaku.length > 0) {
-        sessionDanmuCommentSuccessCache.set(cacheKey, finalDanmaku);
+    if (limitedDanmaku.length > 0) {
+        sessionDanmuCommentSuccessCache.set(cacheKey, limitedDanmaku);
     }
 
     danmuDebugLog(`[DanmuDebug] 弹幕转换后数量: ${finalDanmaku.length}`);
-    danmuDebugLog(`✅ 弹幕解析完成: ${totalComments} → ${finalDanmaku.length}条（未做数量裁剪）`);
+    if (limitedDanmaku.length !== finalDanmaku.length) {
+        danmuDebugLog(`[DanmuDebug] 弹幕数量上限生效: ${finalDanmaku.length} -> ${limitedDanmaku.length}`);
+    }
+    danmuDebugLog(`✅ 弹幕解析完成: ${totalComments} → ${limitedDanmaku.length}条`);
 
     const cacheData = {
         episodeIndex,
-        danmuList: finalDanmaku,
+        danmuList: limitedDanmaku,
         timestamp: Date.now()
     };
 
     if (videoPlayer) {
-        videoPlayer.updateDanmuCache(episodeIndex, finalDanmaku);
+        videoPlayer.updateDanmuCache(episodeIndex, limitedDanmaku);
     }
 
     currentDanmuCache = cacheData;
 
-    return finalDanmaku;
+    return limitedDanmaku;
 }
 
 // 🔥 弹幕对象处理（优化版）
@@ -3112,6 +3126,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
         if (currentDanmuCache.episodeIndex === episodeIndex &&
             currentDanmuCache.danmuList &&
             Date.now() - currentDanmuCache.timestamp < DANMU_CONFIG.cacheExpiration.danmuCache) {
+            currentDanmuCache.danmuList = limitDanmakuList(currentDanmuCache.danmuList);
             danmuDebugLog('✅ 使用弹幕缓存（当前集）');
             updateLastDanmuMatchInfo({
                 reason: 'cache',
