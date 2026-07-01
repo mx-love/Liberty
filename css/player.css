@@ -737,13 +737,6 @@ textarea:focus {
    移动端全屏优化：只保留原生全屏
    ============================================ */
 @media (max-width: 1024px) {
-    /* 隐藏网页全屏按钮 */
-    .art-control-fullscreenWeb,
-    button[class*="fullscreen-web"],
-    [class*="fullscreen-web-btn"] {
-        display: none !important;
-    }
-    
     /* 保留原生全屏按钮，并优化样式 */
     .art-control-fullscreen {
         display: flex !important;

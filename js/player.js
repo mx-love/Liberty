@@ -442,11 +442,6 @@ function cleanupResources() {
         clearInterval(progressSaveInterval);
         progressSaveInterval = null;
     }
-    if (restoreDanmuTimer) {
-        clearTimeout(restoreDanmuTimer);
-        restoreDanmuTimer = null;
-    }
-
     // 清理全局变量
     art = null;
     if (window.LibertyPlayer) {
@@ -468,11 +463,6 @@ function cleanupResources() {
     currentDanmuAnimeId = null;
     currentDanmuSourceName = '';
 
-    if (window.globalDanmuSyncTimer) {
-        clearInterval(window.globalDanmuSyncTimer);
-        window.globalDanmuSyncTimer = null;
-    }
-
     window.LibertyDebug.log('✅ 资源清理完成');
 }
 
@@ -487,7 +477,6 @@ window.addEventListener('beforeunload', () => {
 
 // ===== 【修改】页面可见性管理 - 后台继续播放 =====
 let pageWasHidden = false;
-let restoreDanmuTimer = null; // 🔥 新增：防止定时器冲突
 
 function onVisibilityChange() {
     if (document.hidden) {
@@ -497,13 +486,7 @@ function onVisibilityChange() {
         saveCurrentProgress();
 
         // ✅ 只隐藏弹幕，不清空数据
-        if (art && art.plugins.artplayerPluginDanmuku) {
-            const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
-            if (typeof danmukuPlugin.hide === 'function') {
-                danmukuPlugin.hide();
-            }
-            // 🔥 不再 config({ danmuku: [] })，保留数据避免恢复时重新加载
-        }
+        applyDanmakuVisibility('visibilitychange-hidden');
 
     } else if (pageWasHidden) {
         window.LibertyDebug.log('页面恢复可见');
@@ -556,7 +539,6 @@ function onVisibilityChange() {
             try {
                 // 优先使用缓存的弹幕
                 const cachedDanmu = currentDanmuCache.danmuList;
-                const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
 
                 if (cachedDanmu && cachedDanmu.length > 0 && 
                     currentDanmuCache.episodeIndex === currentEpisodeIndex) {
@@ -567,36 +549,26 @@ function onVisibilityChange() {
                         pluginApplied: true
                     });
 
-                    // 同步到当前播放位置（防止弹幕时间轴偏移）
-                    if (typeof danmukuPlugin.seek === 'function') {
-                        danmukuPlugin.seek(art.video.currentTime);
-                    }
-
                     danmuDebugLog('弹幕已恢复');
                 } else {
                     // 缓存失效，重新获取
                     getDanmukuForVideo(currentVideoTitle, currentEpisodeIndex)
                         .then(danmuku => {
                             if (danmuku && danmuku.length > 0) {
-                                danmukuPlugin.config({ 
-                                    danmuku: danmuku,
-                                    margin: getDanmuTrackMargin(),
-                                    visible: isDanmakuVisible,
-                                    synchronousPlayback: true 
+                                applyDanmakuRuntimeState({
+                                    reason: 'visibility-restore-reload',
+                                    danmuku,
+                                    reload: true,
+                                }).then((applied) => {
+                                    if (!applied) return;
+
+                                    logDanmuVisibilityState('visibilitychange-restore-reload', {
+                                        loadedCount: danmuku.length,
+                                        pluginApplied: true
+                                    });
+
+                                    danmuDebugLog('弹幕已恢复（重新加载）');
                                 });
-                                danmukuPlugin.load();
-
-                                if (typeof danmukuPlugin.seek === 'function') {
-                                    danmukuPlugin.seek(art.video.currentTime);
-                                }
-
-                                applyDanmakuVisibility('visibility-restore-reload');
-                                logDanmuVisibilityState('visibilitychange-restore-reload', {
-                                    loadedCount: danmuku.length,
-                                    pluginApplied: true
-                                });
-
-                                danmuDebugLog('弹幕已恢复（重新加载）');
                             }
                         })
                         .catch(err => {
@@ -661,9 +633,7 @@ const isAndroidDevice = /Android/i.test(navigator.userAgent);
 let playerViewportRefreshBound = false;
 let playerViewportRefreshTimer = null;
 let danmakuLayoutRefreshTimer = null;
-let fullscreenHandoffCleanup = null;
 const FULLSCREEN_DEBUG_STORAGE_KEY = 'LIBRETV_FULLSCREEN_DEBUG';
-const SETTING_FULLSCREEN_CONTROL_SELECTOR = '.art-control-fullscreen, .art-control-fullscreenWeb';
 
 function getDocumentFullscreenElement() {
     return document.fullscreenElement || document.webkitFullscreenElement || null;
@@ -696,118 +666,6 @@ function logFullscreenDebug(reason, error = null) {
             message: error.message || String(error),
         } : null,
     });
-}
-
-function bindNativeFullscreenHandoff(currentArt = art) {
-    fullscreenHandoffCleanup?.();
-    fullscreenHandoffCleanup = null;
-
-    const cleanupTasks = [];
-    let keepSettingOpenForFullscreenClick = false;
-    const controlsRoot = currentArt?.template?.$controls || null;
-    const getSettingSafeFullscreenControl = (target) => {
-        if (!target || typeof target.closest !== 'function') return null;
-        const control = target.closest(SETTING_FULLSCREEN_CONTROL_SELECTOR);
-        if (!control || !controlsRoot?.contains(control)) return null;
-        return control;
-    };
-    const handleSettingSafeFullscreenClick = (event) => {
-        keepSettingOpenForFullscreenClick = Boolean(currentArt?.setting?.show) && Boolean(getSettingSafeFullscreenControl(event.target));
-        if (!keepSettingOpenForFullscreenClick) return;
-        setTimeout(() => {
-            keepSettingOpenForFullscreenClick = false;
-        }, 0);
-    };
-    const handleSettingFocusAfterFullscreenClick = (event) => {
-        if (!keepSettingOpenForFullscreenClick || !getSettingSafeFullscreenControl(event?.target)) {
-            keepSettingOpenForFullscreenClick = false;
-            return;
-        }
-
-        keepSettingOpenForFullscreenClick = false;
-        if (!currentArt?.setting || currentArt.setting.show) return;
-
-        currentArt.setting.show = true;
-        if (typeof currentArt.setting.render === 'function') {
-            currentArt.setting.render();
-        }
-        if (typeof currentArt.setting.resize === 'function') {
-            currentArt.setting.resize();
-        }
-    };
-
-    if (controlsRoot) {
-        controlsRoot.addEventListener('click', handleSettingSafeFullscreenClick, true);
-        cleanupTasks.push(() => {
-            controlsRoot.removeEventListener('click', handleSettingSafeFullscreenClick, true);
-        });
-    }
-    currentArt?.on?.('focus', handleSettingFocusAfterFullscreenClick);
-    cleanupTasks.push(() => {
-        currentArt?.off?.('focus', handleSettingFocusAfterFullscreenClick);
-    });
-
-    if (isMobileDevice) {
-        fullscreenHandoffCleanup = () => {
-            cleanupTasks.forEach(task => task());
-            fullscreenHandoffCleanup = null;
-        };
-        return;
-    }
-
-    const fullscreenButton = controlsRoot?.querySelector('.art-control-fullscreen');
-    if (!fullscreenButton) {
-        fullscreenHandoffCleanup = () => {
-            cleanupTasks.forEach(task => task());
-            fullscreenHandoffCleanup = null;
-        };
-        return;
-    }
-
-    const handleNativeFullscreenClick = async (event) => {
-        if (!currentArt?.fullscreenWeb || getDocumentFullscreenElement()) {
-            return;
-        }
-
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation?.();
-
-        logFullscreenDebug('native-control-click');
-        currentArt.fullscreenWeb = false;
-        logFullscreenDebug('handoff-before');
-
-        const player = currentArt?.template?.$player;
-        const request =
-            player?.requestFullscreen ||
-            player?.webkitRequestFullscreen ||
-            player?.msRequestFullscreen;
-
-        if (!player || typeof request !== 'function') {
-            logFullscreenDebug('handoff-reject', new Error('Fullscreen API not supported'));
-            return;
-        }
-
-        try {
-            logFullscreenDebug('handoff-request');
-            const result = request.call(player);
-            if (result && typeof result.then === 'function') {
-                await result;
-            }
-            logFullscreenDebug('handoff-resolve');
-        } catch (error) {
-            logFullscreenDebug('handoff-reject', error);
-        }
-    };
-
-    fullscreenButton.addEventListener('click', handleNativeFullscreenClick, true);
-    cleanupTasks.push(() => {
-        fullscreenButton.removeEventListener('click', handleNativeFullscreenClick, true);
-    });
-    fullscreenHandoffCleanup = () => {
-        cleanupTasks.forEach(task => task());
-        fullscreenHandoffCleanup = null;
-    };
 }
 
 function applyInlineVideoAttributes(video) {
@@ -1577,7 +1435,7 @@ window.debugDanmuState = function () {
         persistentBindingEnabled: false,
         artReady: Boolean(window.LibertyPlayer?.art),
         hasDanmukuPlugin: Boolean(window.LibertyPlayer?.art?.plugins?.artplayerPluginDanmuku),
-        danmakuVisible: isDanmakuVisible,
+        danmakuVisible: danmuDisplayConfig.visible !== false,
     };
 };
 
@@ -1597,6 +1455,7 @@ let danmuDisplayConfig = {
     color: '#FFFFFF',
     mode: 0,
     displayArea: DEFAULT_DANMU_DISPLAY_AREA,
+    visible: true,
 };
 
 // 从 localStorage 恢复弹幕配置
@@ -1609,6 +1468,7 @@ let danmuDisplayConfig = {
         }
     } catch (e) {}
     danmuDisplayConfig.displayArea = normalizeDanmuDisplayArea(danmuDisplayConfig.displayArea);
+    danmuDisplayConfig.visible = danmuDisplayConfig.visible !== false;
 })();
 
 // 保存弹幕配置到 localStorage
@@ -1623,10 +1483,16 @@ function saveDanmuConfig(config) {
     } catch (e) {}
 }
 
-let isDanmakuVisible = true;
-
 function getDanmukuPlugin() {
     return art?.plugins?.artplayerPluginDanmuku || null;
+}
+
+function getDanmuDefaultFontSize() {
+    return isMobileDevice ? (window.innerWidth < 375 ? 18 : 20) : 25;
+}
+
+function isDanmuUserVisibleEnabled() {
+    return danmuDisplayConfig.visible !== false;
 }
 
 function normalizeDanmuDisplayArea(value) {
@@ -1666,36 +1532,86 @@ function getDanmuDisplayAreaByMargin(margin) {
     })?.value || null;
 }
 
-async function refreshDanmakuDisplayAreaLayout(reason = 'display-area') {
+function getDanmakuRuntimeConfig(overrides = {}) {
+    return {
+        speed: danmuDisplayConfig.speed,
+        opacity: danmuDisplayConfig.opacity,
+        fontSize: danmuDisplayConfig.fontSize || getDanmuDefaultFontSize(),
+        color: danmuDisplayConfig.color,
+        mode: danmuDisplayConfig.mode,
+        margin: getDanmuTrackMargin(),
+        visible: isDanmuUserVisibleEnabled(),
+        synchronousPlayback: true,
+        ...overrides,
+    };
+}
+
+function getDanmakuLayoutState() {
+    const player = art?.template?.$player;
+    return {
+        width: player?.clientWidth || 0,
+        height: player?.clientHeight || 0,
+        displayArea: danmuDisplayConfig.displayArea,
+    };
+}
+
+let lastDanmakuLayoutState = null;
+
+function markDanmakuLayoutState() {
+    lastDanmakuLayoutState = getDanmakuLayoutState();
+}
+
+async function applyDanmakuRuntimeState({
+    reason = 'runtime',
+    danmuku,
+    reload = false,
+    relayout = false,
+    syncVisibility = true,
+} = {}) {
     const danmukuPlugin = getDanmukuPlugin();
     if (!danmukuPlugin) return false;
-    const currentTime = art?.video?.currentTime || 0;
 
     try {
         if (typeof danmukuPlugin.config === 'function') {
-            danmukuPlugin.config({
-                margin: getDanmuTrackMargin(),
-                visible: isDanmakuVisible,
-                synchronousPlayback: true
-            });
+            danmukuPlugin.config(getDanmakuRuntimeConfig(
+                danmuku !== undefined ? { danmuku } : {}
+            ));
         }
 
-        if (typeof danmukuPlugin.load === 'function') {
+        if (reload && typeof danmukuPlugin.load === 'function') {
             await danmukuPlugin.load();
-        } else if (typeof danmukuPlugin.reset === 'function') {
+        } else if ((reload || relayout) && typeof danmukuPlugin.reset === 'function') {
             danmukuPlugin.reset();
         }
 
-        if (currentTime > 0 && typeof danmukuPlugin.seek === 'function') {
-            danmukuPlugin.seek(currentTime);
+        if (reload || relayout) {
+            markDanmakuLayoutState();
         }
 
-        applyDanmakuVisibility(`${reason}:after-layout-refresh`);
+        if (syncVisibility) {
+            applyDanmakuVisibility(`${reason}:after-runtime-refresh`);
+        }
         return true;
     } catch (error) {
-        console.warn('弹幕显示区域刷新失败:', reason, error);
+        console.warn('弹幕运行时刷新失败:', reason, error);
         return false;
     }
+}
+
+async function refreshDanmakuRuntimeLayout(reason = 'layout', options = {}) {
+    const currentLayoutState = getDanmakuLayoutState();
+    const shouldRelayout = Boolean(options.force) ||
+        !lastDanmakuLayoutState ||
+        currentLayoutState.height !== lastDanmakuLayoutState.height ||
+        currentLayoutState.displayArea !== lastDanmakuLayoutState.displayArea;
+
+    if (!shouldRelayout) return false;
+
+    return applyDanmakuRuntimeState({
+        reason,
+        relayout: true,
+        syncVisibility: true,
+    });
 }
 
 function shouldRefreshDanmakuLayoutOnViewportChange(reason) {
@@ -1709,10 +1625,10 @@ function shouldRefreshDanmakuLayoutOnViewportChange(reason) {
     ].includes(reason);
 }
 
-function queueDanmakuLayoutRefresh(reason = 'display-area', delay = 0) {
+function queueDanmakuLayoutRefresh(reason = 'display-area', delay = 0, options = {}) {
     clearTimeout(danmakuLayoutRefreshTimer);
     danmakuLayoutRefreshTimer = setTimeout(() => {
-        refreshDanmakuDisplayAreaLayout(reason);
+        refreshDanmakuRuntimeLayout(reason, options);
     }, delay);
 }
 
@@ -1745,7 +1661,7 @@ function logDanmuVisibilityState(reason, details = {}) {
     const danmukuPlugin = getDanmukuPlugin();
     console.log('[DanmuDebug] danmaku visibility state', {
         reason,
-        isDanmakuVisible,
+        preferredVisible: isDanmuUserVisibleEnabled(),
         danmuDisplayConfig: { ...danmuDisplayConfig },
         loadedCount: currentDanmuCache?.danmuList?.length ?? null,
         pluginApplied: Boolean(danmukuPlugin),
@@ -1768,14 +1684,14 @@ function applyDanmakuVisibility(reason = 'sync') {
         return;
     }
 
-    const shouldShow = isDanmakuVisible && !document.hidden;
+    const shouldShow = isDanmuUserVisibleEnabled() && !document.hidden;
     const action = shouldShow ? 'show' : 'hide';
     if (typeof danmukuPlugin[action] === 'function') {
         danmukuPlugin[action]();
     }
     danmuDebugLog('[DanmuDebug] apply danmaku visibility', {
         reason,
-        visible: isDanmakuVisible,
+        visible: isDanmuUserVisibleEnabled(),
         action,
         documentHidden: document.hidden
     });
@@ -3515,7 +3431,7 @@ function clearCurrentDanmukuPlugin(reason = 'clear') {
     const danmukuPlugin = art?.plugins?.artplayerPluginDanmuku;
     if (!danmukuPlugin) {
         danmuDebugWarn('[DanmuDebug] 弹幕插件不存在，无法清空旧弹幕', { reason });
-        return;
+        return Promise.resolve(false);
     }
 
     danmuDebugLog('[DanmuDebug] clear old danmaku', {
@@ -3523,17 +3439,11 @@ function clearCurrentDanmukuPlugin(reason = 'clear') {
         currentEpisodeIndex
     });
 
-    if (typeof danmukuPlugin.clear === 'function') {
-        danmukuPlugin.clear();
-    }
-
-    if (typeof danmukuPlugin.config === 'function') {
-        danmukuPlugin.config({
-            danmuku: [],
-            margin: getDanmuTrackMargin(),
-            synchronousPlayback: true
-        });
-    }
+    return applyDanmakuRuntimeState({
+        reason: `${reason}:clear`,
+        danmuku: [],
+        reload: true,
+    });
 }
 
 function getVideoSourceHint(url) {
@@ -3622,7 +3532,7 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
         episodeUrl
     });
 
-    clearCurrentDanmukuPlugin(reason);
+    await clearCurrentDanmukuPlugin(reason);
 
     const videoState = await waitForCurrentVideoReady(10000, {
         episodeIndex,
@@ -3691,8 +3601,6 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
         reason
     });
 
-    clearCurrentDanmukuPlugin(`${reason}:before-apply`);
-
     if (!danmuku || danmuku.length === 0) {
         danmuDebugWarn('[DanmuDebug] episode switch danmaku failed', {
             reason,
@@ -3726,13 +3634,11 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
     });
 
     try {
-        danmukuPlugin.config({
+        await applyDanmakuRuntimeState({
+            reason,
             danmuku,
-            margin: getDanmuTrackMargin(),
-            visible: isDanmakuVisible,
-            synchronousPlayback: true
+            reload: true,
         });
-        danmukuPlugin.load();
     } catch (error) {
         danmuDebugWarn('[DanmuDebug] apply danmaku to artplayer failed', {
             displayEpisode: episodeIndex + 1,
@@ -3756,16 +3662,6 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
         count: danmuku.length,
         reason
     });
-
-    await new Promise(resolve => setTimeout(resolve, 100));
-    if (reloadToken !== danmuReloadToken || episodeIndex !== currentEpisodeIndex) return;
-
-    const currentTime = art?.video?.currentTime || 0;
-    if (currentTime > 0 && typeof danmukuPlugin.seek === 'function') {
-        danmukuPlugin.seek(currentTime);
-    }
-
-    applyDanmakuVisibility(`${reason}:after-apply`);
 
     danmuDebugLog('[DanmuDebug] apply danmaku to artplayer success', {
         displayEpisode: episodeIndex + 1,
@@ -4114,7 +4010,6 @@ class VideoPlayer {
             progressSave: null,
             saveProgress: null,
             autoCleanup: null,
-            danmuSync: null,
             hlsBufferCheck: null,
             seekDebounce: null,
             autoSaveHistory: null,
@@ -4609,11 +4504,12 @@ function initPlayerInternal(videoUrl) {
 				danmuku: [],
 				speed: danmuDisplayConfig.speed,
 				opacity: danmuDisplayConfig.opacity,
-				fontSize: danmuDisplayConfig.fontSize || (isMobileDevice ? (window.innerWidth < 375 ? 18 : 20) : 25),
+				fontSize: danmuDisplayConfig.fontSize || getDanmuDefaultFontSize(),
 				color: danmuDisplayConfig.color,
 				mode: danmuDisplayConfig.mode,
 				modes: [0, 1, 2],
 				margin: getDanmuTrackMargin(),
+				visible: isDanmuUserVisibleEnabled(),
 				MARGIN: {
 					min: 0,
 					max: DANMU_DISPLAY_AREA_OPTIONS.length - 1,
@@ -4926,7 +4822,7 @@ function initPlayerInternal(videoUrl) {
 		hideControls();
 		applyInlineVideoAttributes(art.video);
 		refreshPlayerViewport('art-ready');
-		bindNativeFullscreenHandoff(art);
+		markDanmakuLayoutState();
 
 		// ✅ 监听弹幕插件配置变更，持久化用户设置
 		// ArtPlayer 弹幕插件会在用户通过设置面板修改时触发 artplayerPluginDanmuku:config
@@ -4947,7 +4843,7 @@ function initPlayerInternal(videoUrl) {
 		        }
 		    }
 		    if (config.visible !== undefined && !document.hidden) {
-		        isDanmakuVisible = Boolean(config.visible);
+		        toSave.visible = Boolean(config.visible);
 		        logDanmuVisibilityState('user-config-visible', {
 		            pluginVisible: Boolean(config.visible)
 		        });
@@ -4957,13 +4853,13 @@ function initPlayerInternal(videoUrl) {
 		        danmuDebugLog('✅ 弹幕显示设置已保存:', toSave);;
 		    }
 		    if (shouldRefreshDanmakuLayout) {
-		        queueDanmakuLayoutRefresh('user-config-margin');
+		        queueDanmakuLayoutRefresh('user-config-margin', 0, { force: true });
 		    }
 		});
 
 		art.on('artplayerPluginDanmuku:show', () => {
 		    if (!document.hidden) {
-		        isDanmakuVisible = true;
+		        saveDanmuConfig({ visible: true });
 		        logDanmuVisibilityState('user-show', {
 		            pluginVisible: true
 		        });
@@ -4972,7 +4868,7 @@ function initPlayerInternal(videoUrl) {
 
 		art.on('artplayerPluginDanmuku:hide', () => {
 		    if (!document.hidden) {
-		        isDanmakuVisible = false;
+		        saveDanmuConfig({ visible: false });
 		        logDanmuVisibilityState('user-hide', {
 		            pluginVisible: false
 		        });
@@ -5021,42 +4917,12 @@ function initPlayerInternal(videoUrl) {
 			lastSeekTime = now;
 
 			videoPlayer.setTimer('seekDebounce', () => {
-				const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
-				if (danmukuPlugin && typeof danmukuPlugin.seek === 'function') {
-					danmukuPlugin.seek(currentTime);
-				}
+				refreshDanmakuRuntimeLayout('timeline-seek', { force: true });
 			}, debounceDelay);
 		});
 
-		// ===== 🔥 使用 VideoPlayer 管理定时器 =====
-		let lastSyncTime = 0;
-
-		// ✅ 定期校准弹幕（只在偏差超过 120 秒时才强制 seek，避免频繁重绘导致闪烁）
-		videoPlayer.setTimer('danmuSync', () => {
-			if (!art || !art.video || art.video.paused) {
-				return; // 暂停时不校准，避免不必要的重绘
-			}
-
-			const currentTime = art.video.currentTime;
-			const timeDiff = Math.abs(currentTime - lastSyncTime);
-
-			// ✅ 提高阈值到 120 秒，减少不必要的 seek 重绘
-			if (timeDiff > 120) {
-				const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
-				if (danmukuPlugin && typeof danmukuPlugin.seek === 'function') {
-					danmukuPlugin.seek(currentTime);
-					lastSyncTime = currentTime;
-					danmuDebugLog(`🎯 弹幕定期校准: ${currentTime.toFixed(0)}s`);
-				}
-			} else {
-				// 正常播放中，只更新记录，不触发 seek
-				lastSyncTime = currentTime;
-			}
-		}, 60000, true);
-
 		// 播放器销毁时清理
 		art.on('destroy', () => {
-			videoPlayer.clearTimer('danmuSync');
 			// HLS 缓冲管理变量会在 destroyHls() 中自动重置
 		});
 
@@ -5274,10 +5140,6 @@ function initPlayerInternal(videoUrl) {
     // 添加移动端长按三倍速播放功能
     setupLongPressSpeedControl();
 
-    art.on('destroy', function () {
-        fullscreenHandoffCleanup?.();
-    });
-
     // 视频播放结束事件
     art.on('video:ended', function () {
         videoHasEnded = true;
@@ -5296,31 +5158,6 @@ function initPlayerInternal(videoUrl) {
             art.fullscreen = false;
         }
     });
-
-    // ============================================
-    // 📱 移动端控制栏自动隐藏
-    // ============================================
-    if (isMobileDevice && art) {
-        let mobileControlsTimer;
-
-        const hideMobileControls = () => {
-            if (art.fullscreen && art.playing) {
-                art.controls = false;
-            }
-        };
-
-        const showMobileControls = () => {
-            art.controls = true;
-            clearTimeout(mobileControlsTimer);
-            mobileControlsTimer = setTimeout(hideMobileControls, 3000);
-        };
-
-        // 监听触摸事件
-        const playerElement = document.getElementById('player');
-        if (playerElement) {
-            playerElement.addEventListener('touchstart', showMobileControls);
-        }
-    }
 
     // 10秒后如果仍在加载，但不立即显示错误
     setTimeout(function () {
@@ -5616,10 +5453,7 @@ async function loadEpisodeFromWatchRoomSnapshot(snapshot = {}, options = {}) {
         currentDanmuCache = { episodeIndex: -1, danmuList: null, timestamp: 0 };
         if (videoPlayer) videoPlayer.clearDanmuCache();
 
-        try {
-            const danmukuPlugin = art?.plugins?.artplayerPluginDanmuku;
-            if (typeof danmukuPlugin?.clear === 'function') danmukuPlugin.clear();
-        } catch (error) {}
+        await clearCurrentDanmukuPlugin('watch-room-episode');
 
         const errorElement = document.getElementById('error');
         if (errorElement) errorElement.style.display = 'none';
@@ -5656,7 +5490,6 @@ async function loadEpisodeFromWatchRoomSnapshot(snapshot = {}, options = {}) {
         } else {
             if (videoPlayer) {
                 videoPlayer.clearTimer('autoSaveHistory');
-                videoPlayer.clearTimer('danmuSync');
                 videoPlayer.clearTimer('progressSave');
                 videoPlayer.clearTimer('seekDebounce');
             }
@@ -5725,14 +5558,9 @@ function playEpisode(index, switchReason = 'manual') {
 		currentDanmuSourceName
 	});
 
-    if (art && art.plugins && art.plugins.artplayerPluginDanmuku) {
-        try {
-            const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
-            if (typeof danmukuPlugin.clear === 'function') danmukuPlugin.clear();
-        } catch (e) {
-            console.error('❌ 清空弹幕失败:', e);
-        }
-    }
+    clearCurrentDanmukuPlugin('episode-switch').catch((error) => {
+        console.error('❌ 清空弹幕失败:', error);
+    });
 
     // 保存当前播放进度（如果正在播放）
     if (art && art.video && !art.video.paused && !videoHasEnded) {
@@ -5790,7 +5618,6 @@ function playEpisode(index, switchReason = 'manual') {
 	} else {
 		if (videoPlayer) {
 			videoPlayer.clearTimer('autoSaveHistory');
-			videoPlayer.clearTimer('danmuSync');
 			videoPlayer.clearTimer('progressSave');
 			videoPlayer.clearTimer('seekDebounce');
 		}
@@ -6897,18 +6724,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
         }
 
         const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
-
-        if (typeof danmukuPlugin.clear === 'function') {
-            danmukuPlugin.clear();
-        }
-
-        if (typeof danmukuPlugin.config === 'function') {
-            danmukuPlugin.config({
-                danmuku: [],
-                margin: getDanmuTrackMargin(),
-                synchronousPlayback: true
-            });
-        }
+        await clearCurrentDanmukuPlugin('manual-source');
 
         const cleanTitle = getDanmuSearchKeyword(currentVideoTitle);
         const manualContext = getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex);
@@ -7036,23 +6852,11 @@ async function switchDanmuSource(animeId, encodedSourceName) {
                 loadedCount: newDanmuku.length,
                 hasPlugin: Boolean(danmukuPlugin)
             });
-            danmukuPlugin.config({
+            await applyDanmakuRuntimeState({
+                reason: 'manual-source',
                 danmuku: newDanmuku,
-                margin: getDanmuTrackMargin(),
-                visible: isDanmakuVisible,
-                synchronousPlayback: true
+                reload: true,
             });
-
-            danmukuPlugin.load();
-
-            await new Promise(resolve => setTimeout(resolve, 100));
-
-            if (typeof danmukuPlugin.seek === 'function') {
-                danmukuPlugin.seek(currentTime);
-            }
-            
-
-            applyDanmakuVisibility('manual-source');
 
             showToast(`✓ 已切换到: ${sourceName} (${newDanmuku.length}条)`, 'success');
             danmuDebugLog('[DanmuDebug] apply danmaku to artplayer success', {
