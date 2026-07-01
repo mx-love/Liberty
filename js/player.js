@@ -614,6 +614,8 @@ let art = null; // 用于 ArtPlayer 实例
 let _longPressHandlers = null;
 let _mobileTouchInputHandlers = null;
 let _mobileLongPressTriggered = false;
+let _danmakuTouchPanelHandlers = null;
+let _mobileOrientationFullscreenCleanup = null;
 let currentHls = null; // 跟踪当前HLS实例
 let currentEpisodes = [];
 let episodesReversed = false;
@@ -732,6 +734,109 @@ function bindPlayerViewportRefresh() {
         }
     });
     window.addEventListener('pageshow', () => refreshPlayerViewport('pageshow'));
+}
+
+function cleanupDanmakuTouchPanels(expectedArt = null) {
+    if (!_danmakuTouchPanelHandlers) return;
+    if (expectedArt && _danmakuTouchPanelHandlers.art !== expectedArt) return;
+
+    _danmakuTouchPanelHandlers.documentEvents.forEach(({ type, listener, options }) => {
+        document.removeEventListener(type, listener, options);
+    });
+
+    _danmakuTouchPanelHandlers.roots.forEach(({ root, listener }) => {
+        root.classList.remove('libretv-touch-panel-open');
+        root.removeEventListener('click', listener);
+    });
+
+    _danmakuTouchPanelHandlers = null;
+}
+
+function setupDanmakuTouchPanels() {
+    if (!isMobileDevice || !art?.template?.$player) return;
+
+    cleanupDanmakuTouchPanels();
+
+    const playerRoot = art.template.$player;
+    const panelRoots = [
+        {
+            root: playerRoot.querySelector('.artplayer-plugin-danmuku .apd-config'),
+            panelSelector: '.apd-config-panel',
+        },
+        {
+            root: playerRoot.querySelector('.artplayer-plugin-danmuku .apd-style'),
+            panelSelector: '.apd-style-panel',
+        },
+    ].filter(({ root }) => Boolean(root));
+
+    if (!panelRoots.length) return;
+
+    const artInstance = art;
+    const isWithin = (target, node) => Boolean(
+        target &&
+        node &&
+        (target === node || (typeof node.contains === 'function' && node.contains(target)))
+    );
+
+    const closeAllPanels = (exceptRoot = null) => {
+        panelRoots.forEach(({ root }) => {
+            if (root !== exceptRoot) {
+                root.classList.remove('libretv-touch-panel-open');
+            }
+        });
+    };
+
+    const outsidePointerHandler = (event) => {
+        if (art !== artInstance || artInstance.isDestroy) return;
+
+        const target = event.target;
+        const isInsideAnyPanelRoot = panelRoots.some(({ root }) => isWithin(target, root));
+        if (!isInsideAnyPanelRoot) {
+            closeAllPanels();
+        }
+    };
+
+    const documentEvents = [];
+    const outsideEventTypes = window.PointerEvent ? ['pointerdown'] : ['touchstart', 'mousedown'];
+    outsideEventTypes.forEach((type) => {
+        document.addEventListener(type, outsidePointerHandler, true);
+        documentEvents.push({ type, listener: outsidePointerHandler, options: true });
+    });
+
+    panelRoots.forEach((entry) => {
+        const { root, panelSelector } = entry;
+        const rootClickHandler = (event) => {
+            if (art !== artInstance || artInstance.isDestroy) return;
+            if (event.target.closest(panelSelector)) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+
+            const willOpen = !root.classList.contains('libretv-touch-panel-open');
+            closeAllPanels(willOpen ? root : null);
+            root.classList.toggle('libretv-touch-panel-open', willOpen);
+        };
+
+        root.addEventListener('click', rootClickHandler);
+        entry.listener = rootClickHandler;
+    });
+
+    _danmakuTouchPanelHandlers = {
+        art: artInstance,
+        documentEvents,
+        roots: panelRoots,
+    };
+
+    artInstance.on('destroy', () => {
+        cleanupDanmakuTouchPanels(artInstance);
+    });
+}
+
+function cleanupMobileOrientationFullscreen() {
+    if (typeof _mobileOrientationFullscreenCleanup === 'function') {
+        _mobileOrientationFullscreenCleanup();
+    }
+    _mobileOrientationFullscreenCleanup = null;
 }
 
 let saveProgressTimer = null; // 用于防抖保存进度
@@ -4893,6 +4998,7 @@ function initPlayerInternal(videoUrl) {
 		applyInlineVideoAttributes(art.video);
 		refreshPlayerViewport('art-ready');
 		markDanmakuLayoutState();
+		setupDanmakuTouchPanels();
 
 		// ✅ 监听弹幕插件配置变更，持久化用户设置
 		// ArtPlayer 弹幕插件会在用户通过设置面板修改时触发 artplayerPluginDanmuku:config
@@ -5063,6 +5169,8 @@ function initPlayerInternal(videoUrl) {
 		// 📱 移动端横屏自动全屏
 		// ============================================
 		if (isMobileDevice) {
+			cleanupMobileOrientationFullscreen();
+
 			const handleOrientationChange = () => {
 				if (window.matchMedia("(orientation: landscape)").matches) {
 					if (art.playing && !art.fullscreen) {
@@ -5073,11 +5181,21 @@ function initPlayerInternal(videoUrl) {
 				}
 			};
 
-			if (window.screen?.orientation) {
+			if (window.screen?.orientation?.addEventListener) {
 				window.screen.orientation.addEventListener('change', handleOrientationChange);
+				_mobileOrientationFullscreenCleanup = () => {
+					window.screen.orientation.removeEventListener('change', handleOrientationChange);
+					_mobileOrientationFullscreenCleanup = null;
+				};
 			} else {
 				window.addEventListener('orientationchange', handleOrientationChange);
+				_mobileOrientationFullscreenCleanup = () => {
+					window.removeEventListener('orientationchange', handleOrientationChange);
+					_mobileOrientationFullscreenCleanup = null;
+				};
 			}
+
+			art.on('destroy', cleanupMobileOrientationFullscreen);
 		}
 	});
 
@@ -5101,6 +5219,7 @@ function initPlayerInternal(videoUrl) {
     art.on('fullscreen', function (isFullScreen) {
         logFullscreenDebug('art-fullscreen');
         handleFullScreen(isFullScreen, false);
+        refreshPlayerViewport('fullscreen');
     });
 
     // ⭐⭐⭐ 在这里添加 video:loadedmetadata 事件处理 ⭐⭐⭐

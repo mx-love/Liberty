@@ -911,6 +911,20 @@ textarea:focus {
     }
 }
 
+@media (hover: none), (pointer: coarse) {
+    .artplayer-plugin-danmuku .apd-config:hover .apd-config-panel,
+    .artplayer-plugin-danmuku .apd-style:hover .apd-style-panel {
+        opacity: 0;
+        pointer-events: none;
+    }
+
+    .artplayer-plugin-danmuku .apd-config.libretv-touch-panel-open .apd-config-panel,
+    .artplayer-plugin-danmuku .apd-style.libretv-touch-panel-open .apd-style-panel {
+        opacity: 1;
+        pointer-events: all;
+    }
+}
+
 /* 小屏横屏设备进一步优化 */
 @media (orientation: landscape) and (max-width: 768px) {
     .art-controls-center {
