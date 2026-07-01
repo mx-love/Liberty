@@ -663,6 +663,7 @@ let playerViewportRefreshTimer = null;
 let danmakuLayoutRefreshTimer = null;
 let fullscreenHandoffCleanup = null;
 const FULLSCREEN_DEBUG_STORAGE_KEY = 'LIBRETV_FULLSCREEN_DEBUG';
+const SETTING_FULLSCREEN_CONTROL_SELECTOR = '.art-control-fullscreen, .art-control-fullscreenWeb';
 
 function getDocumentFullscreenElement() {
     return document.fullscreenElement || document.webkitFullscreenElement || null;
@@ -701,10 +702,67 @@ function bindNativeFullscreenHandoff(currentArt = art) {
     fullscreenHandoffCleanup?.();
     fullscreenHandoffCleanup = null;
 
-    if (isMobileDevice) return;
+    const cleanupTasks = [];
+    let keepSettingOpenForFullscreenClick = false;
+    const controlsRoot = currentArt?.template?.$controls || null;
+    const getSettingSafeFullscreenControl = (target) => {
+        if (!target || typeof target.closest !== 'function') return null;
+        const control = target.closest(SETTING_FULLSCREEN_CONTROL_SELECTOR);
+        if (!control || !controlsRoot?.contains(control)) return null;
+        return control;
+    };
+    const handleSettingSafeFullscreenClick = (event) => {
+        keepSettingOpenForFullscreenClick = Boolean(currentArt?.setting?.show) && Boolean(getSettingSafeFullscreenControl(event.target));
+        if (!keepSettingOpenForFullscreenClick) return;
+        setTimeout(() => {
+            keepSettingOpenForFullscreenClick = false;
+        }, 0);
+    };
+    const handleSettingFocusAfterFullscreenClick = (event) => {
+        if (!keepSettingOpenForFullscreenClick || !getSettingSafeFullscreenControl(event?.target)) {
+            keepSettingOpenForFullscreenClick = false;
+            return;
+        }
 
-    const fullscreenButton = currentArt?.template?.$controls?.querySelector('.art-control-fullscreen');
-    if (!fullscreenButton) return;
+        keepSettingOpenForFullscreenClick = false;
+        if (!currentArt?.setting || currentArt.setting.show) return;
+
+        currentArt.setting.show = true;
+        if (typeof currentArt.setting.render === 'function') {
+            currentArt.setting.render();
+        }
+        if (typeof currentArt.setting.resize === 'function') {
+            currentArt.setting.resize();
+        }
+    };
+
+    if (controlsRoot) {
+        controlsRoot.addEventListener('click', handleSettingSafeFullscreenClick, true);
+        cleanupTasks.push(() => {
+            controlsRoot.removeEventListener('click', handleSettingSafeFullscreenClick, true);
+        });
+    }
+    currentArt?.on?.('focus', handleSettingFocusAfterFullscreenClick);
+    cleanupTasks.push(() => {
+        currentArt?.off?.('focus', handleSettingFocusAfterFullscreenClick);
+    });
+
+    if (isMobileDevice) {
+        fullscreenHandoffCleanup = () => {
+            cleanupTasks.forEach(task => task());
+            fullscreenHandoffCleanup = null;
+        };
+        return;
+    }
+
+    const fullscreenButton = controlsRoot?.querySelector('.art-control-fullscreen');
+    if (!fullscreenButton) {
+        fullscreenHandoffCleanup = () => {
+            cleanupTasks.forEach(task => task());
+            fullscreenHandoffCleanup = null;
+        };
+        return;
+    }
 
     const handleNativeFullscreenClick = async (event) => {
         if (!currentArt?.fullscreenWeb || getDocumentFullscreenElement()) {
@@ -743,8 +801,11 @@ function bindNativeFullscreenHandoff(currentArt = art) {
     };
 
     fullscreenButton.addEventListener('click', handleNativeFullscreenClick, true);
-    fullscreenHandoffCleanup = () => {
+    cleanupTasks.push(() => {
         fullscreenButton.removeEventListener('click', handleNativeFullscreenClick, true);
+    });
+    fullscreenHandoffCleanup = () => {
+        cleanupTasks.forEach(task => task());
         fullscreenHandoffCleanup = null;
     };
 }
@@ -1608,6 +1669,7 @@ function getDanmuDisplayAreaByMargin(margin) {
 async function refreshDanmakuDisplayAreaLayout(reason = 'display-area') {
     const danmukuPlugin = getDanmukuPlugin();
     if (!danmukuPlugin) return false;
+    const currentTime = art?.video?.currentTime || 0;
 
     try {
         if (typeof danmukuPlugin.config === 'function') {
@@ -1622,6 +1684,10 @@ async function refreshDanmakuDisplayAreaLayout(reason = 'display-area') {
             await danmukuPlugin.load();
         } else if (typeof danmukuPlugin.reset === 'function') {
             danmukuPlugin.reset();
+        }
+
+        if (currentTime > 0 && typeof danmukuPlugin.seek === 'function') {
+            danmukuPlugin.seek(currentTime);
         }
 
         applyDanmakuVisibility(`${reason}:after-layout-refresh`);
@@ -1643,13 +1709,17 @@ function shouldRefreshDanmakuLayoutOnViewportChange(reason) {
     ].includes(reason);
 }
 
+function queueDanmakuLayoutRefresh(reason = 'display-area', delay = 0) {
+    clearTimeout(danmakuLayoutRefreshTimer);
+    danmakuLayoutRefreshTimer = setTimeout(() => {
+        refreshDanmakuDisplayAreaLayout(reason);
+    }, delay);
+}
+
 function scheduleDanmakuLayoutRefresh(reason = 'resize') {
     if (!shouldRefreshDanmakuLayoutOnViewportChange(reason)) return;
 
-    clearTimeout(danmakuLayoutRefreshTimer);
-    danmakuLayoutRefreshTimer = setTimeout(() => {
-        refreshDanmakuDisplayAreaLayout(`viewport-${reason}`);
-    }, reason === 'resize' ? 220 : 140);
+    queueDanmakuLayoutRefresh(`viewport-${reason}`, reason === 'resize' ? 220 : 140);
 }
 
 function isDanmuVisibilityDebugEnabled() {
@@ -4862,6 +4932,8 @@ function initPlayerInternal(videoUrl) {
 		// ArtPlayer 弹幕插件会在用户通过设置面板修改时触发 artplayerPluginDanmuku:config
 		art.on('artplayerPluginDanmuku:config', (config) => {
 		    const toSave = {};
+		    const previousDisplayArea = danmuDisplayConfig.displayArea;
+		    let shouldRefreshDanmakuLayout = false;
 		    if (config.speed !== undefined) toSave.speed = config.speed;
 		    if (config.opacity !== undefined) toSave.opacity = config.opacity;
 		    if (config.fontSize !== undefined) toSave.fontSize = config.fontSize;
@@ -4871,6 +4943,7 @@ function initPlayerInternal(videoUrl) {
 		        const displayArea = getDanmuDisplayAreaByMargin(config.margin);
 		        if (displayArea) {
 		            toSave.displayArea = displayArea;
+		            shouldRefreshDanmakuLayout = displayArea !== previousDisplayArea;
 		        }
 		    }
 		    if (config.visible !== undefined && !document.hidden) {
@@ -4882,6 +4955,9 @@ function initPlayerInternal(videoUrl) {
 		    if (Object.keys(toSave).length > 0) {
 		        saveDanmuConfig(toSave);
 		        danmuDebugLog('✅ 弹幕显示设置已保存:', toSave);;
+		    }
+		    if (shouldRefreshDanmakuLayout) {
+		        queueDanmakuLayoutRefresh('user-config-margin');
 		    }
 		});
 
