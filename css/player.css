@@ -321,7 +321,9 @@ input:checked + .slider:before {
 
 /* 原生全屏时，播放器容器铺满 */
 .player-container:-webkit-full-screen,
-.player-container:fullscreen {
+.player-container:fullscreen,
+.art-video-player:-webkit-full-screen,
+.art-video-player:fullscreen {
     position: fixed;
     top: 0; left: 0;
     width: 100vw; height: 100vh;
@@ -330,7 +332,9 @@ input:checked + .slider:before {
 }
 
 .player-container:-webkit-full-screen #player,
-.player-container:fullscreen #player {
+.player-container:fullscreen #player,
+.art-video-player:-webkit-full-screen,
+.art-video-player:fullscreen {
     width: 100%; height: 100%;
 }
 
@@ -780,12 +784,16 @@ textarea:focus {
 @media (orientation: landscape) and (max-width: 1024px) {
     /* 横屏时播放器占满屏幕 */
     .player-container:-webkit-full-screen,
-    .player-container:fullscreen {
+    .player-container:fullscreen,
+    .art-video-player:-webkit-full-screen,
+    .art-video-player:fullscreen {
         padding: 0 !important;
     }
     
     .player-container:-webkit-full-screen #player,
-    .player-container:fullscreen #player {
+    .player-container:fullscreen #player,
+    .art-video-player:-webkit-full-screen,
+    .art-video-player:fullscreen {
         width: 100vw !important;
         height: 100vh !important;
         max-height: 100vh !important;
@@ -793,7 +801,9 @@ textarea:focus {
     
     /* 全屏时优化控制栏 */
     .player-container:-webkit-full-screen .art-controls,
-    .player-container:fullscreen .art-controls {
+    .player-container:fullscreen .art-controls,
+    .art-video-player:-webkit-full-screen .art-controls,
+    .art-video-player:fullscreen .art-controls {
         padding: 0 max(12px, env(safe-area-inset-left)) 
                  max(12px, env(safe-area-inset-bottom)) 
                  max(12px, env(safe-area-inset-right)) !important;

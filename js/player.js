@@ -650,7 +650,6 @@ let currentVideoUrl = ''; // 记录当前实际的视频URL
 let isApplyingWatchRoomEpisodeSnapshot = false;
 let pendingWatchRoomEpisodeChangeId = '';
 const isWebkit = (typeof window.webkitConvertPointFromNodeToPage === 'function')
-Artplayer.FULLSCREEN_WEB_IN_BODY = false;
 // ===== 【新增】移动端设备检测 =====
 const isMobileDevice = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 const isIOSDevice = /iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -659,6 +658,93 @@ const isAndroidDevice = /Android/i.test(navigator.userAgent);
 
 let playerViewportRefreshBound = false;
 let playerViewportRefreshTimer = null;
+let fullscreenHandoffCleanup = null;
+const FULLSCREEN_DEBUG_STORAGE_KEY = 'LIBRETV_FULLSCREEN_DEBUG';
+
+function getDocumentFullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+function logFullscreenDebug(reason, error = null) {
+    try {
+        if (localStorage.getItem(FULLSCREEN_DEBUG_STORAGE_KEY) !== '1') return;
+    } catch (_) {
+        return;
+    }
+
+    const player = art?.template?.$player || null;
+    const describeNode = (node) => {
+        if (!node) return null;
+        if (typeof node.className === 'string' && node.className.trim()) {
+            return node.className;
+        }
+        return node.tagName || null;
+    };
+    console.debug('[LibreTV fullscreen]', {
+        reason,
+        artFullscreen: Boolean(art?.fullscreen),
+        artFullscreenWeb: Boolean(art?.fullscreenWeb),
+        documentFullscreenElement: describeNode(getDocumentFullscreenElement()),
+        playerClass: typeof player?.className === 'string' ? player.className : null,
+        playerParent: describeNode(player?.parentElement || null),
+        requestError: error ? {
+            name: error.name || null,
+            message: error.message || String(error),
+        } : null,
+    });
+}
+
+function bindNativeFullscreenHandoff(currentArt = art) {
+    fullscreenHandoffCleanup?.();
+    fullscreenHandoffCleanup = null;
+
+    if (isMobileDevice) return;
+
+    const fullscreenButton = currentArt?.template?.$controls?.querySelector('.art-control-fullscreen');
+    if (!fullscreenButton) return;
+
+    const handleNativeFullscreenClick = async (event) => {
+        if (!currentArt?.fullscreenWeb || getDocumentFullscreenElement()) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+
+        logFullscreenDebug('native-control-click');
+        currentArt.fullscreenWeb = false;
+        logFullscreenDebug('handoff-before');
+
+        const player = currentArt?.template?.$player;
+        const request =
+            player?.requestFullscreen ||
+            player?.webkitRequestFullscreen ||
+            player?.msRequestFullscreen;
+
+        if (!player || typeof request !== 'function') {
+            logFullscreenDebug('handoff-reject', new Error('Fullscreen API not supported'));
+            return;
+        }
+
+        try {
+            logFullscreenDebug('handoff-request');
+            const result = request.call(player);
+            if (result && typeof result.then === 'function') {
+                await result;
+            }
+            logFullscreenDebug('handoff-resolve');
+        } catch (error) {
+            logFullscreenDebug('handoff-reject', error);
+        }
+    };
+
+    fullscreenButton.addEventListener('click', handleNativeFullscreenClick, true);
+    fullscreenHandoffCleanup = () => {
+        fullscreenButton.removeEventListener('click', handleNativeFullscreenClick, true);
+        fullscreenHandoffCleanup = null;
+    };
+}
 
 function applyInlineVideoAttributes(video) {
     if (!video) return;
@@ -695,8 +781,14 @@ function bindPlayerViewportRefresh() {
 
     window.addEventListener('resize', () => refreshPlayerViewport('resize'));
     window.addEventListener('orientationchange', () => refreshPlayerViewport('orientationchange'));
-    document.addEventListener('fullscreenchange', () => refreshPlayerViewport('fullscreenchange'));
-    document.addEventListener('webkitfullscreenchange', () => refreshPlayerViewport('webkitfullscreenchange'));
+    document.addEventListener('fullscreenchange', () => {
+        logFullscreenDebug('document-fullscreenchange');
+        refreshPlayerViewport('fullscreenchange');
+    });
+    document.addEventListener('webkitfullscreenchange', () => {
+        logFullscreenDebug('document-fullscreenchange');
+        refreshPlayerViewport('webkitfullscreenchange');
+    });
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             refreshPlayerViewport('visibilitychange');
@@ -4643,6 +4735,7 @@ function initPlayerInternal(videoUrl) {
 		hideControls();
 		applyInlineVideoAttributes(art.video);
 		refreshPlayerViewport('art-ready');
+		bindNativeFullscreenHandoff(art);
 
 		// ✅ 监听弹幕插件配置变更，持久化用户设置
 		// ArtPlayer 弹幕插件会在用户通过设置面板修改时触发 artplayerPluginDanmuku:config
@@ -4861,6 +4954,7 @@ function initPlayerInternal(videoUrl) {
 
     // 全屏 Web 模式处理
     art.on('fullscreenWeb', function (isFullScreen) {
+        logFullscreenDebug('art-fullscreen-web');
         handleFullScreen(isFullScreen, true);
 
         // 进入网页全屏时，确保焦点在播放器上，使快捷键生效
@@ -4875,6 +4969,7 @@ function initPlayerInternal(videoUrl) {
 
     // 全屏模式处理
     art.on('fullscreen', function (isFullScreen) {
+        logFullscreenDebug('art-fullscreen');
         handleFullScreen(isFullScreen, false);
     });
 
@@ -4974,6 +5069,10 @@ function initPlayerInternal(videoUrl) {
 
     // 添加移动端长按三倍速播放功能
     setupLongPressSpeedControl();
+
+    art.on('destroy', function () {
+        fullscreenHandoffCleanup?.();
+    });
 
     // 视频播放结束事件
     art.on('video:ended', function () {
