@@ -638,6 +638,7 @@ let playerViewportRefreshBound = false;
 let playerViewportRefreshTimer = null;
 let danmakuLayoutRefreshTimer = null;
 const FULLSCREEN_DEBUG_STORAGE_KEY = 'LIBRETV_FULLSCREEN_DEBUG';
+const HIT_DEBUG_STORAGE_KEY = 'LIBRETV_HIT_DEBUG';
 
 function getDocumentFullscreenElement() {
     return document.fullscreenElement || document.webkitFullscreenElement || null;
@@ -670,6 +671,28 @@ function logFullscreenDebug(reason, error = null) {
             message: error.message || String(error),
         } : null,
     });
+}
+
+function isHitDebugEnabled() {
+    try {
+        return localStorage.getItem(HIT_DEBUG_STORAGE_KEY) === '1';
+    } catch (_) {
+        return false;
+    }
+}
+
+function getNodeHitDebugSummary(node) {
+    if (!(node instanceof Element)) return null;
+
+    const computedStyle = window.getComputedStyle(node);
+    return {
+        tagName: node.tagName || null,
+        className: typeof node.className === 'string' ? node.className : null,
+        id: node.id || null,
+        pointerEvents: computedStyle.pointerEvents || null,
+        zIndex: computedStyle.zIndex || null,
+        cursor: computedStyle.cursor || null,
+    };
 }
 
 function applyInlineVideoAttributes(video) {
@@ -753,6 +776,10 @@ function cleanupDanmakuPanels(expectedArt = null) {
         node.removeEventListener('click', listener);
     });
 
+    if (_danmakuPanelHandlers.hitDebugListener) {
+        _danmakuPanelHandlers.playerRoot?.removeEventListener('mousemove', _danmakuPanelHandlers.hitDebugListener);
+    }
+
     _danmakuPanelHandlers = null;
 }
 
@@ -803,6 +830,7 @@ function setupDanmakuPanels() {
 
     const documentEvents = [];
     const valueListeners = [];
+    let hitDebugListener = null;
     const outsideEventTypes = window.PointerEvent ? ['pointerdown'] : ['touchstart', 'mousedown'];
     outsideEventTypes.forEach((type) => {
         document.addEventListener(type, outsidePointerHandler, true);
@@ -866,11 +894,107 @@ function setupDanmakuPanels() {
         valueListeners.push({ node: valueNode, listener: valueClickHandler });
     });
 
+    if (isHitDebugEnabled()) {
+        let lastHitDebugSignature = '';
+        let lastHitDebugTime = 0;
+
+        hitDebugListener = (event) => {
+            if (art !== artInstance || artInstance.isDestroy) return;
+
+            const openPanels = panelRoots
+                .map(({ root, panelSelector }) => ({
+                    root,
+                    panel: root.querySelector(panelSelector),
+                }))
+                .filter(({ root, panel }) => panel && (
+                    root.classList.contains(panelOpenClass) ||
+                    root.classList.contains('libretv-touch-panel-open')
+                ));
+
+            if (!openPanels.length) return;
+
+            const { clientX: x, clientY: y } = event;
+            const playerRect = playerRoot.getBoundingClientRect();
+            const isInsidePlayer =
+                x >= playerRect.left &&
+                x <= playerRect.right &&
+                y >= playerRect.top &&
+                y <= playerRect.bottom;
+            if (!isInsidePlayer) return;
+
+            const activePanel = openPanels[0].panel;
+            const panelRect = activePanel.getBoundingClientRect();
+            const rightProbeStart = panelRect.left + (panelRect.width * 0.55);
+            const rightProbeEnd = panelRect.right + Math.min(48, panelRect.width * 0.15);
+            const isNearPanelRightZone =
+                y >= panelRect.top &&
+                y <= panelRect.bottom &&
+                x >= rightProbeStart &&
+                x <= rightProbeEnd;
+            if (!isNearPanelRightZone) return;
+
+            const topElement = document.elementFromPoint(x, y);
+            const hitElements = document.elementsFromPoint(x, y).slice(0, 6);
+            const hitSelectors = [
+                '.apd-config-panel',
+                '.apd-style-panel',
+                '.art-controls-center',
+                '.art-controls',
+                '.art-bottom',
+                '.art-mask',
+                '.art-state',
+                'video.art-video',
+            ];
+            const isHitWithinSelector = (selector) => hitElements.some((node) => (
+                node instanceof Element &&
+                typeof node.closest === 'function' &&
+                Boolean(node.closest(selector))
+            ));
+            const topSummary = getNodeHitDebugSummary(topElement);
+            const hitStack = hitElements.map((node) => getNodeHitDebugSummary(node));
+            const signature = JSON.stringify({
+                top: topSummary,
+                hitStack: hitStack.map((item) => item ? [item.tagName, item.className, item.id] : null),
+                fullscreen: Boolean(artInstance.fullscreen),
+                fullscreenWeb: Boolean(artInstance.fullscreenWeb),
+            });
+            const now = Date.now();
+            if (signature === lastHitDebugSignature && now - lastHitDebugTime < 150) {
+                return;
+            }
+
+            lastHitDebugSignature = signature;
+            lastHitDebugTime = now;
+
+            const payload = {
+                reason: 'panel-right-hit-test',
+                x,
+                y,
+                fullscreen: Boolean(artInstance.fullscreen),
+                fullscreenWeb: Boolean(artInstance.fullscreenWeb),
+                panelOpen: true,
+                panelClassName: typeof activePanel.className === 'string' ? activePanel.className : null,
+                topElement: topSummary,
+                hitStack,
+                hitAreas: Object.fromEntries(
+                    hitSelectors.map((selector) => [selector, isHitWithinSelector(selector)])
+                ),
+            };
+
+            window.__LIBRETV_HIT_DEBUG_LAST__ = payload;
+            console.debug('[LibreTV hit-debug]', payload);
+        };
+
+        playerRoot.addEventListener('mousemove', hitDebugListener);
+    }
+
     _danmakuPanelHandlers = {
         art: artInstance,
+        playerRoot,
         documentEvents,
         roots: panelRoots,
         valueListeners,
+        hitDebugListener,
     };
 
     artInstance.on('destroy', () => {
