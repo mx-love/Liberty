@@ -768,10 +768,7 @@ function setupDanmakuPanels() {
             root: playerRoot.querySelector('.artplayer-plugin-danmuku .apd-style'),
             panelSelector: '.apd-style-panel',
         },
-    ].map((entry) => ({
-        ...entry,
-        panel: entry.root?.querySelector(entry.panelSelector) || null,
-    })).filter(({ root, panel }) => Boolean(root && panel));
+    ].filter(({ root }) => Boolean(root));
 
     if (!panelRoots.length) return;
 
@@ -794,14 +791,7 @@ function setupDanmakuPanels() {
         if (art !== artInstance || artInstance.isDestroy) return;
 
         const target = event.target;
-        const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [];
-        const isInsideAnyPanelRoot = panelRoots.some(({ root, panel }) => {
-            const hitNodes = [root, panel];
-            return hitNodes.some((node) => {
-                if (!node) return false;
-                return eventPath.includes(node) || isWithin(target, node);
-            });
-        });
+        const isInsideAnyPanelRoot = panelRoots.some(({ root }) => isWithin(target, root));
         if (!isInsideAnyPanelRoot) {
             closeAllPanels();
         }

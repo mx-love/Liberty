@@ -911,16 +911,10 @@ textarea:focus {
     }
 }
 
-.art-video-player .artplayer-plugin-danmuku .apd-config,
-.art-video-player .artplayer-plugin-danmuku .apd-style {
-    z-index: 200 !important;
-}
-
 .art-video-player .artplayer-plugin-danmuku .apd-config .apd-config-panel,
 .art-video-player .artplayer-plugin-danmuku .apd-style .apd-style-panel {
     opacity: 0 !important;
     pointer-events: none !important;
-    z-index: 210 !important;
 }
 
 .art-video-player .artplayer-plugin-danmuku .apd-config.libretv-panel-open .apd-config-panel,
@@ -928,13 +922,6 @@ textarea:focus {
 .art-video-player .artplayer-plugin-danmuku .apd-style.libretv-panel-open .apd-style-panel,
 .art-video-player .artplayer-plugin-danmuku .apd-style.libretv-touch-panel-open .apd-style-panel {
     opacity: 1 !important;
-    pointer-events: auto !important;
-}
-
-.art-video-player .artplayer-plugin-danmuku .apd-config .apd-config-panel-inner,
-.art-video-player .artplayer-plugin-danmuku .apd-style .apd-style-panel-inner {
-    position: relative;
-    z-index: 1;
     pointer-events: auto !important;
 }
 
