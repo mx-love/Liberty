@@ -614,7 +614,7 @@ let art = null; // 用于 ArtPlayer 实例
 let _longPressHandlers = null;
 let _mobileTouchInputHandlers = null;
 let _mobileLongPressTriggered = false;
-let _danmakuTouchPanelHandlers = null;
+let _danmakuPanelHandlers = null;
 let _mobileOrientationFullscreenCleanup = null;
 let currentHls = null; // 跟踪当前HLS实例
 let currentEpisodes = [];
@@ -736,28 +736,29 @@ function bindPlayerViewportRefresh() {
     window.addEventListener('pageshow', () => refreshPlayerViewport('pageshow'));
 }
 
-function cleanupDanmakuTouchPanels(expectedArt = null) {
-    if (!_danmakuTouchPanelHandlers) return;
-    if (expectedArt && _danmakuTouchPanelHandlers.art !== expectedArt) return;
+function cleanupDanmakuPanels(expectedArt = null) {
+    if (!_danmakuPanelHandlers) return;
+    if (expectedArt && _danmakuPanelHandlers.art !== expectedArt) return;
 
-    _danmakuTouchPanelHandlers.documentEvents.forEach(({ type, listener, options }) => {
+    _danmakuPanelHandlers.documentEvents.forEach(({ type, listener, options }) => {
         document.removeEventListener(type, listener, options);
     });
 
-    _danmakuTouchPanelHandlers.roots.forEach(({ root, listener }) => {
-        root.classList.remove('libretv-touch-panel-open');
+    _danmakuPanelHandlers.roots.forEach(({ root, listener }) => {
+        root.classList.remove('libretv-panel-open', 'libretv-touch-panel-open');
         root.removeEventListener('click', listener);
     });
 
-    _danmakuTouchPanelHandlers = null;
+    _danmakuPanelHandlers = null;
 }
 
-function setupDanmakuTouchPanels() {
-    if (!isMobileDevice || !art?.template?.$player) return;
+function setupDanmakuPanels() {
+    if (!art?.template?.$player) return;
 
-    cleanupDanmakuTouchPanels();
+    cleanupDanmakuPanels();
 
     const playerRoot = art.template.$player;
+    const panelOpenClass = 'libretv-panel-open';
     const panelRoots = [
         {
             root: playerRoot.querySelector('.artplayer-plugin-danmuku .apd-config'),
@@ -781,7 +782,7 @@ function setupDanmakuTouchPanels() {
     const closeAllPanels = (exceptRoot = null) => {
         panelRoots.forEach(({ root }) => {
             if (root !== exceptRoot) {
-                root.classList.remove('libretv-touch-panel-open');
+                root.classList.remove(panelOpenClass, 'libretv-touch-panel-open');
             }
         });
     };
@@ -807,28 +808,28 @@ function setupDanmakuTouchPanels() {
         const { root, panelSelector } = entry;
         const rootClickHandler = (event) => {
             if (art !== artInstance || artInstance.isDestroy) return;
-            if (event.target.closest(panelSelector)) return;
+            if (typeof event.target?.closest === 'function' && event.target.closest(panelSelector)) return;
 
             event.preventDefault();
             event.stopPropagation();
 
-            const willOpen = !root.classList.contains('libretv-touch-panel-open');
+            const willOpen = !root.classList.contains(panelOpenClass);
             closeAllPanels(willOpen ? root : null);
-            root.classList.toggle('libretv-touch-panel-open', willOpen);
+            root.classList.toggle(panelOpenClass, willOpen);
         };
 
         root.addEventListener('click', rootClickHandler);
         entry.listener = rootClickHandler;
     });
 
-    _danmakuTouchPanelHandlers = {
+    _danmakuPanelHandlers = {
         art: artInstance,
         documentEvents,
         roots: panelRoots,
     };
 
     artInstance.on('destroy', () => {
-        cleanupDanmakuTouchPanels(artInstance);
+        cleanupDanmakuPanels(artInstance);
     });
 }
 
@@ -4998,7 +4999,7 @@ function initPlayerInternal(videoUrl) {
 		applyInlineVideoAttributes(art.video);
 		refreshPlayerViewport('art-ready');
 		markDanmakuLayoutState();
-		setupDanmakuTouchPanels();
+		setupDanmakuPanels();
 
 		// ✅ 监听弹幕插件配置变更，持久化用户设置
 		// ArtPlayer 弹幕插件会在用户通过设置面板修改时触发 artplayerPluginDanmuku:config
