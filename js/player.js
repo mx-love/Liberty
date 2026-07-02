@@ -749,6 +749,10 @@ function cleanupDanmakuPanels(expectedArt = null) {
         root.removeEventListener('click', listener);
     });
 
+    _danmakuPanelHandlers.valueListeners?.forEach(({ node, listener }) => {
+        node.removeEventListener('click', listener);
+    });
+
     _danmakuPanelHandlers = null;
 }
 
@@ -798,6 +802,7 @@ function setupDanmakuPanels() {
     };
 
     const documentEvents = [];
+    const valueListeners = [];
     const outsideEventTypes = window.PointerEvent ? ['pointerdown'] : ['touchstart', 'mousedown'];
     outsideEventTypes.forEach((type) => {
         document.addEventListener(type, outsidePointerHandler, true);
@@ -822,10 +827,50 @@ function setupDanmakuPanels() {
         entry.listener = rootClickHandler;
     });
 
+    const forwardSliderClickFromValue = (valueNode, sliderNode, event) => {
+        if (!valueNode || !sliderNode) return;
+
+        const valueRect = valueNode.getBoundingClientRect();
+        const sliderRect = sliderNode.getBoundingClientRect();
+        if (!valueRect.width || !sliderRect.width) return;
+
+        const relativeX = Math.min(Math.max((event.clientX - valueRect.left) / valueRect.width, 0), 1);
+        const relativeY = valueRect.height
+            ? Math.min(Math.max((event.clientY - valueRect.top) / valueRect.height, 0), 1)
+            : 0.5;
+
+        sliderNode.dispatchEvent(new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            button: 0,
+            clientX: sliderRect.left + (sliderRect.width * relativeX),
+            clientY: sliderRect.top + (sliderRect.height * relativeY),
+        }));
+    };
+
+    [
+        ['.apd-config-opacity .apd-value', '.apd-config-opacity .apd-slider'],
+        ['.apd-config-margin .apd-value', '.apd-config-margin .apd-slider'],
+    ].forEach(([valueSelector, sliderSelector]) => {
+        const valueNode = playerRoot.querySelector(`.artplayer-plugin-danmuku ${valueSelector}`);
+        const sliderNode = playerRoot.querySelector(`.artplayer-plugin-danmuku ${sliderSelector}`);
+        if (!valueNode || !sliderNode) return;
+
+        const valueClickHandler = (event) => {
+            if (art !== artInstance || artInstance.isDestroy) return;
+            forwardSliderClickFromValue(valueNode, sliderNode, event);
+        };
+
+        valueNode.addEventListener('click', valueClickHandler);
+        valueListeners.push({ node: valueNode, listener: valueClickHandler });
+    });
+
     _danmakuPanelHandlers = {
         art: artInstance,
         documentEvents,
         roots: panelRoots,
+        valueListeners,
     };
 
     artInstance.on('destroy', () => {

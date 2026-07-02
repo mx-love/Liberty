@@ -925,6 +925,11 @@ textarea:focus {
     pointer-events: auto !important;
 }
 
+.art-video-player .artplayer-plugin-danmuku .apd-config-opacity .apd-value,
+.art-video-player .artplayer-plugin-danmuku .apd-config-margin .apd-value {
+    cursor: pointer;
+}
+
 /* 小屏横屏设备进一步优化 */
 @media (orientation: landscape) and (max-width: 768px) {
     .art-controls-center {
