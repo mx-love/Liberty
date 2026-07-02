@@ -749,6 +749,29 @@ textarea:focus {
     }
 }
 
+.art-video-player.libretv-touch-input .art-bottom .art-progress .art-control-progress {
+    min-height: 24px;
+}
+
+@media (max-width: 1024px) {
+    .art-video-player.libretv-touch-input .art-controls .art-control {
+        min-width: 44px !important;
+        min-height: 44px !important;
+    }
+
+    .art-video-player.libretv-touch-input .artplayer-plugin-danmuku .apd-toggle,
+    .art-video-player.libretv-touch-input .artplayer-plugin-danmuku .apd-config {
+        width: 44px !important;
+        height: 44px !important;
+        min-width: 44px !important;
+        min-height: 44px !important;
+    }
+
+    .art-video-player.libretv-touch-input .artplayer-plugin-danmuku .apd-send {
+        min-height: 44px !important;
+    }
+}
+
 /* ============================================
    竖屏模式：完全隐藏弹幕功能
    ============================================ */
@@ -797,7 +820,9 @@ textarea:focus {
     .player-container:-webkit-full-screen .art-controls,
     .player-container:fullscreen .art-controls,
     .art-video-player:-webkit-full-screen .art-controls,
-    .art-video-player:fullscreen .art-controls {
+    .art-video-player:fullscreen .art-controls,
+    .art-video-player.art-fullscreen .art-controls,
+    .art-video-player.art-fullscreen-web .art-controls {
         padding: 0 max(12px, env(safe-area-inset-left)) 
                  max(12px, env(safe-area-inset-bottom)) 
                  max(12px, env(safe-area-inset-right)) !important;
@@ -910,6 +935,26 @@ textarea:focus {
         box-sizing: border-box !important;
         display: inline-block !important;
     }
+
+    .art-video-player.libretv-touch-input .art-controls-center {
+        max-width: min(360px, 56vw) !important;
+    }
+
+    .art-video-player.libretv-touch-input .apd-emitter {
+        max-width: min(320px, 100%) !important;
+        gap: 4px !important;
+    }
+
+    .art-video-player.libretv-touch-input input.apd-input {
+        max-width: 160px !important;
+        height: 40px !important;
+    }
+
+    .art-video-player.libretv-touch-input div.apd-send {
+        min-width: 72px !important;
+        height: 44px !important;
+        line-height: 44px !important;
+    }
 }
 
 .art-video-player .artplayer-plugin-danmuku .apd-config .apd-config-panel,
@@ -949,6 +994,14 @@ textarea:focus {
         min-width: 28px !important;
         min-height: 28px !important;
         margin: 0 !important;
+    }
+
+    .art-video-player.libretv-touch-input .art-controls-center {
+        max-width: min(260px, 58vw) !important;
+    }
+
+    .art-video-player.libretv-touch-input .apd-emitter {
+        max-width: min(240px, 100%) !important;
     }
 }
 

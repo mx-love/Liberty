@@ -611,10 +611,11 @@ window.addEventListener('load', function () {
 let currentVideoTitle = '';
 let currentEpisodeIndex = 0;
 let art = null; // 用于 ArtPlayer 实例
-let _longPressHandlers = null;
-let _mobileTouchInputHandlers = null;
+let _touchInteractionHandlers = null;
 let _mobileLongPressTriggered = false;
 let _danmakuPanelHandlers = null;
+let playerControlsHideTimer = null;
+let lastDanmakuOutsideCloseAt = 0;
 let _mobileOrientationFullscreenCleanup = null;
 let currentHls = null; // 跟踪当前HLS实例
 let currentEpisodes = [];
@@ -629,8 +630,16 @@ let isApplyingWatchRoomEpisodeSnapshot = false;
 let pendingWatchRoomEpisodeChangeId = '';
 const isWebkit = (typeof window.webkitConvertPointFromNodeToPage === 'function')
 // ===== 【新增】移动端设备检测 =====
-const isMobileDevice = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-const isIOSDevice = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+const maxTouchPoints = Number(navigator.maxTouchPoints || 0);
+const hasTouchInput = maxTouchPoints > 0 || 'ontouchstart' in window;
+const isIPadDesktopMode = /Macintosh/i.test(navigator.userAgent) && maxTouchPoints > 1;
+const supportsCoarsePointer = typeof window.matchMedia === 'function'
+    && window.matchMedia('(any-pointer: coarse)').matches;
+const supportsHoverInput = typeof window.matchMedia === 'function'
+    && window.matchMedia('(any-hover: hover)').matches;
+const isHybridTouchDevice = hasTouchInput && supportsHoverInput;
+const isMobileDevice = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || isIPadDesktopMode;
+const isIOSDevice = /iPhone|iPad|iPod/i.test(navigator.userAgent) || isIPadDesktopMode;
 const isAndroidDevice = /Android/i.test(navigator.userAgent);
 // ===== 【结束】移动端设备检测 =====
 
@@ -693,6 +702,47 @@ function getNodeHitDebugSummary(node) {
         zIndex: computedStyle.zIndex || null,
         cursor: computedStyle.cursor || null,
     };
+}
+
+function canUseDesktopHoverControls() {
+    return supportsHoverInput && !hasTouchInput;
+}
+
+function applyPlayerInputProfile() {
+    const playerRoot = art?.template?.$player;
+    if (!playerRoot) return;
+
+    playerRoot.classList.toggle('libretv-touch-input', hasTouchInput);
+    playerRoot.classList.toggle('libretv-hybrid-input', isHybridTouchDevice);
+    playerRoot.classList.toggle('libretv-coarse-pointer', supportsCoarsePointer);
+}
+
+function isDanmakuPanelOpen(playerRoot = art?.template?.$player) {
+    if (!playerRoot) return false;
+
+    return Boolean(playerRoot.querySelector(
+        '.artplayer-plugin-danmuku .libretv-panel-open, ' +
+        '.artplayer-plugin-danmuku .libretv-touch-panel-open'
+    ));
+}
+
+function isAnyPlayerPanelOpen() {
+    return Boolean(art?.setting?.show) || isDanmakuPanelOpen();
+}
+
+function shouldKeepControlsVisibleOnTouch() {
+    return hasTouchInput
+        && Boolean(art?.controls)
+        && (Boolean(art?.video?.paused) || isAnyPlayerPanelOpen());
+}
+
+function syncTouchControlsVisibility() {
+    if (!art?.controls) return false;
+    if (!shouldKeepControlsVisibleOnTouch()) return false;
+
+    clearTimeout(playerControlsHideTimer);
+    art.controls.show = true;
+    return true;
 }
 
 function applyInlineVideoAttributes(video) {
@@ -825,6 +875,8 @@ function setupDanmakuPanels() {
         const isInsideAnyPanelRoot = panelRoots.some(({ root }) => isWithin(target, root));
         if (!isInsideAnyPanelRoot) {
             closeAllPanels();
+            lastDanmakuOutsideCloseAt = Date.now();
+            syncTouchControlsVisibility();
         }
     };
 
@@ -849,6 +901,7 @@ function setupDanmakuPanels() {
             const willOpen = !root.classList.contains(panelOpenClass);
             closeAllPanels(willOpen ? root : null);
             root.classList.toggle(panelOpenClass, willOpen);
+            syncTouchControlsVisibility();
         };
 
         root.addEventListener('click', rootClickHandler);
@@ -4766,9 +4819,6 @@ function initPlayerInternal(videoUrl) {
         volume: 0.8
     });
 
-    // ✅ 在这里添加移动端检测
-    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-
     // 🎬 Netflix 风格的 HLS 配置（激进清理 + 快速切换）
 	const hlsConfig = {
 		debug: false,
@@ -4831,6 +4881,7 @@ function initPlayerInternal(videoUrl) {
         mutex: true,
         backdrop: true,
         playsInline: true,
+        gesture: false,
         autoPlayback: false,
         airplay: true,
         hotkey: false,
@@ -5111,19 +5162,21 @@ function initPlayerInternal(videoUrl) {
     // 实际起作用的是 artplayer 默认行为，它支持自动隐藏工具栏
     // 但有一个 bug： 在副屏全屏时，鼠标移出副屏后不会自动隐藏工具栏
     // 下面进一并重构和修复：
-    let hideTimer;
 
     // 隐藏控制栏
     function hideControls() {
-        if (art && art.controls) {
-            art.controls.show = false;
-        }
+        if (!art?.controls) return;
+        if (syncTouchControlsVisibility()) return;
+
+        art.controls.show = false;
     }
 
     // 重置计时器，计时器超时时间与 artplayer 保持一致
     function resetHideTimer() {
-        clearTimeout(hideTimer);
-        hideTimer = setTimeout(() => {
+        clearTimeout(playerControlsHideTimer);
+        if (shouldKeepControlsVisibleOnTouch()) return;
+
+        playerControlsHideTimer = setTimeout(() => {
             hideControls();
         }, Artplayer.CONTROL_HIDE_TIME);
     }
@@ -5139,7 +5192,9 @@ function initPlayerInternal(videoUrl) {
     // 从而对播放器状态栏进行隐藏倒计时
     function handleFullScreen(isFullScreen, isWeb) {
         if (isFullScreen) {
-            document.addEventListener('mouseout', handleMouseOut);
+            if (canUseDesktopHoverControls()) {
+                document.addEventListener('mouseout', handleMouseOut);
+            }
 
             // ✅ 移动端横屏锁定（只在原生全屏时）
             if (isMobileDevice && !isWeb && window.screen?.orientation) {
@@ -5148,8 +5203,10 @@ function initPlayerInternal(videoUrl) {
                     .catch((error) => console.warn('⚠️ 横屏锁定失败:', error));
             }
         } else {
-            document.removeEventListener('mouseout', handleMouseOut);
-            clearTimeout(hideTimer);
+            if (canUseDesktopHoverControls()) {
+                document.removeEventListener('mouseout', handleMouseOut);
+            }
+            clearTimeout(playerControlsHideTimer);
 
             // ✅ 退出全屏时解锁方向
             if (isMobileDevice && window.screen?.orientation) {
@@ -5164,11 +5221,26 @@ function initPlayerInternal(videoUrl) {
     }
 
 	art.on('ready', () => {
-		hideControls();
+		applyPlayerInputProfile();
+		if (hasTouchInput) {
+			syncTouchControlsVisibility();
+		} else {
+			hideControls();
+		}
 		applyInlineVideoAttributes(art.video);
 		refreshPlayerViewport('art-ready');
 		markDanmakuLayoutState();
 		setupDanmakuPanels();
+		syncTouchControlsVisibility();
+		art.on('setting', () => {
+			syncTouchControlsVisibility();
+		});
+		art.on('video:pause', () => {
+			syncTouchControlsVisibility();
+		});
+		art.on('video:timeupdate', () => {
+			syncTouchControlsVisibility();
+		});
 
 		// ✅ 监听弹幕插件配置变更，持久化用户设置
 		// ArtPlayer 弹幕插件会在用户通过设置面板修改时触发 artplayerPluginDanmuku:config
@@ -5204,6 +5276,7 @@ function initPlayerInternal(videoUrl) {
 		});
 
 		art.on('artplayerPluginDanmuku:show', () => {
+		    syncTouchControlsVisibility();
 		    if (!document.hidden) {
 		        saveDanmuConfig({ visible: true });
 		        logDanmuVisibilityState('user-show', {
@@ -5213,6 +5286,7 @@ function initPlayerInternal(videoUrl) {
 		});
 
 		art.on('artplayerPluginDanmuku:hide', () => {
+		    syncTouchControlsVisibility();
 		    if (!document.hidden) {
 		        saveDanmuConfig({ visible: false });
 		        logDanmuVisibilityState('user-hide', {
@@ -5374,6 +5448,7 @@ function initPlayerInternal(videoUrl) {
         logFullscreenDebug('art-fullscreen-web');
         handleFullScreen(isFullScreen, true);
         refreshPlayerViewport('fullscreenWeb');
+        syncTouchControlsVisibility();
 
         // 进入网页全屏时，确保焦点在播放器上，使快捷键生效
         if (isFullScreen) {
@@ -5390,6 +5465,7 @@ function initPlayerInternal(videoUrl) {
         logFullscreenDebug('art-fullscreen');
         handleFullScreen(isFullScreen, false);
         refreshPlayerViewport('fullscreen');
+        syncTouchControlsVisibility();
     });
 
     // ⭐⭐⭐ 在这里添加 video:loadedmetadata 事件处理 ⭐⭐⭐
@@ -5486,9 +5562,8 @@ function initPlayerInternal(videoUrl) {
         showError('视频播放失败: ' + (error.message || '未知错误'));
     });
 
-    // 添加移动端长按三倍速播放功能
-    setupLongPressSpeedControl();
-    setupMobileTouchSchemeA();
+    // 统一移动端 / iPad 触摸输入策略
+    setupTouchInteractionPolicy();
 
     // 视频播放结束事件
     art.on('video:ended', function () {
@@ -6273,186 +6348,68 @@ function saveCurrentProgress() {
     }
 }
 
-function setupMobileTouchSchemeA() {
-    if (!isMobileDevice || !art || !art.video) return;
+function cleanupTouchInteractionPolicy(expectedArt = null) {
+    if (!_touchInteractionHandlers) return;
+    if (expectedArt && _touchInteractionHandlers.art !== expectedArt) return;
 
-    const videoElement = art.video;
-    if (!videoElement) return;
+    const {
+        target,
+        touchstart,
+        touchmove,
+        touchend,
+        touchcancel,
+        clickCapture,
+        videoPause,
+        videoEnded,
+        speedIndicator,
+    } = _touchInteractionHandlers;
 
-    if (_mobileTouchInputHandlers) {
-        const previousTarget = _mobileTouchInputHandlers.target;
-        if (previousTarget) {
-            previousTarget.removeEventListener('touchstart', _mobileTouchInputHandlers.touchstart);
-            previousTarget.removeEventListener('touchmove', _mobileTouchInputHandlers.touchmove);
-            previousTarget.removeEventListener('touchend', _mobileTouchInputHandlers.touchend);
-            previousTarget.removeEventListener('touchcancel', _mobileTouchInputHandlers.touchcancel);
-        }
-        if (_mobileTouchInputHandlers.singleTapTimer) {
-            clearTimeout(_mobileTouchInputHandlers.singleTapTimer);
-        }
-        _mobileTouchInputHandlers = null;
+    target?.removeEventListener('touchstart', touchstart);
+    target?.removeEventListener('touchmove', touchmove);
+    target?.removeEventListener('touchend', touchend);
+    target?.removeEventListener('touchcancel', touchcancel);
+    target?.removeEventListener('click', clickCapture, true);
+    target?.removeEventListener('pause', videoPause);
+    target?.removeEventListener('ended', videoEnded);
+
+    if (speedIndicator?.parentNode) {
+        speedIndicator.parentNode.removeChild(speedIndicator);
     }
+
+    videoPlayer?.clearTimer('longPress');
+    _mobileLongPressTriggered = false;
+    _touchInteractionHandlers = null;
+}
+
+function setupTouchInteractionPolicy() {
+    if (!art || !art.video || !videoPlayer || !hasTouchInput) return;
+
+    cleanupTouchInteractionPolicy();
+    applyPlayerInputProfile();
+
+    const artInstance = art;
+    const playerRoot = art.template?.$player;
+    const videoElement = art.video;
+    if (!playerRoot || !videoElement) return;
 
     let lastTapTime = 0;
     let singleTapTimer = null;
     let touchMoved = false;
     let touchStartX = 0;
     let touchStartY = 0;
-    const touchMoveThreshold = 12;
-
-    const clearSingleTapTimer = () => {
-        if (singleTapTimer) {
-            clearTimeout(singleTapTimer);
-            singleTapTimer = null;
-        }
-    };
-
-    const getTouchPoint = (event) => event.changedTouches?.[0] || event.touches?.[0] || null;
-
-    const isSettingOpen = () => Boolean(art?.setting?.show);
-
-    const isControlsVisible = () => {
-        const playerElement = art?.template?.$player;
-        if (typeof art?.controls?.show === 'boolean') {
-            return art.controls.show;
-        }
-        return Boolean(playerElement?.classList.contains('art-control-show'));
-    };
-
-    const toggleControlsVisibility = () => {
-        if (!art?.controls) return;
-        art.controls.show = !isControlsVisible();
-    };
-
-    const touchStartHandler = (event) => {
-        const touch = getTouchPoint(event);
-        touchMoved = event.touches?.length > 1;
-        if (!touch || touchMoved) {
-            return;
-        }
-        touchStartX = touch.clientX;
-        touchStartY = touch.clientY;
-    };
-
-    const touchMoveHandler = (event) => {
-        if (touchMoved) return;
-        const touch = getTouchPoint(event);
-        if (!touch) return;
-
-        if (
-            Math.abs(touch.clientX - touchStartX) > touchMoveThreshold ||
-            Math.abs(touch.clientY - touchStartY) > touchMoveThreshold
-        ) {
-            touchMoved = true;
-            clearSingleTapTimer();
-            lastTapTime = 0;
-        }
-    };
-
-    const touchEndHandler = (event) => {
-        if (!art || art.video !== videoElement) return;
-
-        if (touchMoved) {
-            touchMoved = false;
-            clearSingleTapTimer();
-            lastTapTime = 0;
-            _mobileLongPressTriggered = false;
-            return;
-        }
-
-        if (isSettingOpen()) {
-            clearSingleTapTimer();
-            lastTapTime = 0;
-            _mobileLongPressTriggered = false;
-            return;
-        }
-
-        if (_mobileLongPressTriggered) {
-            clearSingleTapTimer();
-            lastTapTime = 0;
-            _mobileLongPressTriggered = false;
-            return;
-        }
-
-        if (event.cancelable) {
-            event.preventDefault();
-        }
-
-        const now = Date.now();
-        if (lastTapTime && now - lastTapTime <= Artplayer.DBCLICK_TIME) {
-            clearSingleTapTimer();
-            lastTapTime = 0;
-            art.toggle();
-            return;
-        }
-
-        lastTapTime = now;
-        clearSingleTapTimer();
-        singleTapTimer = window.setTimeout(() => {
-            singleTapTimer = null;
-            if (!art || art.video !== videoElement || isSettingOpen() || _mobileLongPressTriggered) {
-                lastTapTime = 0;
-                _mobileLongPressTriggered = false;
-                return;
-            }
-            toggleControlsVisibility();
-            lastTapTime = 0;
-        }, Artplayer.DBCLICK_TIME);
-    };
-
-    const touchCancelHandler = () => {
-        touchMoved = false;
-        clearSingleTapTimer();
-        lastTapTime = 0;
-        _mobileLongPressTriggered = false;
-    };
-
-    videoElement.addEventListener('touchstart', touchStartHandler, { passive: true });
-    videoElement.addEventListener('touchmove', touchMoveHandler, { passive: true });
-    videoElement.addEventListener('touchend', touchEndHandler, { passive: false });
-    videoElement.addEventListener('touchcancel', touchCancelHandler);
-
-    _mobileTouchInputHandlers = {
-        target: videoElement,
-        touchstart: touchStartHandler,
-        touchmove: touchMoveHandler,
-        touchend: touchEndHandler,
-        touchcancel: touchCancelHandler,
-        get singleTapTimer() {
-            return singleTapTimer;
-        },
-    };
-}
-// 设置移动端长按三倍速播放功能（B站风格）
-function setupLongPressSpeedControl() {
-    if (!art || !art.video || !videoPlayer) return;
-
-    const playerElement = document.getElementById('player');
-    if (!playerElement) return;
-    const videoElement = art.video;
-    if (!videoElement) return;
-
-    // 🔥 先清理之前绑定的监听器，防止切集时叠加
-    if (_longPressHandlers) {
-        const previousTarget = _longPressHandlers.target || playerElement;
-        previousTarget.removeEventListener('touchstart', _longPressHandlers.touchstart);
-        previousTarget.removeEventListener('touchmove', _longPressHandlers.touchmove);
-        previousTarget.removeEventListener('touchend', _longPressHandlers.touchend);
-        previousTarget.removeEventListener('touchcancel', _longPressHandlers.touchcancel);
-        // 同时清理 video 上的监听器
-        if (art && art.video) {
-            if (_longPressHandlers.videoPause) art.video.removeEventListener('pause', _longPressHandlers.videoPause);
-            if (_longPressHandlers.videoEnded) art.video.removeEventListener('ended', _longPressHandlers.videoEnded);
-        }
-        _longPressHandlers = null;
-    }
-
-    let originalPlaybackRate = 1.0;
-    let isLongPress = false;
+    let activeTouchId = null;
+    let longPressActive = false;
     let longPressEligible = false;
-
+    let suppressClickUntil = 0;
+    let originalPlaybackRate = art.video.playbackRate || 1;
+    let startedWithDanmakuPanelOpen = false;
+    let startedWithNativeSettingOpen = false;
+    const touchMoveThreshold = 12;
     const NON_CENTER_TOUCH_SELECTOR = [
         '.art-bottom',
+        '.art-progress',
+        '.art-controls',
+        '.art-control',
         '.art-settings',
         '.art-contextmenus',
         '.art-info',
@@ -6462,179 +6419,358 @@ function setupLongPressSpeedControl() {
         '.apd-config-panel',
         '.apd-style-panel',
         '.art-mask .art-state',
+        '.art-layers .art-layer',
         'input',
         'button',
         '[role="button"]',
     ].join(', ');
 
-    function isNonCenterTouchTarget(target) {
-        return typeof target?.closest === 'function' && Boolean(target.closest(NON_CENTER_TOUCH_SELECTOR));
-    }
+    const clearSingleTapTimer = () => {
+        if (!singleTapTimer) return;
+        clearTimeout(singleTapTimer);
+        singleTapTimer = null;
+    };
 
-    // 速度指示器（和原来一样，保持不变）
-    let speedIndicator = null;
-    function createSpeedIndicator() {
-        if (!speedIndicator) {
-            speedIndicator = document.createElement('div');
-            speedIndicator.style.cssText = `
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                background: rgba(0, 0, 0, 0.8);
-                color: white;
-                padding: 12px 20px;
-                border-radius: 8px;
-                font-size: 16px;
-                font-weight: bold;
-                z-index: 9999;
-                pointer-events: none;
-                opacity: 0;
-                transition: opacity 0.2s;
-            `;
-            playerElement.appendChild(speedIndicator);
+    const clearLongPress = () => {
+        videoPlayer.clearTimer('longPress');
+    };
+
+    const resetTouchState = () => {
+        activeTouchId = null;
+        touchMoved = false;
+        longPressEligible = false;
+        startedWithDanmakuPanelOpen = false;
+        startedWithNativeSettingOpen = false;
+        if (!longPressActive) {
+            _mobileLongPressTriggered = false;
         }
-        return speedIndicator;
-    }
+    };
 
-    function showSpeedIndicator(speed) {
-        const indicator = createSpeedIndicator();
-        indicator.textContent = `${speed}x`;
-        indicator.style.opacity = '1';
-    }
+    const getTouchById = (event) => {
+        const touchList = event.changedTouches || event.touches;
+        if (!touchList?.length) return null;
+        if (activeTouchId === null) return touchList[0] || null;
 
-    function hideSpeedIndicator() {
-        if (speedIndicator) {
-            speedIndicator.style.opacity = '0';
+        for (let i = 0; i < touchList.length; i += 1) {
+            if (touchList[i].identifier === activeTouchId) {
+                return touchList[i];
+            }
         }
-    }
+        return null;
+    };
 
-    // 禁用移动端右键菜单（和原来一样）
-    playerElement.oncontextmenu = () => {
+    const isNonCenterTouchTarget = (target) => (
+        typeof target?.closest === 'function' && Boolean(target.closest(NON_CENTER_TOUCH_SELECTOR))
+    );
+
+    const isControlsVisible = () => {
+        const currentPlayerRoot = art?.template?.$player;
+        if (typeof art?.controls?.show === 'boolean') {
+            return art.controls.show;
+        }
+        return Boolean(currentPlayerRoot?.classList.contains('art-control-show'));
+    };
+
+    const toggleControlsVisibility = () => {
+        if (!art?.controls) return;
+        if (art.video?.paused || isAnyPlayerPanelOpen()) {
+            art.controls.show = true;
+            return;
+        }
+        art.controls.show = !isControlsVisible();
+    };
+
+    const isProtectedEdgeTouch = (touch) => {
+        const rect = playerRoot.getBoundingClientRect();
+        if (!rect.width) return false;
+
+        const edgeZoneSize = Math.max(20, Math.min(36, rect.width * 0.06));
+        return touch.clientX <= rect.left + edgeZoneSize
+            || touch.clientX >= rect.right - edgeZoneSize;
+    };
+
+    const speedIndicator = document.createElement('div');
+    speedIndicator.style.cssText = `
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(0, 0, 0, 0.8);
+        color: white;
+        padding: 12px 20px;
+        border-radius: 8px;
+        font-size: 16px;
+        font-weight: bold;
+        z-index: 9999;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.2s;
+    `;
+    playerRoot.appendChild(speedIndicator);
+
+    const showSpeedIndicator = (speed) => {
+        speedIndicator.textContent = `${speed}x`;
+        speedIndicator.style.opacity = '1';
+    };
+
+    const hideSpeedIndicator = () => {
+        speedIndicator.style.opacity = '0';
+    };
+
+    const restoreLongPressPlaybackRate = () => {
+        if (!art?.video) return;
+        art.video.playbackRate = originalPlaybackRate;
+        longPressActive = false;
+        _mobileLongPressTriggered = false;
+        hideSpeedIndicator();
+    };
+
+    playerRoot.oncontextmenu = () => {
         if (isMobileDevice) {
             return false;
         }
         return true;
     };
 
-    // 🔥 用具名函数，方便后续 removeEventListener
-    const _touchstartHandler = function (e) {
-        if (art.video.paused || isNonCenterTouchTarget(e.target)) {
-            longPressEligible = false;
-            _mobileLongPressTriggered = false;
+    const touchStartHandler = (event) => {
+        if (art !== artInstance || artInstance.isDestroy) return;
+        if (event.touches?.length !== 1) {
+            clearSingleTapTimer();
+            clearLongPress();
+            lastTapTime = 0;
+            resetTouchState();
+            return;
+        }
+
+        const touch = event.touches[0];
+        if (!touch) return;
+
+        activeTouchId = touch.identifier;
+        touchMoved = false;
+        touchStartX = touch.clientX;
+        touchStartY = touch.clientY;
+        startedWithDanmakuPanelOpen = isDanmakuPanelOpen(playerRoot)
+            || (Date.now() - lastDanmakuOutsideCloseAt) < 400;
+        startedWithNativeSettingOpen = Boolean(art?.setting?.show);
+        longPressEligible = false;
+        _mobileLongPressTriggered = false;
+
+        if (
+            startedWithDanmakuPanelOpen ||
+            startedWithNativeSettingOpen ||
+            isNonCenterTouchTarget(event.target)
+        ) {
+            clearSingleTapTimer();
+            lastTapTime = 0;
+            return;
+        }
+
+        if (art.video.paused || isProtectedEdgeTouch(touch)) {
             return;
         }
 
         longPressEligible = true;
-        _mobileLongPressTriggered = false;
-        originalPlaybackRate = art.video.playbackRate;
+        originalPlaybackRate = art.video.playbackRate || 1;
 
         videoPlayer.setTimer('longPress', () => {
-            if (longPressEligible && !art.video.paused) {
-                art.video.playbackRate = 3.0;
-                isLongPress = true;
-                _mobileLongPressTriggered = true;
-                showSpeedIndicator(3.0);
+            if (
+                art !== artInstance ||
+                artInstance.isDestroy ||
+                !longPressEligible ||
+                art.video.paused ||
+                isAnyPlayerPanelOpen()
+            ) {
+                return;
+            }
 
-                if (navigator.vibrate) {
-                    navigator.vibrate(50);
-                }
+            art.video.playbackRate = 3.0;
+            longPressActive = true;
+            _mobileLongPressTriggered = true;
+            showSpeedIndicator(3.0);
+
+            if (navigator.vibrate) {
+                navigator.vibrate(40);
             }
         }, 500);
     };
 
-    const _touchmoveHandler = function (e) {
-        if (!longPressEligible && !isLongPress) return;
+    const touchMoveHandler = (event) => {
+        if (art !== artInstance || artInstance.isDestroy || activeTouchId === null) return;
 
-        if (!isLongPress) {
+        const touch = getTouchById(event);
+        if (!touch) return;
+
+        if (
+            Math.abs(touch.clientX - touchStartX) > touchMoveThreshold ||
+            Math.abs(touch.clientY - touchStartY) > touchMoveThreshold
+        ) {
+            touchMoved = true;
+            clearSingleTapTimer();
+            clearLongPress();
             longPressEligible = false;
-            videoPlayer.clearTimer('longPress');
+            lastTapTime = 0;
         }
 
-        if (isLongPress) {
-            e.preventDefault();
-        }
-    };
-
-    const _touchendHandler = function (e) {
-        if (!longPressEligible && !isLongPress) return;
-
-        videoPlayer.clearTimer('longPress');
-        const didHandleLongPress = isLongPress;
-
-        if (didHandleLongPress) {
-            art.video.playbackRate = originalPlaybackRate;
-            isLongPress = false;
-            hideSpeedIndicator();
-
-            e.preventDefault();
-            e.stopPropagation();
-        }
-
-        longPressEligible = false;
-        if (!didHandleLongPress) {
-            _mobileLongPressTriggered = false;
+        if (longPressActive && event.cancelable) {
+            event.preventDefault();
         }
     };
 
-    const _touchcancelHandler = function () {
-        if (!longPressEligible && !isLongPress) return;
+    const touchEndHandler = (event) => {
+        if (art !== artInstance || artInstance.isDestroy || activeTouchId === null) return;
 
-        videoPlayer.clearTimer('longPress');
+        const touch = getTouchById(event);
+        if (!touch) return;
 
-        if (isLongPress) {
-            art.video.playbackRate = originalPlaybackRate;
-            isLongPress = false;
-            hideSpeedIndicator();
+        clearLongPress();
+
+        if (longPressActive) {
+            suppressClickUntil = Date.now() + 400;
+            restoreLongPressPlaybackRate();
+            if (event.cancelable) {
+                event.preventDefault();
+            }
+            event.stopPropagation();
+            clearSingleTapTimer();
+            lastTapTime = 0;
+            resetTouchState();
+            return;
         }
 
-        longPressEligible = false;
-        _mobileLongPressTriggered = false;
+        if (startedWithDanmakuPanelOpen) {
+            suppressClickUntil = Date.now() + 400;
+            if (event.cancelable) {
+                event.preventDefault();
+            }
+            clearSingleTapTimer();
+            lastTapTime = 0;
+            resetTouchState();
+            return;
+        }
+
+        if (startedWithNativeSettingOpen) {
+            suppressClickUntil = Date.now() + 400;
+            if (event.cancelable) {
+                event.preventDefault();
+            }
+            if (art?.setting?.show) {
+                art.setting.show = false;
+            }
+            syncTouchControlsVisibility();
+            clearSingleTapTimer();
+            lastTapTime = 0;
+            resetTouchState();
+            return;
+        }
+
+        if (touchMoved || isNonCenterTouchTarget(event.target)) {
+            clearSingleTapTimer();
+            lastTapTime = 0;
+            resetTouchState();
+            return;
+        }
+
+        suppressClickUntil = Date.now() + 400;
+        if (event.cancelable) {
+            event.preventDefault();
+        }
+
+        const now = Date.now();
+        if (lastTapTime && now - lastTapTime <= Artplayer.DBCLICK_TIME) {
+            clearSingleTapTimer();
+            lastTapTime = 0;
+            art.toggle();
+            resetTouchState();
+            return;
+        }
+
+        lastTapTime = now;
+        clearSingleTapTimer();
+        singleTapTimer = window.setTimeout(() => {
+            singleTapTimer = null;
+            if (
+                art !== artInstance ||
+                artInstance.isDestroy ||
+                _mobileLongPressTriggered ||
+                isAnyPlayerPanelOpen()
+            ) {
+                lastTapTime = 0;
+                _mobileLongPressTriggered = false;
+                return;
+            }
+
+            toggleControlsVisibility();
+            lastTapTime = 0;
+        }, Artplayer.DBCLICK_TIME);
+
+        resetTouchState();
     };
 
-    // 🔥 注册监听器
-    videoElement.addEventListener('touchstart', _touchstartHandler, { passive: true });
-    videoElement.addEventListener('touchmove', _touchmoveHandler, { passive: false });
-    videoElement.addEventListener('touchend', _touchendHandler);
-    videoElement.addEventListener('touchcancel', _touchcancelHandler);
+    const touchCancelHandler = () => {
+        clearSingleTapTimer();
+        clearLongPress();
+        if (longPressActive) {
+            restoreLongPressPlaybackRate();
+        }
+        lastTapTime = 0;
+        resetTouchState();
+    };
 
-    // 🔥 保存引用，供下次调用时清理
-    _longPressHandlers = {
+    const clickCaptureHandler = (event) => {
+        if (Date.now() > suppressClickUntil) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+        }
+    };
+
+    const pauseResetHandler = () => {
+        clearLongPress();
+        clearSingleTapTimer();
+        if (longPressActive) {
+            restoreLongPressPlaybackRate();
+        }
+        lastTapTime = 0;
+        syncTouchControlsVisibility();
+        resetTouchState();
+    };
+
+    const endedResetHandler = () => {
+        clearLongPress();
+        clearSingleTapTimer();
+        if (longPressActive) {
+            restoreLongPressPlaybackRate();
+        }
+        lastTapTime = 0;
+        resetTouchState();
+    };
+
+    videoElement.addEventListener('touchstart', touchStartHandler, { passive: true });
+    videoElement.addEventListener('touchmove', touchMoveHandler, { passive: false });
+    videoElement.addEventListener('touchend', touchEndHandler, { passive: false });
+    videoElement.addEventListener('touchcancel', touchCancelHandler);
+    videoElement.addEventListener('click', clickCaptureHandler, true);
+    videoElement.addEventListener('pause', pauseResetHandler);
+    videoElement.addEventListener('ended', endedResetHandler);
+
+    _touchInteractionHandlers = {
+        art: artInstance,
         target: videoElement,
-        touchstart: _touchstartHandler,
-        touchmove: _touchmoveHandler,
-        touchend: _touchendHandler,
-        touchcancel: _touchcancelHandler
+        touchstart: touchStartHandler,
+        touchmove: touchMoveHandler,
+        touchend: touchEndHandler,
+        touchcancel: touchCancelHandler,
+        clickCapture: clickCaptureHandler,
+        videoPause: pauseResetHandler,
+        videoEnded: endedResetHandler,
+        speedIndicator,
     };
 
-    // 视频暂停/结束时重置，使用具名函数防止切集叠加
-    const _pauseResetHandler = function () {
-        if (isLongPress) {
-            art.video.playbackRate = originalPlaybackRate;
-            isLongPress = false;
-            hideSpeedIndicator();
-        }
-        longPressEligible = false;
-        _mobileLongPressTriggered = false;
-        videoPlayer.clearTimer('longPress');
-    };
-
-    const _endedResetHandler = function () {
-        if (isLongPress) {
-            art.video.playbackRate = originalPlaybackRate;
-            isLongPress = false;
-            hideSpeedIndicator();
-        }
-        longPressEligible = false;
-        _mobileLongPressTriggered = false;
-    };
-
-    art.video.addEventListener('pause', _pauseResetHandler);
-    art.video.addEventListener('ended', _endedResetHandler);
-
-    // 保存引用到 _longPressHandlers 方便下次清理
-    _longPressHandlers.videoPause = _pauseResetHandler;
-    _longPressHandlers.videoEnded = _endedResetHandler;
+    artInstance.on('destroy', () => {
+        cleanupTouchInteractionPolicy(artInstance);
+    });
 }
 
 // 清除视频进度记录
