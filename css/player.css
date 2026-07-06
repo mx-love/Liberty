@@ -310,9 +310,7 @@ input:checked + .slider:before {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    max-width: min(88vw, 560px);
-    text-align: center;
-    z-index: 10020;
+    z-index: 1000;
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.3s ease;
@@ -320,16 +318,6 @@ input:checked + .slider:before {
 
 .shortcut-hint.show {
     opacity: 1;
-}
-
-.art-video-player .player-brightness-overlay {
-    position: absolute;
-    inset: 0;
-    background: #000;
-    opacity: 0;
-    pointer-events: none;
-    z-index: 2;
-    transition: opacity 0.12s linear;
 }
 
 /* 原生全屏时，播放器容器铺满 */
@@ -552,12 +540,6 @@ button:disabled::before {
 @media (max-width: 640px) {
     .episode-grid {
         max-height: 40vh;
-    }
-
-    .shortcut-hint {
-        width: min(88vw, 360px);
-        padding: 0.875rem 1.125rem;
-        font-size: 1rem;
     }
 
     button {
