@@ -431,6 +431,7 @@ function cleanupResources() {
     }
 
     // 使用 VideoPlayer 的统一销毁方法
+    cleanupPlayerShortcuts();
     if (videoPlayer) {
         videoPlayer.destroy();
         videoPlayer = null;
@@ -4208,9 +4209,6 @@ function initializePageContent() {
     // 更新排序按钮状态
     updateOrderButton();
 
-    // 添加键盘快捷键事件监听
-    document.addEventListener('keydown', handleKeyboardShortcuts);
-
     // 页面加载完成后，延迟保存一次历史记录
     setTimeout(() => {
         window.LibertyDebug.log('[历史记录] 尝试保存初始历史记录');
@@ -4218,82 +4216,361 @@ function initializePageContent() {
     }, 2000);
 }
 
-// 处理键盘快捷键
-function handleKeyboardShortcuts(e) {
-    // 忽略输入框中的按键事件
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+let playerShortcutCleanup = null;
 
-    // Alt + 左箭头 = 上一集
-    if (e.altKey && e.key === 'ArrowLeft') {
-        e.preventDefault();
-        if (currentEpisodeIndex > 0) {
-            playPreviousEpisode();
-            showShortcutHint('上一集', 'left');
-        }
+function cleanupPlayerShortcuts() {
+    if (typeof playerShortcutCleanup === 'function') {
+        playerShortcutCleanup();
+    }
+    playerShortcutCleanup = null;
+}
+
+function isVisibleShortcutLayer(element) {
+    if (!(element instanceof Element)) return false;
+
+    const style = window.getComputedStyle(element);
+    if (style.display === 'none' || style.visibility === 'hidden') {
+        return false;
     }
 
-    // Alt + 右箭头 = 下一集
-    if (e.altKey && e.key === 'ArrowRight') {
-        e.preventDefault();
-        if (currentEpisodeIndex < currentEpisodes.length - 1) {
-            playNextEpisode();
-            showShortcutHint('下一集', 'right');
-        }
+    return element.getClientRects().length > 0;
+}
+
+function isShortcutInteractiveElement(element) {
+    if (!(element instanceof Element)) return false;
+
+    const tagName = element.tagName?.toLowerCase();
+    if (
+        tagName === 'input' ||
+        tagName === 'textarea' ||
+        tagName === 'select' ||
+        tagName === 'button' ||
+        tagName === 'summary' ||
+        targetMatchesSelector(element, 'a[href]') ||
+        element.isContentEditable
+    ) {
+        return true;
     }
 
-    // 左箭头 = 快退
-    if (!e.altKey && e.key === 'ArrowLeft') {
-        e.preventDefault();
-        if (art) {
-            art.currentTime = Math.max(0, art.currentTime - 5);
-            showShortcutHint('快退', 'left');
-        }
+    return Boolean(element.closest([
+        'input',
+        'textarea',
+        'select',
+        'button',
+        'summary',
+        'a[href]',
+        '[contenteditable="true"]',
+        '[contenteditable="plaintext-only"]',
+        '[role="button"]',
+        '[role="textbox"]',
+        '[role="searchbox"]',
+        '[role="combobox"]',
+        '[role="menuitem"]'
+    ].join(', ')));
+}
+
+function targetMatchesSelector(element, selector) {
+    return Boolean(element?.matches?.(selector));
+}
+
+function hasOpenShortcutBlockingLayer() {
+    const selectors = [
+        '#passwordModal',
+        '#modal',
+        '#danmuSourceModal',
+        '#loading',
+        '#messageBoxModal',
+        '#showImportBoxModal',
+        '.modal',
+        '.popup',
+        '.dialog',
+        '[role="dialog"]',
+        '[aria-modal="true"]'
+    ];
+
+    return selectors.some((selector) =>
+        Array.from(document.querySelectorAll(selector)).some(isVisibleShortcutLayer)
+    );
+}
+
+function shouldIgnoreShortcut(event) {
+    if (!event || event.defaultPrevented || event.isComposing) return true;
+
+    const target = event.target instanceof Element ? event.target : null;
+    const activeElement = document.activeElement instanceof Element ? document.activeElement : null;
+
+    if (isShortcutInteractiveElement(target) || isShortcutInteractiveElement(activeElement)) {
+        return true;
     }
 
-    // 右箭头 = 快进
-    if (!e.altKey && e.key === 'ArrowRight') {
-        e.preventDefault();
-        if (art) {
-            art.currentTime = Math.min(art.duration, art.currentTime + 5);
-            showShortcutHint('快进', 'right');
-        }
+    if (hasOpenShortcutBlockingLayer()) {
+        return true;
     }
 
-    // 上箭头 = 音量+
-    if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (art) {
-            art.volume = Math.min(1, art.volume + 0.1);
-            showShortcutHint('音量+', 'up');
-        }
+    return false;
+}
+
+function isSpaceShortcutKey(event) {
+    return event.key === ' ' || event.key === 'Spacebar' || event.code === 'Space';
+}
+
+function getShortcutPlayer() {
+    return art || null;
+}
+
+function getSeekablePlayerState(player = getShortcutPlayer()) {
+    if (!player) return null;
+
+    const currentTime = Number(player.currentTime);
+    const duration = Number(player.duration);
+
+    if (!Number.isFinite(currentTime) || !Number.isFinite(duration) || duration <= 0) {
+        return null;
     }
 
-    // 下箭头 = 音量-
-    if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        if (art) {
-            art.volume = Math.max(0, art.volume - 0.1);
-            showShortcutHint('音量-', 'down');
-        }
+    return { currentTime, duration };
+}
+
+function togglePlayerPlayback() {
+    const player = getShortcutPlayer();
+    if (!player) return null;
+
+    const willPlay = !player.playing;
+    if (typeof player.toggle === 'function') {
+        player.toggle();
+    } else if (willPlay && typeof player.play === 'function') {
+        player.play();
+    } else if (!willPlay && typeof player.pause === 'function') {
+        player.pause();
+    } else {
+        return null;
     }
 
-    // 空格 = 播放/暂停
-    if (e.key === ' ') {
-        e.preventDefault();
-        if (art) {
-            art.toggle();
-            showShortcutHint('播放/暂停', 'play');
-        }
+    return willPlay;
+}
+
+function seekPlayerBy(deltaSeconds) {
+    const player = getShortcutPlayer();
+    const state = getSeekablePlayerState(player);
+    if (!player || !state) return null;
+
+    const nextTime = deltaSeconds >= 0
+        ? Math.min(state.duration, state.currentTime + deltaSeconds)
+        : Math.max(0, state.currentTime + deltaSeconds);
+
+    player.currentTime = nextTime;
+    return nextTime;
+}
+
+function adjustPlayerVolume(delta) {
+    const player = getShortcutPlayer();
+    if (!player) return null;
+
+    const currentVolume = Number(player.volume);
+    const safeVolume = Number.isFinite(currentVolume) ? currentVolume : 0;
+    const nextVolume = Math.min(1, Math.max(0, safeVolume + delta));
+
+    if (delta > 0 && player.muted) {
+        player.muted = false;
     }
 
-    // f 键 = 切换全屏
-    if (e.key === 'f' || e.key === 'F') {
-        if (art) {
-            art.fullscreen = !art.fullscreen;
-            showShortcutHint('切换全屏', 'fullscreen');
-            e.preventDefault();
+    player.volume = nextVolume;
+    return nextVolume;
+}
+
+function togglePlayerMuted() {
+    const player = getShortcutPlayer();
+    if (!player) return null;
+
+    player.muted = !player.muted;
+    return Boolean(player.muted);
+}
+
+function togglePlayerFullscreen() {
+    const player = getShortcutPlayer();
+    if (!player) return null;
+
+    player.fullscreen = !player.fullscreen;
+    return Boolean(player.fullscreen);
+}
+
+function togglePlayerWebFullscreen() {
+    const player = getShortcutPlayer();
+    if (!player || typeof player.fullscreenWeb === 'undefined') return null;
+
+    player.fullscreenWeb = !player.fullscreenWeb;
+    return Boolean(player.fullscreenWeb);
+}
+
+function playPreviousEpisodeByShortcut() {
+    if (currentEpisodeIndex <= 0) return false;
+
+    playPreviousEpisode('shortcut-previous');
+    return true;
+}
+
+function playNextEpisodeByShortcut() {
+    if (currentEpisodeIndex >= currentEpisodes.length - 1) return false;
+
+    playNextEpisode('shortcut-next');
+    return true;
+}
+
+function toggleDanmakuByShortcut() {
+    if (!isDanmuServiceEnabled() || !getDanmukuPlugin()) return null;
+
+    const nextVisible = !isDanmuUserVisibleEnabled();
+    saveDanmuConfig({ visible: nextVisible });
+    applyDanmakuVisibility('shortcut-danmaku');
+    return nextVisible;
+}
+
+function setupPlayerShortcuts(player) {
+    cleanupPlayerShortcuts();
+    if (!player) return;
+
+    // Basic keyboard shortcuts for desktop player controls.
+    // Touch gestures are handled separately and should not be implemented here.
+    const onKeyDown = (event) => {
+        if (shouldIgnoreShortcut(event)) return;
+
+        if (event.altKey && event.key === 'ArrowUp') {
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.repeat) return;
+            if (playPreviousEpisodeByShortcut()) {
+                showShortcutHint('上一集', 'episodePrev');
+            }
+            return;
         }
-    }
+
+        if (event.altKey && event.key === 'ArrowDown') {
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.repeat) return;
+            if (playNextEpisodeByShortcut()) {
+                showShortcutHint('下一集', 'episodeNext');
+            }
+            return;
+        }
+
+        if (event.ctrlKey || event.metaKey || event.altKey) {
+            return;
+        }
+
+        const key = String(event.key || '').toLowerCase();
+
+        if (isSpaceShortcutKey(event) && event.repeat) {
+            event.preventDefault();
+            return;
+        }
+
+        if (event.repeat && ['k', 'm', 'f', 'w', 'd'].includes(key)) {
+            event.preventDefault();
+            return;
+        }
+
+        if (isSpaceShortcutKey(event)) {
+            event.preventDefault();
+            const willPlay = togglePlayerPlayback();
+            if (willPlay === null) return;
+            showShortcutHint(willPlay ? '播放' : '暂停', willPlay ? 'play' : 'pause');
+            return;
+        }
+
+        switch (event.key) {
+            case 'ArrowLeft':
+                event.preventDefault();
+                if (seekPlayerBy(-5) !== null) {
+                    showShortcutHint('快退 5 秒', 'left');
+                }
+                return;
+            case 'ArrowRight':
+                event.preventDefault();
+                if (seekPlayerBy(5) !== null) {
+                    showShortcutHint('快进 5 秒', 'right');
+                }
+                return;
+            case 'ArrowUp': {
+                event.preventDefault();
+                const volume = adjustPlayerVolume(0.05);
+                if (volume !== null) {
+                    showShortcutHint(`音量 ${(volume * 100).toFixed(0)}%`, 'volumeUp');
+                }
+                return;
+            }
+            case 'ArrowDown': {
+                event.preventDefault();
+                const volume = adjustPlayerVolume(-0.05);
+                if (volume !== null) {
+                    showShortcutHint(`音量 ${(volume * 100).toFixed(0)}%`, 'volumeDown');
+                }
+                return;
+            }
+        }
+
+        switch (key) {
+            case 'k': {
+                event.preventDefault();
+                const willPlay = togglePlayerPlayback();
+                if (willPlay === null) return;
+                showShortcutHint(willPlay ? '播放' : '暂停', willPlay ? 'play' : 'pause');
+                return;
+            }
+            case 'm': {
+                event.preventDefault();
+                const muted = togglePlayerMuted();
+                if (muted === null) return;
+                showShortcutHint(muted ? '静音已开启' : '静音已关闭', muted ? 'mute' : 'volumeUp');
+                return;
+            }
+            case 'f': {
+                event.preventDefault();
+                const isFullscreen = togglePlayerFullscreen();
+                if (isFullscreen === null) return;
+                showShortcutHint(isFullscreen ? '进入全屏' : '退出全屏', isFullscreen ? 'fullscreen' : 'fullscreenExit');
+                return;
+            }
+            case 'w': {
+                event.preventDefault();
+                const isWebFullscreen = togglePlayerWebFullscreen();
+                if (isWebFullscreen === null) return;
+                showShortcutHint(
+                    isWebFullscreen ? '进入网页全屏' : '退出网页全屏',
+                    isWebFullscreen ? 'webFullscreen' : 'webFullscreenExit'
+                );
+                return;
+            }
+            case 'd': {
+                event.preventDefault();
+                const danmakuVisible = toggleDanmakuByShortcut();
+                if (danmakuVisible === null) return;
+                showShortcutHint(danmakuVisible ? '显示弹幕' : '隐藏弹幕', 'danmaku');
+                return;
+            }
+            default:
+                return;
+        }
+    };
+
+    let cleaned = false;
+    const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        document.removeEventListener('keydown', onKeyDown);
+        try {
+            player.off?.('destroy', cleanup);
+        } catch (error) {}
+        if (playerShortcutCleanup === cleanup) {
+            playerShortcutCleanup = null;
+        }
+    };
+
+    document.addEventListener('keydown', onKeyDown);
+    try {
+        player.on?.('destroy', cleanup);
+    } catch (error) {}
+    playerShortcutCleanup = cleanup;
 }
 
 // 显示快捷键提示
@@ -4319,8 +4596,18 @@ function showShortcutHint(text, direction) {
         right: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>',
         up: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>',
         down: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>',
+        volumeUp: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7-7 7M3 12h18"></path>',
+        volumeDown: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12H3m11-7-7 7 7 7"></path>',
         fullscreen: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"></path>',
-        play: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3l14 9-14 9V3z"></path>'
+        fullscreenExit: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 9V4H4m11 0h5v5m0 6v5h-5m-6 0H4v-5"></path>',
+        webFullscreen: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16v12H4zM8 10h8"></path>',
+        webFullscreenExit: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8h12v8H6zM4 4h16v16H4z"></path>',
+        play: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3l14 9-14 9V3z"></path>',
+        pause: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 5H6v14h4V5zm8 0h-4v14h4V5z"></path>',
+        mute: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5 6 9H3v6h3l5 4V5zm5 4 5 5m0-5-5 5"></path>',
+        danmaku: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 7h14v10H5zM8 11h8"></path>',
+        episodePrev: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19V5m0 0-5 5m5-5 5 5"></path>',
+        episodeNext: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v14m0 0-5-5m5 5 5-5"></path>'
     };
     iconElement.innerHTML = icons[direction] || '';
 
@@ -4677,6 +4964,7 @@ class VideoPlayer {
     destroy() {
         window.LibertyDebug.log('🧹 VideoPlayer 开始销毁...');
 
+        cleanupPlayerShortcuts();
         this.clearAllTimers();
         this.removeAllEventListeners();
         this.releaseWakeLock();
@@ -5105,6 +5393,7 @@ function initPlayerInternal(videoUrl) {
 
     // 🔥 绑定到 VideoPlayer 实例
     videoPlayer.art = art;
+    setupPlayerShortcuts(art);
 
     // artplayer 没有 'fullscreenWeb:enter', 'fullscreenWeb:exit' 等事件
     // 所以原控制栏隐藏代码并没有起作用
