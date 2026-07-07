@@ -4318,6 +4318,13 @@ function getShortcutPlayer() {
     return art || null;
 }
 
+const SHORTCUT_VOLUME_STEP = 0.1;
+
+function normalizeShortcutVolume(value) {
+    const safeValue = Number.isFinite(value) ? value : 0;
+    return Math.min(1, Math.max(0, Math.round(safeValue * 10) / 10));
+}
+
 function getSeekablePlayerState(player = getShortcutPlayer()) {
     if (!player) return null;
 
@@ -4367,8 +4374,8 @@ function adjustPlayerVolume(delta) {
     if (!player) return null;
 
     const currentVolume = Number(player.volume);
-    const safeVolume = Number.isFinite(currentVolume) ? currentVolume : 0;
-    const nextVolume = Math.min(1, Math.max(0, safeVolume + delta));
+    const safeVolume = normalizeShortcutVolume(currentVolume);
+    const nextVolume = normalizeShortcutVolume(safeVolume + delta);
 
     if (delta > 0 && player.muted) {
         player.muted = false;
@@ -4493,7 +4500,7 @@ function setupPlayerShortcuts(player) {
                 return;
             case 'ArrowUp': {
                 event.preventDefault();
-                const volume = adjustPlayerVolume(0.05);
+                const volume = adjustPlayerVolume(SHORTCUT_VOLUME_STEP);
                 if (volume !== null) {
                     showShortcutHint(`音量 ${(volume * 100).toFixed(0)}%`, 'volumeUp');
                 }
@@ -4501,7 +4508,7 @@ function setupPlayerShortcuts(player) {
             }
             case 'ArrowDown': {
                 event.preventDefault();
-                const volume = adjustPlayerVolume(-0.05);
+                const volume = adjustPlayerVolume(-SHORTCUT_VOLUME_STEP);
                 if (volume !== null) {
                     showShortcutHint(`音量 ${(volume * 100).toFixed(0)}%`, 'volumeDown');
                 }
