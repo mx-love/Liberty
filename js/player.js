@@ -4581,14 +4581,12 @@ function setupPlayerShortcuts(player) {
 }
 
 // 显示快捷键提示
-function showShortcutHint(text, direction, options = {}) {
+function showShortcutHint(text, direction) {
     const hintElement = document.getElementById('shortcutHint');
     if (!hintElement) return;
 
     const textElement = document.getElementById('shortcutText');
     const iconElement = document.getElementById('shortcutIcon');
-    const variant = options?.variant || 'default';
-    const isMobileGestureHint = variant === 'mobileGesture';
 
     // 🔥 使用 VideoPlayer 管理定时器
     if (videoPlayer) {
@@ -4620,31 +4618,6 @@ function showShortcutHint(text, direction, options = {}) {
         episodeNext: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v14m0 0-5-5m5 5 5-5"></path>'
     };
     iconElement.innerHTML = icons[direction] || '';
-    hintElement.classList.toggle('liberty-mobile-gesture-hint', isMobileGestureHint);
-
-    if (isMobileGestureHint) {
-        const playerElement = art?.template?.$player || document.getElementById('player');
-        const playerRect = playerElement?.getBoundingClientRect?.();
-        if (playerRect?.width && playerRect?.height) {
-            const centeredLeft = playerRect.left + (playerRect.width / 2);
-            const centeredTop = playerRect.top + (playerRect.height * 0.46);
-            const maxHintWidth = Math.max(96, Math.min(180, Math.round(playerRect.width * 0.45)));
-            hintElement.style.left = `${Math.round(centeredLeft)}px`;
-            hintElement.style.top = `${Math.round(centeredTop)}px`;
-            hintElement.style.minWidth = `${Math.min(120, maxHintWidth)}px`;
-            hintElement.style.maxWidth = `${maxHintWidth}px`;
-        } else {
-            hintElement.style.removeProperty('left');
-            hintElement.style.removeProperty('top');
-            hintElement.style.removeProperty('min-width');
-            hintElement.style.removeProperty('max-width');
-        }
-    } else {
-        hintElement.style.removeProperty('left');
-        hintElement.style.removeProperty('top');
-        hintElement.style.removeProperty('min-width');
-        hintElement.style.removeProperty('max-width');
-    }
 
     // 🔥 强制重排，确保动画触发
     hintElement.classList.remove('show');
@@ -4652,15 +4625,14 @@ function showShortcutHint(text, direction, options = {}) {
     hintElement.classList.add('show');
 
     // 800ms后隐藏
-    const duration = Number.isFinite(Number(options?.duration)) ? Number(options.duration) : 800;
     if (videoPlayer) {
         videoPlayer.setTimer('shortcutHint', () => {
             hintElement.classList.remove('show');
-        }, duration);
+        }, 800);
     } else {
         shortcutHintTimeout = setTimeout(() => {
             hintElement.classList.remove('show');
-        }, duration);
+        }, 800);
     }
 }
 
@@ -6807,31 +6779,6 @@ function getMobileGestureTouchPoint(event) {
     return event.touches?.[0] || event.changedTouches?.[0] || null;
 }
 
-function isLandscapePlaybackOrientation() {
-    if (window.matchMedia?.('(orientation: landscape)')?.matches) {
-        return true;
-    }
-
-    const viewportWidth = Number(window.visualViewport?.width) || window.innerWidth || 0;
-    const viewportHeight = Number(window.visualViewport?.height) || window.innerHeight || 0;
-    return viewportWidth > viewportHeight;
-}
-
-function isImmersiveMobilePlayback(artInstance = art) {
-    const playerElement = artInstance?.template?.$player;
-    const isFullscreen = Boolean(
-        getDocumentFullscreenElement() ||
-        artInstance?.fullscreen ||
-        artInstance?.fullscreenWeb ||
-        playerElement?.classList.contains('art-fullscreen') ||
-        playerElement?.classList.contains('art-fullscreen-web') ||
-        document.body.classList.contains('player-fullscreen') ||
-        document.body.classList.contains('art-fullscreen')
-    );
-
-    return Boolean(isLandscapePlaybackOrientation() || isFullscreen);
-}
-
 function getTouchGestureTargets(event) {
     const targetElements = [];
     const addTarget = (candidate) => {
@@ -7041,20 +6988,13 @@ function setupMobileTouchGestures() {
         hideSpeedIndicator();
     };
 
-    const showMobileGestureHint = (text, direction, extraOptions = {}) => {
-        showShortcutHint(text, direction, {
-            variant: 'mobileGesture',
-            ...extraOptions,
-        });
-    };
-    const canUseAdvancedTouchGestures = () => isImmersiveMobilePlayback(artInstance);
-
-    const showSeekHint = (targetTime) => {
+    const showSeekHint = (targetTime, prefix = null) => {
         const duration = Number(artInstance.duration ?? videoElement.duration);
         if (!Number.isFinite(targetTime) || !Number.isFinite(duration)) return;
 
-        showMobileGestureHint(
-            `${formatTime(targetTime)} / ${formatTime(duration)}`,
+        const label = prefix || (targetTime >= gestureState.startCurrentTime ? '快进至' : '快退至');
+        showShortcutHint(
+            `${label} ${formatTime(targetTime)} / ${formatTime(duration)}`,
             getMobileGestureSeekDirection(targetTime, gestureState.startCurrentTime)
         );
     };
@@ -7129,9 +7069,6 @@ function setupMobileTouchGestures() {
         if (gestureState.touchCount > 1) {
             clearSingleTapTimer();
             lastSingleTapTime = 0;
-            if (!canUseAdvancedTouchGestures()) {
-                lastTwoFingerTapTime = 0;
-            }
             gestureState.mode = 'multitouch';
             return;
         }
@@ -7175,10 +7112,6 @@ function setupMobileTouchGestures() {
             }
 
             resetLongPressState();
-            if (!canUseAdvancedTouchGestures()) {
-                gestureState.mode = 'none';
-                return;
-            }
 
             if (absDeltaX > absDeltaY * AXIS_RATIO) {
                 const duration = Number(artInstance.duration ?? videoElement.duration);
@@ -7235,7 +7168,7 @@ function setupMobileTouchGestures() {
                 gestureState.startBrightness + ((-deltaY / Math.max(gestureState.playerRect?.height || 1, 1)) * BRIGHTNESS_SENSITIVITY),
                 videoElement
             );
-            showMobileGestureHint(`亮度 ${Math.round(nextBrightness * 100)}%`, 'brightness');
+            showShortcutHint(`亮度 ${Math.round(nextBrightness * 100)}%`, 'brightness');
             return;
         }
 
@@ -7246,7 +7179,7 @@ function setupMobileTouchGestures() {
             const nextVolume = setGestureVolume(
                 gestureState.startVolume + (-deltaY / Math.max(gestureState.playerRect?.height || 1, 1))
             );
-            showMobileGestureHint(
+            showShortcutHint(
                 `音量 ${Math.round(nextVolume * 100)}%`,
                 deltaY <= 0 ? 'volumeUp' : 'volumeDown'
             );
@@ -7268,12 +7201,7 @@ function setupMobileTouchGestures() {
 
             resetLongPressState();
             const touchDuration = Date.now() - gestureState.startTime;
-            if (
-                canUseAdvancedTouchGestures() &&
-                !gestureState.moved &&
-                gestureState.touchCount === 2 &&
-                touchDuration <= MULTI_TOUCH_TAP_MAX_DURATION
-            ) {
+            if (!gestureState.moved && gestureState.touchCount === 2 && touchDuration <= MULTI_TOUCH_TAP_MAX_DURATION) {
                 if (event.cancelable) {
                     event.preventDefault();
                 }
@@ -7284,7 +7212,7 @@ function setupMobileTouchGestures() {
                     clearSingleTapTimer();
                     const danmakuVisible = toggleGestureDanmaku();
                     if (danmakuVisible !== null) {
-                        showMobileGestureHint(danmakuVisible ? '弹幕已开启' : '弹幕已关闭', 'danmaku');
+                        showShortcutHint(danmakuVisible ? '弹幕已开启' : '弹幕已关闭', 'danmaku');
                     }
                 } else {
                     lastTwoFingerTapTime = now;
@@ -7318,7 +7246,7 @@ function setupMobileTouchGestures() {
 
             if (Number.isFinite(gestureState.targetTime)) {
                 artInstance.currentTime = gestureState.targetTime;
-                showSeekHint(gestureState.targetTime);
+                showSeekHint(gestureState.targetTime, '跳转至');
             }
             resetGestureState();
             return;
@@ -7348,7 +7276,7 @@ function setupMobileTouchGestures() {
 
             const willPlay = togglePlayerPlayback();
             if (willPlay !== null) {
-                showMobileGestureHint(willPlay ? '播放' : '暂停', willPlay ? 'play' : 'pause');
+                showShortcutHint(willPlay ? '播放' : '暂停', willPlay ? 'play' : 'pause');
             }
             resetGestureState();
             return;

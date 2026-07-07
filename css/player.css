@@ -320,34 +320,6 @@ input:checked + .slider:before {
     opacity: 1;
 }
 
-.shortcut-hint.liberty-mobile-gesture-hint {
-    min-width: 120px;
-    max-width: min(180px, 45vw);
-    padding: 10px 14px;
-    border-radius: 12px;
-    background: rgba(0, 0, 0, 0.65);
-    font-size: 15px;
-    line-height: 1.35;
-    gap: 8px;
-    box-sizing: border-box;
-    justify-content: center;
-    z-index: 10002;
-}
-
-.shortcut-hint.liberty-mobile-gesture-hint #shortcutIcon {
-    width: 18px;
-    height: 18px;
-    flex: 0 0 18px;
-}
-
-.shortcut-hint.liberty-mobile-gesture-hint #shortcutText {
-    font-size: 15px;
-    font-weight: 500;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
 /* 原生全屏时，播放器容器铺满 */
 .player-container:-webkit-full-screen,
 .player-container:fullscreen,
