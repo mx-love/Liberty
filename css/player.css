@@ -1428,3 +1428,91 @@ textarea:focus {
         vertical-align: middle !important;
     }
 }
+
+/* ============================================
+   统一触屏手势层（手机 / iPad / 触屏设备）
+   ============================================ */
+.liberty-touch-gestures {
+    touch-action: pan-y;
+    overscroll-behavior: contain;
+}
+
+.liberty-touch-gestures .art-video,
+.liberty-touch-gestures video,
+.liberty-touch-gestures .art-mask,
+.liberty-touch-gestures .art-layer,
+.liberty-touch-gestures .art-layers,
+.liberty-touch-gestures .art-danmuku {
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.liberty-touch-gestures .art-controls,
+.liberty-touch-gestures .art-state,
+.liberty-touch-gestures .art-setting,
+.liberty-touch-gestures .art-settings,
+.liberty-touch-gestures .art-contextmenus,
+.liberty-touch-gestures .art-info,
+.liberty-touch-gestures .art-notice,
+.liberty-touch-gestures .apd-config-panel,
+.liberty-touch-gestures .apd-style-panel,
+.liberty-touch-gestures .apd-emitter {
+    touch-action: pan-y pinch-zoom;
+}
+
+.liberty-touch-gestures .apd-emitter,
+.liberty-touch-gestures button,
+.liberty-touch-gestures input,
+.liberty-touch-gestures select,
+.liberty-touch-gestures textarea,
+.liberty-touch-gestures [contenteditable="true"] {
+    touch-action: manipulation;
+}
+
+.liberty-gesture-indicator {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    z-index: 120;
+    min-width: 132px;
+    max-width: min(78vw, 360px);
+    padding: 12px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 14px;
+    background: rgba(0, 0, 0, 0.72);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    color: #fff;
+    text-align: center;
+    pointer-events: none;
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.96);
+    transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.liberty-gesture-indicator.is-visible {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+}
+
+.liberty-gesture-indicator__title {
+    font-size: clamp(15px, 2.8vw, 20px);
+    font-weight: 700;
+    line-height: 1.25;
+}
+
+.liberty-gesture-indicator__detail:not(:empty) {
+    margin-top: 4px;
+    color: rgba(255, 255, 255, 0.76);
+    font-size: clamp(12px, 2.2vw, 14px);
+    line-height: 1.35;
+}
+
+@media (orientation: landscape) and (pointer: coarse) {
+    .liberty-gesture-indicator {
+        padding-left: max(16px, env(safe-area-inset-left));
+        padding-right: max(16px, env(safe-area-inset-right));
+    }
+}
