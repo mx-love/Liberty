@@ -723,6 +723,59 @@ textarea:focus {
     background: #111827;
 }
 
+/* Landscape-only touch gesture feedback. */
+.landscape-touch-gesture-enabled .art-video,
+.landscape-touch-gesture-enabled .art-mask,
+.landscape-touch-gesture-enabled .art-danmuku,
+.landscape-touch-gesture-enabled .art-layers {
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.landscape-touch-gesture-enabled .art-controls,
+.landscape-touch-gesture-enabled .art-state,
+.landscape-touch-gesture-enabled .art-progress,
+.landscape-touch-gesture-enabled button,
+.landscape-touch-gesture-enabled input,
+.landscape-touch-gesture-enabled select,
+.landscape-touch-gesture-enabled textarea {
+    touch-action: manipulation;
+}
+
+.landscape-touch-gesture-enabled .art-settings,
+.landscape-touch-gesture-enabled .apd-config-panel,
+.landscape-touch-gesture-enabled .apd-style-panel,
+.landscape-touch-gesture-enabled .apd-emitter {
+    touch-action: pan-y;
+}
+
+.landscape-touch-gesture-hud {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 25;
+    min-width: 132px;
+    padding: 10px 16px;
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font-size: clamp(14px, 2.5vw, 18px);
+    font-weight: 600;
+    line-height: 1.35;
+    text-align: center;
+    pointer-events: none;
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.96);
+    transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.landscape-touch-gesture-hud.is-visible {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+}
+
 /* 移动端输入框触摸优化 */
 @media (max-width: 640px) {
     input[type="text"],
