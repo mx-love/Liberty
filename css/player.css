@@ -69,6 +69,11 @@ body, html {
     align-items: center !important;
     justify-content: center !important;
     background-color: rgba(17, 24, 39, 0.7) !important;
+    pointer-events: auto !important;
+}
+
+.player-loading-overlay > * {
+    pointer-events: none;
 }
 
 .player-loading-spinner {
@@ -176,6 +181,11 @@ div.player-loading-text {
     color: white;
     z-index: 100;
     flex-direction: column;
+    pointer-events: auto;
+}
+
+.loading-container > * {
+    pointer-events: none;
 }
 
 .loading-spinner {
@@ -203,6 +213,19 @@ div.player-loading-text {
     flex-direction: column;
     text-align: center;
     padding: 1rem;
+    pointer-events: auto;
+}
+
+.player-loading-overlay button,
+.player-loading-overlay a,
+.player-loading-overlay input,
+.loading-container button,
+.loading-container a,
+.loading-container input,
+.error-container button,
+.error-container a,
+.error-container input {
+    pointer-events: auto !important;
 }
 
 .error-icon {
