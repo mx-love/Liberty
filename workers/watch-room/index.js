@@ -1,11 +1,4 @@
 const MAX_MEMBERS = 10;
-const MAX_MESSAGE_BYTES = 64 * 1024;
-const HOST_RECONNECT_GRACE_MS = 45 * 1000;
-const VIEWER_RECONNECT_GRACE_MS = 60 * 1000; // Bound retained identities/capacity using the same durable alarm.
-const PLAYBACK_CHECKPOINT_INTERVAL_MS = 15 * 1000;
-const HEARTBEAT_CHECKPOINT_INTERVAL_MS = 60 * 1000;
-const START_TRANSITION_TIMEOUT_MS = 3000;
-const HOST_AUTH_TIMEOUT_MS = 10000;
 const ROOM_STATUS = {
     WAITING: 'waiting',
     STARTING: 'starting',
@@ -67,64 +60,6 @@ function now() {
     return Date.now();
 }
 
-function generateResumeToken() {
-    const bytes = new Uint8Array(32);
-    crypto.getRandomValues(bytes);
-    return [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
-}
-
-export async function hashResumeToken(token) {
-    const value = new TextEncoder().encode(String(token || ''));
-    const digest = await crypto.subtle.digest('SHA-256', value);
-    return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
-}
-
-export async function verifyHostResumeToken(room, token) {
-    if (!room?.hostResumeTokenHash || !token) return false;
-    const candidateHash = await hashResumeToken(token);
-    if (candidateHash.length !== room.hostResumeTokenHash.length) return false;
-    let mismatch = 0;
-    for (let index = 0; index < candidateHash.length; index += 1) {
-        mismatch |= candidateHash.charCodeAt(index) ^ room.hostResumeTokenHash.charCodeAt(index);
-    }
-    return mismatch === 0;
-}
-
-export function ensureRoomDeadlines(room = {}) {
-    room.deadlines = room.deadlines || {};
-    const legacyFields = {
-        startDeadlineAt: 'startTransitionDeadlineAt',
-        episodeDeadlineAt: 'episodeTransitionDeadlineAt',
-        hostReconnectDeadlineAt: 'hostReconnectDeadlineAt',
-        viewerCleanupDeadlineAt: 'viewerCleanupDeadlineAt',
-        roomExpireAt: 'roomExpireAt',
-    };
-    Object.entries(legacyFields).forEach(([key, legacyKey]) => {
-        if (room.deadlines[key] == null && room[legacyKey] != null) {
-            room.deadlines[key] = room[legacyKey];
-        }
-        delete room[legacyKey];
-        const value = room.deadlines[key];
-        room.deadlines[key] = typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
-    });
-    // Derive this from durable participant timestamps on every wake, including a cold restart.
-    const viewerDeadlines = Object.values(room.participants || {})
-        .filter(participant => participant.role === 'viewer' && participant.connected === false
-            && Number.isFinite(participant.disconnectedAt))
-        .map(participant => participant.disconnectedAt + VIEWER_RECONNECT_GRACE_MS);
-    room.deadlines.viewerCleanupDeadlineAt = !isTerminalRoomStatus(room.status) && viewerDeadlines.length
-        ? Math.min(...viewerDeadlines) : null;
-    return room.deadlines;
-}
-
-export function getNextRoomDeadline(room = {}) {
-    const deadlines = ensureRoomDeadlines(room);
-    const values = Object.values(deadlines)
-        .map(Number)
-        .filter(deadline => Number.isFinite(deadline) && deadline > 0);
-    return values.length ? Math.min(...values) : null;
-}
-
 function buildMessage(type, roomId, clientId, payload = {}) {
     return JSON.stringify({
         type,
@@ -142,15 +77,13 @@ function getParticipantList(participants = {}) {
         name: participant.name,
         ready: Boolean(participant.ready),
         startingReady: Boolean(participant.startingReady),
-        buffering: Boolean(participant.buffering),
-        connected: participant.connected !== false,
         joinedAt: participant.joinedAt,
         lastSeenAt: participant.lastSeenAt,
     }));
 }
 
 function getStartingReadyState(room = {}) {
-    const participants = Object.values(room.participants || {}).filter(participant => participant.connected !== false);
+    const participants = Object.values(room.participants || {});
     return {
         readyCount: participants.filter((participant) => participant.startingReady).length,
         expectedCount: participants.length,
@@ -176,12 +109,8 @@ function normalizeNumber(value, fallback = 0) {
     return Number.isFinite(number) ? number : fallback;
 }
 
-function clampNumber(value, min, max, fallback) {
-    const number = normalizeNumber(value, fallback);
-    return Math.min(max, Math.max(min, number));
-}
-
-export function normalizePlaybackPayload(type, payload = {}, previousPlayback = {}, serverNow = now()) {
+function normalizePlaybackPayload(type, payload = {}, previousPlayback = {}) {
+    const updatedAt = normalizeNumber(payload.updatedAt, now());
     const previousPaused = previousPlayback.paused !== undefined
         ? Boolean(previousPlayback.paused)
         : true;
@@ -198,48 +127,40 @@ export function normalizePlaybackPayload(type, payload = {}, previousPlayback = 
 
     return {
         paused,
-        currentTime: clampNumber(payload.currentTime, 0, 7 * 24 * 60 * 60, previousPlayback.currentTime || 0),
-        duration: clampNumber(payload.duration, 0, 30 * 24 * 60 * 60, previousPlayback.duration || 0),
-        playbackRate: clampNumber(payload.playbackRate, 0.25, 4, previousPlayback.playbackRate || 1),
-        clientUpdatedAt: normalizeNumber(payload.updatedAt, 0),
-        updatedAt: serverNow,
-        serverTimestamp: serverNow,
+        currentTime: Math.max(0, normalizeNumber(payload.currentTime, previousPlayback.currentTime || 0)),
+        duration: Math.max(0, normalizeNumber(payload.duration, previousPlayback.duration || 0)),
+        playbackRate: normalizeNumber(payload.playbackRate, previousPlayback.playbackRate || 1) || 1,
+        updatedAt,
     };
 }
 
 function normalizeInitialPlayback(playback = {}) {
-    const serverTimestamp = now();
     return {
         paused: true,
-        currentTime: clampNumber(playback.currentTime, 0, 7 * 24 * 60 * 60, 0),
-        duration: clampNumber(playback.duration, 0, 30 * 24 * 60 * 60, 0),
-        playbackRate: clampNumber(playback.playbackRate, 0.25, 4, 1),
-        updatedAt: serverTimestamp,
-        serverTimestamp,
+        currentTime: Math.max(0, normalizeNumber(playback.currentTime, 0)),
+        duration: Math.max(0, normalizeNumber(playback.duration, 0)),
+        playbackRate: normalizeNumber(playback.playbackRate, 1) || 1,
+        updatedAt: now(),
     };
 }
 
 function normalizeStartPlayback(payload = {}, previousPlayback = {}) {
-    const serverTimestamp = now();
     return {
         paused: false,
-        currentTime: clampNumber(payload.currentTime, 0, 7 * 24 * 60 * 60, previousPlayback.currentTime || 0),
-        duration: clampNumber(payload.duration, 0, 30 * 24 * 60 * 60, previousPlayback.duration || 0),
-        playbackRate: clampNumber(payload.playbackRate, 0.25, 4, previousPlayback.playbackRate || 1),
-        updatedAt: serverTimestamp,
-        serverTimestamp,
+        currentTime: Math.max(0, normalizeNumber(payload.currentTime, previousPlayback.currentTime || 0)),
+        duration: Math.max(0, normalizeNumber(payload.duration, previousPlayback.duration || 0)),
+        playbackRate: normalizeNumber(payload.playbackRate, previousPlayback.playbackRate || 1) || 1,
+        updatedAt: normalizeNumber(payload.updatedAt, now()),
     };
 }
 
 function normalizePreparePayload(payload = {}, previousPlayback = {}) {
-    const serverTimestamp = now();
     return {
         paused: true,
-        currentTime: clampNumber(payload.currentTime, 0, 7 * 24 * 60 * 60, previousPlayback.currentTime || 0),
-        duration: clampNumber(payload.duration, 0, 30 * 24 * 60 * 60, previousPlayback.duration || 0),
-        playbackRate: clampNumber(payload.playbackRate, 0.25, 4, previousPlayback.playbackRate || 1),
-        updatedAt: serverTimestamp,
-        serverTimestamp,
+        currentTime: Math.max(0, normalizeNumber(payload.currentTime, previousPlayback.currentTime || 0)),
+        duration: Math.max(0, normalizeNumber(payload.duration, previousPlayback.duration || 0)),
+        playbackRate: normalizeNumber(payload.playbackRate, previousPlayback.playbackRate || 1) || 1,
+        updatedAt: normalizeNumber(payload.updatedAt, now()),
     };
 }
 
@@ -255,7 +176,7 @@ function normalizeEpisodeEntry(entry, index) {
 }
 
 function normalizeEpisodeSnapshot(payload = {}) {
-    const episodeIndex = payload.episodeIndex == null ? NaN : Number(payload.episodeIndex);
+    const episodeIndex = Number(payload.episodeIndex);
     const episodes = Array.isArray(payload.episodes)
         ? payload.episodes.map(normalizeEpisodeEntry)
         : [];
@@ -289,22 +210,20 @@ function normalizeEpisodeSnapshot(payload = {}) {
             episodeUrl,
             episodes,
             currentTime: 0,
-            playbackRate: clampNumber(payload.playbackRate, 0.25, 4, 1),
-            updatedAt: now(),
+            playbackRate: normalizeNumber(payload.playbackRate, 1) || 1,
+            updatedAt: normalizeNumber(payload.updatedAt, now()),
             changeId,
         },
     };
 }
 
 function buildEpisodePlayback(snapshot = {}, previousPlayback = {}, paused = true) {
-    const serverTimestamp = now();
     return {
         paused,
         currentTime: 0,
         duration: 0,
-        playbackRate: clampNumber(snapshot.playbackRate, 0.25, 4, previousPlayback.playbackRate || 1),
-        updatedAt: serverTimestamp,
-        serverTimestamp,
+        playbackRate: normalizeNumber(snapshot.playbackRate, previousPlayback.playbackRate || 1) || 1,
+        updatedAt: now(),
     };
 }
 
@@ -313,9 +232,6 @@ export class WatchRoomDurableObject {
         this.state = state;
         this.env = env;
         this.sessions = new Map();
-        this.pendingHosts = new Set();
-        this.authenticatingClients = new Set();
-        this.roomCache = null;
     }
 
     async fetch(request) {
@@ -341,51 +257,17 @@ export class WatchRoomDurableObject {
     }
 
     async alarm() {
-        let room = await this.readRoom();
-        if (!room) return;
-        if (isTerminalRoomStatus(room.status)) {
-            await this.state.storage.deleteAlarm();
+        console.log('[WatchRoomDO] starting timeout reached');
+        const room = await this.readRoom();
+        if (room?.pendingEpisodeChangeId) {
+            await this.maybeStartEpisodeChange(room.pendingEpisodeChangeId, room.hostId, true);
             return;
         }
-        const timestamp = now();
-        const deadlines = ensureRoomDeadlines(room);
-        const due = new Set(Object.keys(deadlines).filter(key =>
-            Number.isFinite(deadlines[key]) && deadlines[key] > 0 && deadlines[key] <= timestamp));
-        // Consume the entire due batch first. Terminal outcomes supersede playback transitions.
-        due.forEach(key => { deadlines[key] = null; });
-        const hostExpired = due.has('hostReconnectDeadlineAt') && !this.hasLiveClient(room.hostId);
-        if (hostExpired || due.has('roomExpireAt')) {
-            await this.endRoom(room, room.hostId, hostExpired ? 'host_reconnect_timeout' : 'room_expired',
-                hostExpired ? ROOM_STATUS.ENDED : ROOM_STATUS.EXPIRED);
-        } else if (room.pendingEpisodeChangeId && due.has('episodeDeadlineAt')) {
-            await this.maybeStartEpisodeChange(room.pendingEpisodeChangeId, room.hostId, true);
-            room = await this.readRoom();
-        }
-
-        if (!isTerminalRoomStatus(room.status) && room.status === ROOM_STATUS.STARTING
-            && !room.pendingEpisodeChangeId
-            && due.has('startDeadlineAt')) {
-            await this.maybeEnterPlaying(room.hostId, true);
-            room = await this.readRoom();
-        }
-        if (!isTerminalRoomStatus(room.status) && due.has('viewerCleanupDeadlineAt')) {
-            for (const [clientId, participant] of Object.entries(room.participants || {})) {
-                if (participant.role === 'viewer' && participant.connected === false
-                    && participant.disconnectedAt + VIEWER_RECONNECT_GRACE_MS <= timestamp
-                    && !this.hasLiveClient(clientId)) {
-                    delete room.participants[clientId];
-                }
-            }
-            await this.broadcastParticipants(room);
-        }
-        if (due.size) await this.writeRoom(room);
-        await this.scheduleNextAlarm(room);
+        await this.maybeEnterPlaying('', true);
     }
 
     async readRoom() {
-        if (this.roomCache) return this.roomCache;
         const room = await this.state.storage.get('room');
-        this.roomCache = room || null;
         if (room) {
             console.log('[WatchRoomDO] load room from storage', room.roomId);
         }
@@ -394,30 +276,8 @@ export class WatchRoomDurableObject {
 
     async writeRoom(room) {
         room.updatedAt = now();
-        room.lastPersistedAt = room.updatedAt;
-        this.roomCache = room;
         await this.state.storage.put('room', room);
         return room;
-    }
-
-    async checkpointRoom(room, intervalMs) {
-        this.roomCache = room;
-        const timestamp = now();
-        if (timestamp - Number(room.lastPersistedAt || 0) < intervalMs) return room;
-        return this.writeRoom(room);
-    }
-
-    hasLiveClient(clientId) {
-        return [...this.sessions.values()].some(session => session.clientId === clientId);
-    }
-
-    async scheduleNextAlarm(room) {
-        const nextDeadline = isTerminalRoomStatus(room.status) ? null : getNextRoomDeadline(room);
-        if (!nextDeadline) {
-            try { await this.state.storage.deleteAlarm(); } catch (error) {}
-            return;
-        }
-        await this.state.storage.setAlarm(nextDeadline);
     }
 
     async handleCreate(request) {
@@ -440,7 +300,6 @@ export class WatchRoomDurableObject {
 
         const createdAt = now();
         const hostId = body.hostId || `host_${crypto.randomUUID()}`;
-        const hostResumeToken = generateResumeToken();
         const room = {
             roomId,
             status: ROOM_STATUS.WAITING,
@@ -453,8 +312,6 @@ export class WatchRoomDurableObject {
                     name: '房主',
                     ready: true,
                     startingReady: false,
-                    buffering: false,
-                    connected: true,
                     joinedAt: createdAt,
                     lastSeenAt: createdAt,
                 },
@@ -464,13 +321,6 @@ export class WatchRoomDurableObject {
             createdAt,
             updatedAt: createdAt,
             hostDisconnectedAt: null,
-            hostResumeTokenHash: await hashResumeToken(hostResumeToken),
-            deadlines: {
-                startDeadlineAt: null,
-                episodeDeadlineAt: null,
-                hostReconnectDeadlineAt: null,
-                roomExpireAt: null,
-            },
         };
 
         await this.writeRoom(room);
@@ -483,7 +333,6 @@ export class WatchRoomDurableObject {
             role: 'host',
             clientId: room.hostId,
             hostId: room.hostId,
-            resumeToken: hostResumeToken,
             maxMembers: MAX_MEMBERS,
         });
     }
@@ -539,7 +388,6 @@ export class WatchRoomDurableObject {
         }
 
         const clientId = String(body.clientId || '');
-        const resumeToken = String(body.resumeToken || '');
         const room = await this.readRoom();
 
         if (!room) {
@@ -553,7 +401,7 @@ export class WatchRoomDurableObject {
             );
         }
 
-        if (clientId !== room.hostId || !await verifyHostResumeToken(room, resumeToken)) {
+        if (clientId !== room.hostId) {
             return jsonResponse({ success: false, error: ERROR_CODE.UNAUTHORIZED_ACTION }, 403);
         }
 
@@ -588,16 +436,21 @@ export class WatchRoomDurableObject {
 
         const existingParticipant = room.participants?.[clientId];
 
+        if (
+            role === 'viewer'
+            && room.status !== ROOM_STATUS.WAITING
+            && !existingParticipant
+        ) {
+            return jsonResponse({ success: false, error: ERROR_CODE.ROOM_ALREADY_STARTED }, 409);
+        }
+
         const participantIds = Object.keys(room.participants || {});
         if (!existingParticipant && participantIds.length >= room.maxMembers) {
             return jsonResponse({ success: false, error: ERROR_CODE.ROOM_FULL }, 409);
         }
 
-        if (clientId.length > 128 || (role === 'host') !== (clientId === room.hostId)) {
+        if (role === 'host' && clientId !== room.hostId) {
             return jsonResponse({ success: false, error: ERROR_CODE.UNAUTHORIZED_ACTION }, 403);
-        }
-        if (this.pendingHosts.size >= MAX_MEMBERS * 2) {
-            return jsonResponse({ success: false, error: 'AUTH_BUSY' }, 429);
         }
 
         const pair = new WebSocketPair();
@@ -605,73 +458,16 @@ export class WatchRoomDurableObject {
         const server = pair[1];
         server.accept();
 
-        this.awaitParticipantAuthentication(server, room.roomId, clientId, role);
+        await this.addParticipant(server, room, clientId, role);
+
         return new Response(null, {
             status: 101,
             webSocket: client,
         });
     }
 
-    awaitParticipantAuthentication(socket, roomId, clientId, role = 'host') {
-        this.pendingHosts.add(socket);
-        let authenticating = false;
-        let reserved = false;
-        const cleanup = () => {
-            clearTimeout(timer);
-            this.pendingHosts.delete(socket);
-            if (reserved) this.authenticatingClients.delete(clientId);
-            reserved = false;
-            socket.removeEventListener('message', authenticate);
-            socket.removeEventListener('close', cleanup);
-            socket.removeEventListener('error', cleanup);
-        };
-        const reject = () => {
-            cleanup();
-            try { socket.close(4003, 'authentication failed'); } catch (error) {}
-        };
-        const authenticate = async (event) => {
-            if (authenticating) return;
-            authenticating = true;
-            try {
-                if (typeof event.data !== 'string' || event.data.length > 2048) return reject();
-                const message = JSON.parse(event.data);
-                if (this.authenticatingClients.has(clientId)) return reject();
-                this.authenticatingClients.add(clientId);
-                reserved = true;
-                const room = await this.readRoom();
-                if (message.type !== 'client:resume' || message.roomId !== roomId
-                    || message.clientId !== clientId || !room || isTerminalRoomStatus(room.status)
-                    || (role === 'host') !== (clientId === room.hostId)) return reject();
-                const participant = room.participants?.[clientId];
-                let issuedToken = '';
-                let resumeTokenHash = participant?.resumeTokenHash;
-                if (role === 'host' || participant) {
-                    if (typeof message.resumeToken !== 'string' || !/^[a-f0-9]{64}$/.test(message.resumeToken)
-                        || !await verifyHostResumeToken(role === 'host' ? room : { hostResumeTokenHash: resumeTokenHash }, message.resumeToken)) return reject();
-                } else {
-                    if (message.resumeToken || Object.keys(room.participants || {}).length >= room.maxMembers) return reject();
-                    issuedToken = generateResumeToken();
-                    resumeTokenHash = await hashResumeToken(issuedToken);
-                }
-                if (!this.pendingHosts.has(socket)) return;
-                await this.addParticipant(socket, room, clientId, role, { resumeTokenHash, issuedToken });
-                cleanup();
-            } catch (error) { reject(); }
-        };
-        // Only an unauthenticated transport timeout; room deadlines remain durable alarms.
-        const timer = setTimeout(reject, HOST_AUTH_TIMEOUT_MS);
-        socket.addEventListener('message', authenticate);
-        socket.addEventListener('close', cleanup);
-        socket.addEventListener('error', cleanup);
-    }
-
-    async addParticipant(socket, room, clientId, role, credential = {}) {
-        if (isTerminalRoomStatus(room.status) || (role === 'host') !== (clientId === room.hostId)) {
-            socket.close(4003, 'unauthorized participant');
-            return;
-        }
+    async addParticipant(socket, room, clientId, role) {
         const joinedAt = now();
-        const connectionId = crypto.randomUUID();
         this.closeExistingSession(clientId, socket);
         room.participants = room.participants || {};
         room.participants[clientId] = {
@@ -680,24 +476,17 @@ export class WatchRoomDurableObject {
             name: role === 'host' ? '房主' : '观众',
             ready: role === 'host' ? true : Boolean(room.participants[clientId]?.ready),
             startingReady: false,
-            buffering: false,
-            connected: true,
             joinedAt: room.participants[clientId]?.joinedAt || joinedAt,
             lastSeenAt: joinedAt,
-            connectionId,
-            resumeTokenHash: credential.resumeTokenHash || room.participants[clientId]?.resumeTokenHash,
         };
 
         if (role === 'host') {
-            const wasDisconnected = Boolean(room.hostDisconnectedAt);
             room.hostDisconnectedAt = null;
-            ensureRoomDeadlines(room).hostReconnectDeadlineAt = null;
-            if (wasDisconnected) {
-                this.broadcastToRole('viewer', buildMessage('room:host-reconnected', room.roomId, clientId, {}));
-            }
         }
 
-        this.sessions.set(socket, { clientId, role, connectionId });
+        await this.writeRoom(room);
+
+        this.sessions.set(socket, { clientId, role });
 
         socket.addEventListener('message', (event) => {
             this.handleSocketMessage(socket, event.data).catch((error) => {
@@ -712,15 +501,6 @@ export class WatchRoomDurableObject {
         socket.addEventListener('error', () => {
             this.handleSocketClose(socket).catch(() => {});
         });
-
-        await this.writeRoom(room);
-        await this.scheduleNextAlarm(room);
-        if (this.sessions.get(socket)?.connectionId !== connectionId) return;
-
-        // Private credential delivery to this socket only; never part of public room state.
-        if (credential.issuedToken) socket.send(buildMessage('client:authenticated', room.roomId, clientId, {
-            resumeToken: credential.issuedToken,
-        }));
 
         socket.send(buildMessage('room:state', room.roomId, clientId, this.getPublicRoomState(room)));
         await this.broadcastParticipants(room);
@@ -766,12 +546,6 @@ export class WatchRoomDurableObject {
         const session = this.sessions.get(socket);
         if (!session) return;
 
-        if (typeof rawData !== 'string' || new TextEncoder().encode(rawData).byteLength > MAX_MESSAGE_BYTES) {
-            this.sendError(socket, 'MESSAGE_TOO_LARGE', 'Message must be JSON below 64 KiB');
-            try { socket.close(1009, 'message too large'); } catch (error) {}
-            return;
-        }
-
         let message = {};
         try {
             message = JSON.parse(rawData);
@@ -779,17 +553,8 @@ export class WatchRoomDurableObject {
             this.sendError(socket, 'INVALID_MESSAGE', 'Invalid JSON message');
             return;
         }
-        if (!message || typeof message.type !== 'string' || message.type.length > 64) {
-            this.sendError(socket, 'INVALID_MESSAGE', 'Invalid message type');
-            return;
-        }
-        if (message.payload !== undefined && (typeof message.payload !== 'object' || Array.isArray(message.payload))) {
-            this.sendError(socket, 'INVALID_MESSAGE', 'Payload must be an object');
-            return;
-        }
 
         const room = await this.readRoom();
-        if (this.sessions.get(socket) !== session) return;
         if (!room || isTerminalRoomStatus(room.status)) {
             this.sendError(socket, ERROR_CODE.ROOM_ENDED, 'Room has ended');
             return;
@@ -797,23 +562,7 @@ export class WatchRoomDurableObject {
 
         if (message.type === 'client:heartbeat') {
             await this.touchParticipant(room, session.clientId);
-            const serverReceivedAt = now();
-            socket.send(buildMessage('server:pong', room.roomId, session.clientId, {
-                clientSentAt: normalizeNumber(message.sentAt, 0),
-                serverReceivedAt,
-                serverSentAt: now(),
-            }));
-            return;
-        }
-
-        if (message.type === 'client:buffering' || message.type === 'client:buffering-end') {
-            const participant = room.participants?.[session.clientId];
-            if (participant) {
-                participant.buffering = message.type === 'client:buffering';
-                participant.lastSeenAt = now();
-                await this.checkpointRoom(room, PLAYBACK_CHECKPOINT_INTERVAL_MS);
-                await this.broadcastParticipants(room);
-            }
+            socket.send(buildMessage('room:state', room.roomId, session.clientId, this.getPublicRoomState(room)));
             return;
         }
 
@@ -925,11 +674,7 @@ export class WatchRoomDurableObject {
         );
 
         room.playback = playback;
-        if (message.type === 'host:sync') {
-            await this.checkpointRoom(room, PLAYBACK_CHECKPOINT_INTERVAL_MS);
-        } else {
-            await this.writeRoom(room);
-        }
+        await this.writeRoom(room);
         await this.broadcastPlaybackSync(room, session.clientId, getSyncEventType(message.type), playback);
     }
 
@@ -970,7 +715,6 @@ export class WatchRoomDurableObject {
         room.status = ROOM_STATUS.STARTING;
         room.startPayload = preparePayload;
         room.startingStartedAt = now();
-        ensureRoomDeadlines(room).startDeadlineAt = room.startingStartedAt + START_TRANSITION_TIMEOUT_MS;
         Object.values(room.participants || {}).forEach((participant) => {
             participant.startingReady = false;
         });
@@ -988,7 +732,14 @@ export class WatchRoomDurableObject {
             sourceClientId: session.clientId,
         }));
         await this.broadcastParticipants(room);
-        await this.scheduleNextAlarm(room);
+        await this.state.storage.setAlarm(now() + 3000);
+
+        setTimeout(() => {
+            console.log('[WatchRoomDO] starting timeout reached');
+            this.maybeEnterPlaying(room.hostId, true).catch((error) => {
+                console.warn('[WatchRoomDO] start timeout failed', error?.message || String(error));
+            });
+        }, 3000);
     }
 
     getOnlineClientIds() {
@@ -1033,7 +784,6 @@ export class WatchRoomDurableObject {
         room.pendingEpisodeChangeId = snapshot.changeId;
         room.episodeReady = {};
         room.episodeStartedAt = now();
-        ensureRoomDeadlines(room).episodeDeadlineAt = room.episodeStartedAt + START_TRANSITION_TIMEOUT_MS;
 
         Object.values(room.participants || {}).forEach((participant) => {
             participant.startingReady = false;
@@ -1047,7 +797,13 @@ export class WatchRoomDurableObject {
             sourceClientId: session.clientId,
         }));
         await this.broadcastParticipants(room);
-        await this.scheduleNextAlarm(room);
+        await this.state.storage.setAlarm(now() + 3000);
+
+        setTimeout(() => {
+            this.maybeStartEpisodeChange(snapshot.changeId, room.hostId, true).catch((error) => {
+                console.warn('[WatchRoomDO] episode change timeout failed', error?.message || String(error));
+            });
+        }, 3000);
     }
 
     async handleClientEpisodeReady(room, session, message) {
@@ -1093,9 +849,10 @@ export class WatchRoomDurableObject {
         delete room.pendingEpisodeChangeId;
         delete room.episodeReady;
         delete room.episodeStartedAt;
-        ensureRoomDeadlines(room).episodeDeadlineAt = null;
         await this.writeRoom(room);
-        await this.scheduleNextAlarm(room);
+        try {
+            await this.state.storage.deleteAlarm();
+        } catch (error) {}
 
         this.broadcastToAll(buildMessage('sync:episode-start', room.roomId, sourceClientId || room.hostId, {
             ...(room.media || {}),
@@ -1151,13 +908,12 @@ export class WatchRoomDurableObject {
 
     areViewersReady(room) {
         return Object.values(room.participants || {})
-            .filter((participant) => participant.role === 'viewer' && participant.connected !== false)
+            .filter((participant) => participant.role === 'viewer')
             .every((participant) => participant.ready);
     }
 
     areStartingClientsReady(room) {
         return Object.values(room.participants || {})
-            .filter((participant) => participant.connected !== false)
             .every((participant) => participant.startingReady);
     }
 
@@ -1177,9 +933,10 @@ export class WatchRoomDurableObject {
         room.playback = playback;
         delete room.startPayload;
         delete room.startingStartedAt;
-        ensureRoomDeadlines(room).startDeadlineAt = null;
         await this.writeRoom(room);
-        await this.scheduleNextAlarm(room);
+        try {
+            await this.state.storage.deleteAlarm();
+        } catch (error) {}
         console.log('[WatchRoomDO] room status changed to playing', {
             roomId: room.roomId,
             playback,
@@ -1199,8 +956,7 @@ export class WatchRoomDurableObject {
     async touchParticipant(room, clientId) {
         if (room.participants?.[clientId]) {
             room.participants[clientId].lastSeenAt = now();
-            room.participants[clientId].connected = true;
-            await this.checkpointRoom(room, HEARTBEAT_CHECKPOINT_INTERVAL_MS);
+            await this.writeRoom(room);
         }
     }
 
@@ -1215,41 +971,17 @@ export class WatchRoomDurableObject {
 
         const room = await this.readRoom();
         if (!room || isTerminalRoomStatus(room.status)) return;
-        if (room.participants?.[session.clientId]?.connectionId !== session.connectionId) return;
 
         if (session.role === 'host' && session.clientId === room.hostId) {
-            if (!disconnected) {
-                await this.endRoom(room, session.clientId, 'host_left');
-                return;
-            }
-            if (this.hasLiveClient(room.hostId)) return;
-            const disconnectedAt = now();
-            room.hostDisconnectedAt = disconnectedAt;
-            ensureRoomDeadlines(room).hostReconnectDeadlineAt = disconnectedAt + HOST_RECONNECT_GRACE_MS;
-            if (room.participants?.[room.hostId]) {
-                room.participants[room.hostId].connected = false;
-                room.participants[room.hostId].buffering = false;
-            }
-            await this.writeRoom(room);
-            await this.scheduleNextAlarm(room);
-            await this.broadcastParticipants(room);
-            this.broadcastToRole('viewer', buildMessage('room:host-reconnecting', room.roomId, room.hostId, {
-                hostDisconnectedAt: disconnectedAt,
-                reconnectDeadlineAt: room.deadlines.hostReconnectDeadlineAt,
-                graceMs: HOST_RECONNECT_GRACE_MS,
-            }));
+            await this.endRoom(
+                room,
+                session.clientId,
+                disconnected ? 'host_disconnected' : 'host_left'
+            );
             return;
         }
 
-        if (disconnected && room.participants?.[session.clientId]?.resumeTokenHash) {
-            room.participants[session.clientId].connected = false;
-            room.participants[session.clientId].buffering = false;
-            room.participants[session.clientId].ready = false;
-            room.participants[session.clientId].startingReady = false;
-            room.participants[session.clientId].disconnectedAt = now();
-        } else {
-            delete room.participants[session.clientId];
-        }
+        delete room.participants[session.clientId];
 
         if (Object.keys(room.participants || {}).length === 0) {
             room.status = ROOM_STATUS.EXPIRED;
@@ -1258,24 +990,15 @@ export class WatchRoomDurableObject {
             return;
         }
 
-        await this.scheduleNextAlarm(room);
         await this.writeRoom(room);
         await this.broadcastParticipants(room);
-        if (room.pendingEpisodeChangeId) {
-            await this.maybeStartEpisodeChange(room.pendingEpisodeChangeId, room.hostId);
-        } else if (room.status === ROOM_STATUS.STARTING) {
-            await this.maybeEnterPlaying(room.hostId);
-        }
     }
 
-    async endRoom(room, clientId, reason = 'host_ended', status = ROOM_STATUS.ENDED) {
-        if (!room || isTerminalRoomStatus(room.status)) return;
-        room.status = status;
+    async endRoom(room, clientId, reason = 'host_ended') {
+        room.status = ROOM_STATUS.ENDED;
         room.endedAt = now();
         room.endReason = reason;
-        Object.keys(ensureRoomDeadlines(room)).forEach(key => { room.deadlines[key] = null; });
         await this.writeRoom(room);
-        try { await this.state.storage.deleteAlarm(); } catch (error) {}
 
         const message = buildMessage('room:ended', room.roomId, clientId, {
             reason,

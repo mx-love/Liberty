@@ -111,6 +111,37 @@ function isWatchRoomViewerLaunch() {
     }
 }
 
+// 配置常量
+const MATCH_CONFIG = {
+    minSimilarity: 0.5,
+    titleCleanPatterns: [
+        /\([^)]*\)/g,
+        /（[^）]*）/g,
+        /【[^】]*】/g,
+        /\[[^\]]*\]/g,
+        /\s*from\s+\w+/gi,
+        /\s*-\s*\d+\s*$/,
+        /^\d+\.\s*/,
+        /\s{2,}/g,
+    ],
+    seasonPatterns: [
+        /第([一二三四五六七八九十\d]+)季/,
+        /Season\s*(\d+)/i,
+        /S(\d+)/i,
+        /\s(\d{4})\s/,
+        /Season\s*([IVX]+)/i,
+    ],
+    episodePatterns: [
+        /第\s*(\d+)\s*[集话話]/,
+        /[Ee][Pp]\.?\s*(\d+)/,
+        /#第(\d+)[话話]#/,
+        /\[第(\d+)[集话話]\]/,
+        /【第(\d+)[集话話]】/,
+        /^\s*0*(\d+)\s*$/,
+        /\b0*(\d+)\b/,
+    ]
+};
+
 // 保留旧函数兼容性
 function sanitizeTitle(title) {
     const result = advancedCleanTitle(title);
@@ -126,10 +157,45 @@ function advancedCleanTitle(title) {
     let year = null;
     let allYears = []; // 【新增】保存所有年份
 
-	// 标题末尾数字（例如“庆余年2”）可能是正式片名，只保留为低置信度候选，
-	// 不能在这里直接改写成 season。弹幕匹配模块会让 API 结果参与后续决策。
-	const structuredSeason = window.LibertyDanmuMatchCore.parseSeasonIdentity(title);
-	season = structuredSeason.season;
+    // 【新增】扩展的季度匹配模式
+    const seasonPatterns = [
+        /第([一二三四五六七八九十\d]+)季/,
+        /Season\s*(\d+)/i,
+        /S(\d+)(?:\s|$|E)/i,
+        /\s(\d{4})\s/,
+        /Season\s*([IVX]+)/i,
+    ];
+
+    // 提取季度信息
+	for (const pattern of seasonPatterns) {
+		const match = title.match(pattern);
+		if (match) {
+			const seasonNum = match[1];
+			if (/^\d+$/.test(seasonNum)) {
+				season = parseInt(seasonNum);
+			} else if (/^[IVX]+$/.test(seasonNum)) {
+				season = romanToInt(seasonNum);
+			} else {
+				const cnMap = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10};
+				season = cnMap[seasonNum] || null;
+			}
+			break; 
+		}
+	}  
+
+	if (!season) {
+		const titleNumPattern = /^(.+?)(\d)(?:\s*[\(（]|$)/;
+		const numMatch = title.match(titleNumPattern);
+
+		if (numMatch) {
+			const num = parseInt(numMatch[2]);
+			const mainTitle = numMatch[1].trim();
+
+			if (num >= 2 && num <= 9 && mainTitle.length >= 2) {
+				season = num;
+			}
+		}
+	}
 
     // 【修改】提取所有年份
     const yearMatches = title.match(/\b(19|20)\d{2}\b/g);
@@ -170,15 +236,26 @@ function advancedCleanTitle(title) {
     return { 
         clean: cleaned, 
         season, 
-        seasonConfidence: structuredSeason?.confidence || (season ? 'high' : 'unknown'),
-        seasonSource: structuredSeason?.source || (season ? 'legacy_explicit_pattern' : 'unresolved'),
-        seasonCandidates: structuredSeason?.candidates || [],
         year,
         allYears, // 【新增】
         original: title,
         features,
         variants: [...new Set(variants)]
     };
+}
+
+// 罗马数字转换
+function romanToInt(s) {
+    const map = { I: 1, V: 5, X: 10, L: 50, C: 100 };
+    let result = 0;
+    for (let i = 0; i < s.length; i++) {
+        if (i > 0 && map[s[i]] > map[s[i - 1]]) {
+            result += map[s[i]] - 2 * map[s[i - 1]];
+        } else {
+            result += map[s[i]];
+        }
+    }
+    return result;
 }
 
 // 统一的缓存清理函数
@@ -345,8 +422,6 @@ function goBack(event) {
 
 // ===== 【增强】页面卸载时的完整清理 =====
 function cleanupResources() {
-    danmuReloadToken += 1;
-    if (_danmuFetchController) _danmuFetchController.cancelled = true;
     window.LibertyDebug.log('🧹 开始彻底清理资源...');
 
     // 🔥 修复：清理 saveHistoryTimer，防止切集后 5 秒写入错误集数记录
@@ -543,7 +618,6 @@ let _mobileLongPressTriggered = false;
 let _danmakuPanelHandlers = null;
 let _mobileOrientationFullscreenCleanup = null;
 let currentHls = null; // 跟踪当前HLS实例
-let hlsPlaybackGeneration = 0;
 let currentEpisodes = [];
 let episodesReversed = false;
 let autoplayEnabled = true; // 默认开启自动连播
@@ -1056,8 +1130,37 @@ function getCurrentVideoDuration() {
     return Number.isFinite(duration) && duration > 0 ? duration : 0;
 }
 
+function normalizeTitleForDanmuMatch(title) {
+    return (title || '')
+        .replace(/[【\[].*?[】\]]/g, '')
+        .replace(/[（(](?:更新至|第?\d+集|完结|全集|高清|蓝光|国语|粤语).*?[）)]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function buildDanmuMatchFileName(title, episodeIndex) {
+    const cleanTitle = normalizeTitleForDanmuMatch(title);
+    const ep = String((episodeIndex || 0) + 1).padStart(2, '0');
+
+    let fileName = currentEpisodes && currentEpisodes.length > 1
+        ? `${cleanTitle}.S01E${ep}`
+        : cleanTitle;
+
+    if (DANMU_CONFIG.matchPlatformHint) {
+        fileName += ` @${DANMU_CONFIG.matchPlatformHint}`;
+    }
+
+    return fileName;
+}
+
 function normalizeDanmuTitle(title) {
-    return window.LibertyDanmuMatchCore.normalizeTitle(title);
+    return (title || '')
+        .replace(/\s+/g, ' ')
+        .replace(/[（(]\d{4}[）)]/g, '')
+        .replace(/第[一二三四五六七八九十百\d]+季/g, '')
+        .replace(/S\d{1,2}/gi, '')
+        .replace(/(高清|蓝光|1080P|720P|4K|HD|BD|正片|全集|完结)/gi, '')
+        .trim();
 }
 
 function getCurrentEpisodeName(index) {
@@ -1075,6 +1178,51 @@ function getPlayerEpisodeUrlValue(episode) {
     if (!episode) return '';
     if (typeof episode === 'string') return episode;
     return episode.url || '';
+}
+
+function guessEpisodeNumber(index, episodeName) {
+    const name = episodeName || '';
+    const patterns = [
+        /第\s*(\d+)\s*集/,
+        /E\s*(\d+)/i,
+        /EP\s*(\d+)/i,
+        /(?:^|[^\d])(\d{1,4})(?:$|[^\d])/,
+    ];
+
+    for (const pattern of patterns) {
+        const match = name.match(pattern);
+        if (match) return parseInt(match[1], 10);
+    }
+
+    return Number.isInteger(index) ? index + 1 : null;
+}
+
+function guessSeasonNumber(title) {
+    const text = title || '';
+    const sMatch = text.match(/S(\d{1,2})/i);
+    if (sMatch) return parseInt(sMatch[1], 10);
+
+    const zhMap = {
+        一: 1,
+        二: 2,
+        三: 3,
+        四: 4,
+        五: 5,
+        六: 6,
+        七: 7,
+        八: 8,
+        九: 9,
+        十: 10,
+    };
+
+    const zhMatch = text.match(/第([一二三四五六七八九十\d]+)季/);
+    if (zhMatch) {
+        const raw = zhMatch[1];
+        return /^\d+$/.test(raw) ? parseInt(raw, 10) : zhMap[raw] || null;
+    }
+
+    const info = advancedCleanTitle(text);
+    return info.season || null;
 }
 
 function inferDanmuPlatform(playUrl, apiSourceCode) {
@@ -1100,23 +1248,53 @@ function inferDanmuPlatform(playUrl, apiSourceCode) {
     return sourcePlatformMap[apiSourceCode] || '';
 }
 
-function getDanmuPlatformHint(playUrl, apiSourceCode) {
-    const platform = inferDanmuPlatform(playUrl, apiSourceCode);
-    if (!platform) return { platformHint: '', platformConfidence: 'unknown', platformSource: 'none' };
-    const directHost = /(qq\.com|v\.qq\.com|iqiyi\.com|youku\.com|mgtv\.com|bilibili\.com|miguvideo\.com|sohu\.com|le\.com)/i.test(playUrl || '');
-    return {
-        platformHint: platform,
-        platformConfidence: directHost ? 'high' : 'medium',
-        platformSource: directHost ? 'direct_media_host' : 'source_code_hint',
-    };
-}
+function buildDanmuKeyword({ title, year, season, episode, platform }) {
+    const cleanTitle = normalizeDanmuTitle(title);
+    const parts = [cleanTitle];
+    if (year) parts.push(String(year));
 
-function buildDanmuKeyword(context) {
-    return buildDanmuMatchQueries(context)[0] || normalizeDanmuTitle(context?.title || '');
+    if (season || episode) {
+        const seasonPart = `S${String(season || 1).padStart(2, '0')}`;
+        const episodePart = episode ? `E${String(episode).padStart(2, '0')}` : '';
+        parts.push(`${seasonPart}${episodePart}`);
+    }
+    if (platform) parts.push(`@${platform}`);
+
+    return parts.filter(Boolean).join(' ');
 }
 
 function buildDanmuMatchQueries(context) {
-    return window.LibertyDanmuMatchCore.buildMatchQueries(context, 8);
+    const cleanTitle = normalizeDanmuTitle(context.title);
+    const episode = Number(context.episode || 0);
+    const season = Number(context.season || 1);
+    const seasonEpisode = episode
+        ? `S${String(season || 1).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
+        : '';
+    const platform = context.platform ? `@${context.platform}` : '';
+
+    const variants = [];
+
+    if (cleanTitle && context.year && seasonEpisode) {
+        variants.push([cleanTitle, context.year, seasonEpisode, platform]);
+    }
+
+    if (cleanTitle && seasonEpisode) {
+        variants.push([cleanTitle, seasonEpisode, platform]);
+    }
+
+    if (cleanTitle && episode) {
+        variants.push([cleanTitle, `第${episode}集`, platform]);
+    }
+
+    if (cleanTitle && !variants.length) {
+        variants.push([cleanTitle, platform]);
+    }
+
+    return [...new Set(
+        variants
+            .map(parts => parts.filter(Boolean).join(' ').trim())
+            .filter(Boolean)
+    )];
 }
 
 function buildDanmuVideoKey(title, year, season, episode) {
@@ -1148,71 +1326,160 @@ function getDanmuPlaybackContext(title, episodeIndex) {
         localStorage.getItem('currentVideoId') ||
         '';
     const episodeName = getCurrentEpisodeName(episodeIndex);
-    const platformInfo = getDanmuPlatformHint(currentVideoUrl, sourceCode);
+    const season = guessSeasonNumber(title);
+    const episode = guessEpisodeNumber(episodeIndex, episodeName);
+    const platform = inferDanmuPlatform(currentVideoUrl, sourceCode);
     const duration = getCurrentVideoDuration();
     const episodeCount = Array.isArray(currentEpisodes) ? currentEpisodes.length : 0;
 
-    const context = window.LibertyDanmuMatchCore.createPlaybackContext({
-        rawTitle: contextTitle,
-        rawEpisodeName: episodeName,
-        rawRemarks: params.get('remarks') || params.get('vod_remarks') || '',
-        rawSourceName: sourceCode,
+    const context = {
+        title: contextTitle,
+        normalizedTitle,
         year,
         episodeIndex,
+        displayEpisode: episodeIndex + 1,
+        season,
+        episode,
+        episodeName,
         episodeCount,
+        playUrl: currentVideoUrl,
+        currentVideoUrl,
         sourceCode,
         vodId,
-        playUrl: currentVideoUrl,
+        platform,
         duration,
-        ...platformInfo,
-    });
-    context.normalizedTitle = context.normalizedTitle || normalizedTitle;
-    context.platform = context.platformHint; // 兼容调试面板旧字段。
-    context.currentVideoUrl = currentVideoUrl;
-    context.videoKey = buildDanmuVideoKey(contextTitle, context.year, context.season, context.episodeNumber)
-        + ':' + (context.episodeIdentity?.dateIdentity || context.rawEpisodeName || '') + ':' + context.episodeIndex;
+        videoKey: buildDanmuVideoKey(contextTitle, year, season, episode),
+    };
 
     danmuDebugLog('[DanmuDebug] playback context', context);
     return context;
 }
 
-function pickValidDanmuApiMatch(matches, targetEpisodeNumberOrContext, options = {}) {
-    const context = typeof targetEpisodeNumberOrContext === 'object'
-        ? targetEpisodeNumberOrContext
-        : {
-            title: options.title || '',
-            normalizedTitle: options.normalizedTitle || options.title || '',
-            episodeNumber: Number(targetEpisodeNumberOrContext) || null,
-            episodeConfidence: options.episodeConfidence || 'high',
-            year: options.year || null,
-            season: options.season || null,
-            seasonConfidence: options.seasonConfidence || 'unknown',
-        };
-    const validation = window.LibertyDanmuMatchCore.validateApiMatches(matches, context, options);
-    danmuDebugLog('[DanmuDebug] API match validation', {
-        targetEpisodeNumber: context.episodeNumber,
-        confidence: validation.confidence,
-        score: validation.score,
-        reason: validation.reason,
-        candidates: validation.analyzed.map(item => ({
-            animeId: item.match.animeId,
-            animeTitle: item.match.animeTitle,
-            episodeId: item.match.episodeId,
-            episodeTitle: item.match.episodeTitle,
-            parsedEpisodeNumber: item.parsedEpisodeNumber,
-            confidence: item.confidence,
-            score: item.score,
-            accepted: item.accepted,
-            reasons: item.reasons,
-        })),
-    });
-    if (!validation.match) return null;
-    return {
-        ...validation.match,
-        confidence: validation.confidence,
-        confidenceScore: validation.score,
-        matchReason: validation.reason,
+function normalizeDanmuTitleNumberText(value) {
+    return String(value || '')
+        .replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+        .replace(/[①②③④⑤⑥⑦⑧⑨⑩]/g, ch => {
+            const map = {
+                '①': '1', '②': '2', '③': '3', '④': '4', '⑤': '5',
+                '⑥': '6', '⑦': '7', '⑧': '8', '⑨': '9', '⑩': '10'
+            };
+            return map[ch] || ch;
+        })
+        .trim();
+}
+
+function chineseEpisodeNumberToInt(raw) {
+    const s = String(raw || '').trim();
+
+    if (/^\d+$/.test(s)) {
+        return parseInt(s, 10);
+    }
+
+    const map = {
+        '零': 0, '〇': 0,
+        '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,
+        '六': 6, '七': 7, '八': 8, '九': 9
     };
+
+    if (s === '十') return 10;
+
+    const tenMatch = s.match(/^([一二两三四五六七八九])?十([一二两三四五六七八九])?$/);
+    if (tenMatch) {
+        const tens = tenMatch[1] ? map[tenMatch[1]] : 1;
+        const ones = tenMatch[2] ? map[tenMatch[2]] : 0;
+        return tens * 10 + ones;
+    }
+
+    if (s.length === 1 && map[s] !== undefined) {
+        return map[s];
+    }
+
+    return null;
+}
+
+function isBadEpisodeNumber(n) {
+    if (!Number.isFinite(n)) return true;
+    if (n <= 0 || n > 999) return true;
+
+    // 避免把年份当集数
+    if (n >= 1900 && n <= 2099) return true;
+
+    return false;
+}
+
+function extractEpisodeNumberFromDanmuTitle(title) {
+    const s = normalizeDanmuTitleNumberText(title);
+
+    const patterns = [
+        // S01E02 / s1e2
+        /[Ss]\d{1,2}[Ee]\s*0*(\d{1,4})/,
+
+        // 第2集 / 第2话 / 第2期 / 第十二集
+        /第\s*([一二两三四五六七八九十\d]+)\s*[集话話期回]/,
+
+        // EP02 / E02
+        /(?:^|[\s._-])[Ee][Pp]?\.?\s*0*(\d{1,4})(?=$|[\s._-])/,
+
+        // #第2话# / #2
+        /[#＃]\s*第?\s*([一二两三四五六七八九十\d]+)\s*[集话話期回]?/,
+
+        // 综艺常见：xxx（下）4 / xxx(上)3
+        /[（(](?:上|中|下|前篇|后篇|後篇|part\s*\d+|第[上下中]部分)[）)]\s*0*(\d{1,4})\s*$/i,
+
+        // 标题末尾数字：哥伦比亚亚马逊河（下）4
+        /(?:^|[^\d])0*(\d{1,4})\s*(?:集|话|話|期|回)?\s*$/
+    ];
+
+    for (const pattern of patterns) {
+        const match = s.match(pattern);
+        if (!match) continue;
+
+        const n = chineseEpisodeNumberToInt(match[1]);
+        if (!isBadEpisodeNumber(n)) {
+            return n;
+        }
+    }
+
+    return null;
+}
+
+function pickValidDanmuApiMatch(matches, episodeIndex, options = {}) {
+    const targetNumber = episodeIndex + 1;
+    const list = Array.isArray(matches)
+        ? matches.filter(m => m && m.episodeId)
+        : [];
+
+    if (list.length === 0) return null;
+
+    const analyzed = list.map(m => ({
+        match: m,
+        episodeNumber: extractEpisodeNumberFromDanmuTitle(m.episodeTitle),
+        title: m.episodeTitle || ''
+    }));
+
+    const exact = analyzed.find(item => item.episodeNumber === targetNumber);
+    if (exact) {
+        return exact.match;
+    }
+
+    const hasExplicitEpisodeNumber = analyzed.some(item => item.episodeNumber !== null);
+
+    if (hasExplicitEpisodeNumber) {
+        danmuDebugWarn(
+            `⚠️ match 接口返回的集数与当前播放集不一致：当前第${targetNumber}集，拒绝错配结果`,
+            analyzed.map(item => ({
+                title: item.title,
+                parsedEpisode: item.episodeNumber,
+                episodeId: item.match.episodeId
+            }))
+        );
+        return null;
+    }
+
+    // match 接口已经按当前集 query 返回明确 episodeId 时，不再设置额外高分门槛。
+    // 只有候选自身带有明确且错误的集数时才拒绝，避免第 N 集加载到其他集。
+    danmuDebugWarn(`⚠️ match 候选没有明确集数，按接口明确 episodeId 使用：`, list[0]);
+    return list[0];
 }
 
 async function matchDanmuByApi(title, episodeIndex) {
@@ -1222,7 +1489,7 @@ async function matchDanmuByApi(title, episodeIndex) {
     const matchQueries = buildDanmuMatchQueries(context);
     const matchUrl = await addDanmuAuth(`${getDanmuBaseUrl()}/api/v2/match`);
 
-    for (const [queryIndex, fileName] of matchQueries.entries()) {
+    for (const fileName of matchQueries) {
         try {
             danmuDebugLog(`🎯 使用 danmu_api match 自动匹配: ${fileName}`);
 
@@ -1231,9 +1498,20 @@ async function matchDanmuByApi(title, episodeIndex) {
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                // 上游 /api/v2/match 的契约只保证 fileName；结构化字段仅在 Liberty
-                // 本地用于构造与验证候选，不能假设服务端会消费它们。
-                body: JSON.stringify({ fileName })
+                body: JSON.stringify({
+                    fileName,
+                    title: normalizeDanmuTitle(title),
+                    year: context.year || undefined,
+                    season: context.season || undefined,
+                    episode: context.episode || undefined,
+                    episodeTitle: context.episodeName || undefined,
+                    episodeCount: context.episodeCount || undefined,
+                    sourceCode: context.sourceCode || undefined,
+                    vodId: context.vodId || undefined,
+                    platform: context.platform || undefined,
+                    url: context.playUrl || undefined,
+                    duration: context.duration || undefined
+                })
             }, 2, 15000);
 
             const data = await response.json();
@@ -1241,7 +1519,7 @@ async function matchDanmuByApi(title, episodeIndex) {
                 fileName,
                 matches: data?.matches || []
             });
-            const match = pickValidDanmuApiMatch(data?.matches, context, { queryIndex, fileName });
+            const match = pickValidDanmuApiMatch(data?.matches, episodeIndex);
 
             if (data?.isMatched && match?.episodeId) {
                 danmuDebugLog('✅ match 自动匹配成功:', {
@@ -1285,68 +1563,13 @@ let lastDanmuAutoFallbackStats = null;
 let currentDanmuAnimeId = null;
 let currentDanmuSourceName = '';
 let currentSessionDanmuSource = null;
-const promptedDanmuSourceKeys = new Set();
-const sessionDanmuBangumiNegativeCache = new Map();
-const sessionDanmuCommentNegativeCache = new Map();
+const sessionDanmuBangumiNegativeCache = new Set();
+const sessionDanmuCommentNegativeCache = new Set();
 const sessionDanmuCommentSuccessCache = new Map();
-const DANMU_COMMENT_CACHE_TTL = 20 * 60 * 1000;
-const DANMU_COMMENT_NEGATIVE_TTL = 5 * 60 * 1000;
-const DANMU_BANGUMI_NEGATIVE_TTL = 10 * 60 * 1000;
-const DANMU_COMMENT_CACHE_MAX = 24;
 const DANMU_AUTO_FALLBACK_MAX_COMMENT_REQUESTS = 2;
 const DANMU_COMMENT_RATE_LIMIT_COOLDOWN = 30000;
 let danmuCommentRateLimitUntil = 0;
 let danmuCommentRateLimitWarnedAt = 0;
-
-function hasFreshDanmuNegativeCache(cache, key, ttl) {
-    const timestamp = Number(cache.get(key) || 0);
-    if (!timestamp) return false;
-    if (Date.now() - timestamp < ttl) return true;
-    cache.delete(key);
-    return false;
-}
-
-function setBoundedDanmuCache(cache, key, value, maxEntries) {
-    cache.delete(key);
-    cache.set(key, value);
-    while (cache.size > maxEntries) cache.delete(cache.keys().next().value);
-}
-
-function createDanmuSessionSource(info, context) {
-    return window.LibertyDanmuMatchCore.createSessionSource(info, context);
-}
-
-function invalidateDanmuSessionSource(reason, context = null) {
-    if (!currentSessionDanmuSource) return;
-    danmuDebugWarn('[DanmuDebug] invalidate session source', {
-        reason,
-        animeId: currentSessionDanmuSource.animeId,
-        animeTitle: currentSessionDanmuSource.animeTitle,
-        selectedBy: currentSessionDanmuSource.selectedBy,
-        confidence: currentSessionDanmuSource.confidence,
-        context,
-    });
-    currentSessionDanmuSource = null;
-    currentDanmuAnimeId = null;
-    currentDanmuSourceName = '';
-}
-
-function validateCurrentDanmuSessionSource(context) {
-    if (!currentSessionDanmuSource) return { compatible: false, reason: 'no_session_source' };
-    const result = window.LibertyDanmuMatchCore.isSessionSourceCompatible(currentSessionDanmuSource, context);
-    if (!result.compatible) invalidateDanmuSessionSource(result.reason, context);
-    return result;
-}
-
-function maybePromptDanmuSourceSelection(context, reason) {
-    if (!context?.videoKey || promptedDanmuSourceKeys.has(context.videoKey)) return;
-    if (!Number(lastDanmuAutoFallbackStats?.candidateCount || 0)) return;
-    promptedDanmuSourceKeys.add(context.videoKey);
-    danmuDebugWarn('[DanmuDebug] ambiguous match requires user selection', { reason, context });
-    window.setTimeout(() => {
-        if (typeof showDanmuSourceModal === 'function') showDanmuSourceModal();
-    }, 0);
-}
 
 function getCurrentVideoYearValue() {
     try {
@@ -1389,19 +1612,12 @@ function getVideoIdentity(title = currentVideoTitle) {
 }
 
 function updateLastDanmuMatchInfo(info = {}) {
-    const context = getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex);
     lastDanmuMatchInfo = {
         ...(lastDanmuMatchInfo || {}),
         videoTitle: currentVideoTitle,
         year: getCurrentVideoYearValue(),
         episodeIndex: currentEpisodeIndex,
-        episodeNumber: context.episodeNumber,
-        episodeNumberSource: context.episodeSource,
-        episodeConfidence: context.episodeConfidence,
-        season: context.season,
-        seasonSource: context.seasonSource,
-        seasonConfidence: context.seasonConfidence,
-        normalizedTitle: context.normalizedTitle,
+        displayEpisode: currentEpisodeIndex + 1,
         totalEpisodes: Array.isArray(currentEpisodes) ? currentEpisodes.length : 0,
         currentEpisodeName: getCurrentEpisodeName(currentEpisodeIndex),
         currentVideoUrl,
@@ -1419,19 +1635,13 @@ function buildDanmuEpisodeSummary(reason, overrides = {}) {
     const episodeIndex = typeof overrides.episodeIndex === 'number'
         ? overrides.episodeIndex
         : currentEpisodeIndex;
-    const context = getDanmuPlaybackContext(currentVideoTitle, episodeIndex);
 
     return {
         reason,
         videoTitle: currentVideoTitle,
         videoYear: getCurrentVideoYearValue(),
         currentEpisodeIndex: episodeIndex,
-        episodeNumber: context.episodeNumber,
-        episodeNumberSource: context.episodeSource,
-        episodeConfidence: context.episodeConfidence,
-        season: context.season,
-        seasonSource: context.seasonSource,
-        seasonConfidence: context.seasonConfidence,
+        displayEpisode: episodeIndex + 1,
         totalEpisodes: Array.isArray(currentEpisodes) ? currentEpisodes.length : 0,
         episodeName: getCurrentEpisodeName(episodeIndex),
         currentVideoUrl,
@@ -1495,17 +1705,11 @@ function logDanmuEpisodeSummary(reason, overrides = {}) {
 }
 
 window.debugDanmuState = function () {
-    const context = getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex);
     return {
         currentVideoTitle,
         currentVideoYear: getCurrentVideoYearValue(),
         currentEpisodeIndex,
-        episodeNumber: context.episodeNumber,
-        episodeNumberSource: context.episodeSource,
-        episodeConfidence: context.episodeConfidence,
-        season: context.season,
-        seasonSource: context.seasonSource,
-        seasonConfidence: context.seasonConfidence,
+        displayEpisode: currentEpisodeIndex + 1,
         totalEpisodes: Array.isArray(currentEpisodes) ? currentEpisodes.length : 0,
         currentEpisodeName: getCurrentEpisodeName(currentEpisodeIndex),
         currentVideoUrl,
@@ -1956,7 +2160,7 @@ function rankDanmuSourceCandidates(animes, cleanTitle, videoIdentity = getVideoI
     const targetInfo = advancedCleanTitle(videoIdentity.title || normalizedTitle);
     const targetYear = normalizeDanmuYear(videoIdentity.year || targetParsed.year || targetInfo.year || '');
     const targetEpisodeCount = Number(videoIdentity.episodeCount || 0);
-    const displayEpisode = getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex).episodeNumber;
+    const displayEpisode = currentEpisodeIndex + 1;
     const targetTypeCategory = getDanmuTypeCategory(targetParsed.type || targetInfo.typeDescription || targetInfo.type, targetEpisodeCount);
 
     return (animes || []).map(anime => {
@@ -2279,30 +2483,172 @@ function isMovieContent(animeInfo) {
 const DANMU_SEGMENT_SIZE = 6000; // 每段最多6000条（B站标准）
 const DANMU_TIME_WINDOW = 360; // 6分钟窗口（秒）
 
-// 所有播放器剧集与 danmu_api episodeTitle 都使用同一个解析器。
-function findBestEpisodeMatch(episodes, targetIndex, showTitle, suppliedContext = null) {
+// ✅ 智能匹配集数（增强版）
+function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
     if (!episodes || episodes.length === 0) return null;
-    const context = suppliedContext || getDanmuPlaybackContext(showTitle, targetIndex);
-    const resolved = window.LibertyDanmuMatchCore.resolveEpisodeFromList(episodes, context);
-    danmuDebugLog('[DanmuDebug] episode list resolution', {
-        episodeIndex: context.episodeIndex,
-        episodeName: context.episodeName,
-        targetEpisodeNumber: context.episodeNumber,
-        episodeSource: context.episodeSource,
-        episodeConfidence: context.episodeConfidence,
-        resolvedEpisodeId: resolved.episode?.episodeId || '',
-        resolvedEpisodeTitle: resolved.title || '',
-        confidence: resolved.confidence,
-        reason: resolved.reason,
-    });
-    if (!resolved.episode) {
-        danmuDebugWarn('[DanmuDebug] reject danmu episode mapping', {
-            targetEpisodeNumber: context.episodeNumber,
-            reason: resolved.reason,
-        });
+
+    const targetNumber = targetIndex + 1;
+
+    function normalizeEpisodeTitle(title) {
+        return String(title || '')
+            .replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+            .replace(/[①②③④⑤⑥⑦⑧⑨⑩]/g, ch => {
+                const map = {
+                    '①': '1', '②': '2', '③': '3', '④': '4', '⑤': '5',
+                    '⑥': '6', '⑦': '7', '⑧': '8', '⑨': '9', '⑩': '10'
+                };
+                return map[ch] || ch;
+            })
+            .trim();
+    }
+
+    function chineseNumberToInt(raw) {
+        const s = String(raw || '').trim();
+
+        if (/^\d+$/.test(s)) {
+            return parseInt(s, 10);
+        }
+
+        const map = {
+            '零': 0, '〇': 0,
+            '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,
+            '六': 6, '七': 7, '八': 8, '九': 9
+        };
+
+        if (s === '十') return 10;
+
+        const tenMatch = s.match(/^([一二两三四五六七八九])?十([一二两三四五六七八九])?$/);
+        if (tenMatch) {
+            const tens = tenMatch[1] ? map[tenMatch[1]] : 1;
+            const ones = tenMatch[2] ? map[tenMatch[2]] : 0;
+            return tens * 10 + ones;
+        }
+
+        if (s.length === 1 && map[s] !== undefined) {
+            return map[s];
+        }
+
         return null;
     }
-    return resolved.episode;
+
+    function isValidEpisodeNumber(n) {
+        if (!Number.isFinite(n)) return false;
+        if (n <= 0 || n > 999) return false;
+
+        // 避免把年份当成集数
+        if (n >= 1900 && n <= 2099) return false;
+
+        return true;
+    }
+
+    function extractEpisodeNumber(title) {
+        const s = normalizeEpisodeTitle(title);
+
+        const patterns = [
+            // S01E02 / s1e2
+            /[Ss]\d{1,2}[Ee]\s*0*(\d{1,4})/,
+
+            // 第2集 / 第2话 / 第2期 / 第十二集
+            /第\s*([一二两三四五六七八九十\d]+)\s*[集话話期回]/,
+
+            // EP02 / E02
+            /(?:^|[\s._-])[Ee][Pp]?\.?\s*0*(\d{1,4})(?=$|[\s._-])/,
+
+            // #2 / #第2期
+            /[#＃]\s*第?\s*([一二两三四五六七八九十\d]+)\s*[集话話期回]?/,
+
+            // 综艺常见：xxx（下）4 / xxx(上)3
+            /[（(](?:上|中|下|前篇|后篇|後篇|part\s*\d+|第[上下中]部分)[）)]\s*0*(\d{1,4})\s*$/i,
+
+            // 标题末尾数字：哥伦比亚亚马逊河（下）4
+            /(?:^|[^\d])0*(\d{1,4})\s*(?:集|话|話|期|回)?\s*$/
+        ];
+
+        for (const pattern of patterns) {
+            const match = s.match(pattern);
+            if (!match) continue;
+
+            const n = chineseNumberToInt(match[1]);
+            if (isValidEpisodeNumber(n)) {
+                return n;
+            }
+        }
+
+        // 特殊处理：纯数字标题
+        if (/^\d+$/.test(s)) {
+            const n = parseInt(s, 10);
+            if (isValidEpisodeNumber(n)) {
+                return n;
+            }
+        }
+
+        return null;
+    }
+
+    const episodesWithInfo = episodes.map((ep, idx) => {
+        const title = ep.episodeTitle || '';
+        const episodeNumber = extractEpisodeNumber(title);
+
+        return {
+            episode: ep,
+            number: episodeNumber,
+            title,
+            index: idx,
+            confidence: episodeNumber !== null ? 'high' : 'low'
+        };
+    });
+
+    // 策略1：标题里能解析出明确集数，并且集数刚好等于当前播放集
+    const exactMatch = episodesWithInfo.find(ep =>
+        ep.number === targetNumber && ep.confidence === 'high'
+    );
+
+    if (exactMatch) {
+        danmuDebugLog(`✅ [弹幕] 精确匹配 第${targetNumber}集: ${exactMatch.title}`);
+        return exactMatch.episode;
+    }
+
+    // 策略2：只要弹幕标题里存在明确集数，但没有命中当前集，就直接拒绝
+    // 例如当前第2集，候选是“xxx（下）4”，不能继续按索引兜底
+    const explicitEpisodes = episodesWithInfo.filter(ep => ep.confidence === 'high');
+
+    if (explicitEpisodes.length > 0) {
+        console.warn(
+            `⚠️ [弹幕] 未找到明确的第${targetNumber}集，拒绝索引/模糊兜底，避免错配。可用集数：`,
+            explicitEpisodes.map(ep => ({
+                index: ep.index,
+                number: ep.number,
+                title: ep.title,
+                episodeId: ep.episode?.episodeId
+            }))
+        );
+        return null;
+    }
+
+    // 策略3：所有弹幕标题都解析不出明确集数，才允许按索引匹配
+    if (targetIndex >= 0 && targetIndex < episodes.length) {
+        const indexMatch = episodesWithInfo[targetIndex];
+
+        console.warn(
+            `⚠️ [弹幕] 弹幕标题没有明确集数，暂按索引匹配：当前第${targetNumber}集 → 候选索引${targetIndex}`,
+            {
+                title: indexMatch.title,
+                episodeId: indexMatch.episode?.episodeId
+            }
+        );
+
+        return indexMatch.episode;
+    }
+
+    console.error(`❌ [弹幕] 无法匹配第${targetNumber}集，共${episodes.length}集`);
+    danmuDebugLog('可用弹幕:', episodesWithInfo.map(e => ({
+        index: e.index,
+        number: e.number,
+        confidence: e.confidence,
+        title: e.title
+    })));
+
+    return null;
 }
 
 function pickMatchedDanmuEpisode(episodes, episodeIndex, title) {
@@ -2326,7 +2672,7 @@ function pickMatchedDanmuEpisode(episodes, episodeIndex, title) {
         return null;
     }
 
-    return findBestEpisodeMatch(episodes, episodeIndex, title, getDanmuPlaybackContext(title, episodeIndex));
+    return findBestEpisodeMatch(episodes, episodeIndex, title);
 }
 
 // ✅ 优化后的弹幕获取函数 - 解决主线程阻塞
@@ -2334,9 +2680,7 @@ async function fetchDanmaku(episodeId, episodeIndex, options = {}) {
     if (!isDanmuServiceEnabled()) return null;
 
     const silentCandidate = Boolean(options.silentCandidate);
-    const cacheKey = `${String(options.animeId || currentDanmuAnimeId || 'unknown')}:${String(episodeId || '')}`;
-    const requestVideoKey = options.videoKey
-        || getDanmuPlaybackContext(currentVideoTitle, episodeIndex).videoKey;
+    const cacheKey = String(episodeId || '');
     if (!cacheKey) return null;
 
     lastDanmuFetchStats = {
@@ -2352,11 +2696,10 @@ async function fetchDanmaku(episodeId, episodeIndex, options = {}) {
         updatedAt: Date.now()
     };
 
-    const successEntry = sessionDanmuCommentSuccessCache.get(cacheKey);
-    if (successEntry && Date.now() - successEntry.timestamp < DANMU_COMMENT_CACHE_TTL) {
-        const cached = limitDanmakuList(successEntry.danmuList || []);
-        if (cached.length !== (successEntry.danmuList || []).length) {
-            sessionDanmuCommentSuccessCache.set(cacheKey, { ...successEntry, danmuList: cached });
+    if (sessionDanmuCommentSuccessCache.has(cacheKey)) {
+        const cached = limitDanmakuList(sessionDanmuCommentSuccessCache.get(cacheKey) || []);
+        if (cached.length !== (sessionDanmuCommentSuccessCache.get(cacheKey) || []).length) {
+            sessionDanmuCommentSuccessCache.set(cacheKey, cached);
         }
         lastDanmuFetchStats = {
             ...lastDanmuFetchStats,
@@ -2373,9 +2716,8 @@ async function fetchDanmaku(episodeId, episodeIndex, options = {}) {
         });
         return cached;
     }
-    if (successEntry) sessionDanmuCommentSuccessCache.delete(cacheKey);
 
-    if (hasFreshDanmuNegativeCache(sessionDanmuCommentNegativeCache, cacheKey, DANMU_COMMENT_NEGATIVE_TTL)) {
+    if (sessionDanmuCommentNegativeCache.has(cacheKey)) {
         lastDanmuFetchStats = {
             ...lastDanmuFetchStats,
             failReason: 'comment_negative_cache',
@@ -2437,7 +2779,7 @@ async function fetchDanmaku(episodeId, episodeIndex, options = {}) {
         let failReason = `http_${status}`;
         if (status === 400 || status === 404) {
             failReason = 'comment_not_found';
-            sessionDanmuCommentNegativeCache.set(cacheKey, Date.now());
+            sessionDanmuCommentNegativeCache.add(cacheKey);
         } else if (status === 429) {
             failReason = 'rate_limited';
             danmuCommentRateLimitUntil = Date.now() + DANMU_COMMENT_RATE_LIMIT_COOLDOWN;
@@ -2549,10 +2891,7 @@ async function fetchDanmaku(episodeId, episodeIndex, options = {}) {
     };
 
     if (limitedDanmaku.length > 0) {
-        setBoundedDanmuCache(sessionDanmuCommentSuccessCache, cacheKey, {
-            timestamp: Date.now(),
-            danmuList: limitedDanmaku,
-        }, DANMU_COMMENT_CACHE_MAX);
+        sessionDanmuCommentSuccessCache.set(cacheKey, limitedDanmaku);
     }
 
     danmuDebugLog(`[DanmuDebug] 弹幕转换后数量: ${finalDanmaku.length}`);
@@ -2563,8 +2902,6 @@ async function fetchDanmaku(episodeId, episodeIndex, options = {}) {
 
     const cacheData = {
         episodeIndex,
-        episodeId: cacheKey,
-        videoKey: requestVideoKey,
         danmuList: limitedDanmaku,
         timestamp: Date.now()
     };
@@ -2573,18 +2910,7 @@ async function fetchDanmaku(episodeId, episodeIndex, options = {}) {
         videoPlayer.updateDanmuCache(episodeIndex, limitedDanmaku);
     }
 
-    const activeVideoKey = getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex).videoKey;
-    if (requestVideoKey === activeVideoKey && episodeIndex === currentEpisodeIndex) {
-        currentDanmuCache = cacheData;
-    } else {
-        danmuDebugWarn('[DanmuDebug] ignore stale danmaku cache write', {
-            episodeId,
-            episodeIndex,
-            requestVideoKey,
-            activeVideoKey,
-            currentEpisodeIndex,
-        });
-    }
+    currentDanmuCache = cacheData;
 
     return limitedDanmaku;
 }
@@ -2608,7 +2934,7 @@ function processDanmakuOptimized(item, pool) {
 }
 // ✅ 带临时缓存、重试机制、过期兜底的剧集获取函数
 async function getAnimeEpisodesWithCache(animeId, cleanTitle) {
-    if (hasFreshDanmuNegativeCache(sessionDanmuBangumiNegativeCache, String(animeId), DANMU_BANGUMI_NEGATIVE_TTL)) {
+    if (sessionDanmuBangumiNegativeCache.has(String(animeId))) {
         danmuDebugWarn('[DanmuDebug] skip bangumi detail due to session negative cache', { animeId });
         return null;
     }
@@ -2636,10 +2962,13 @@ async function getAnimeEpisodesWithCache(animeId, cleanTitle) {
             clearTimeout(timeoutId);
 
             if (response.status === 400 || response.status === 404) {
-                sessionDanmuBangumiNegativeCache.set(String(animeId), Date.now());
-                // Metadata cache requests may outlive their playback generation. Only the
-                // guarded caller may mutate the active session source.
-                danmuDebugWarn('[DanmuDebug] bangumi detail not found', {
+                sessionDanmuBangumiNegativeCache.add(String(animeId));
+                if (currentSessionDanmuSource && String(currentSessionDanmuSource.animeId) === String(animeId)) {
+                    currentSessionDanmuSource = null;
+                    currentDanmuAnimeId = null;
+                    currentDanmuSourceName = '';
+                }
+                danmuDebugWarn('[DanmuDebug] bangumi detail not found, clear session source', {
                     animeId,
                     status: response.status
                 });
@@ -2700,7 +3029,6 @@ async function getAnimeEpisodesWithCache(animeId, cleanTitle) {
 async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, title, episodeIndex, controller, reason, meta = {}) {
     if (!animeId) return null;
     const videoIdentity = meta.videoIdentity || getVideoIdentity(title);
-    const playbackContext = meta.playbackContext || getDanmuPlaybackContext(title, episodeIndex);
 
     danmuDebugLog('[DanmuDebug] try anime candidate for current episode', {
         animeId,
@@ -2743,7 +3071,7 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
         episodeId: matchedEpisode.episodeId,
         episodeTitle: matchedEpisode.episodeTitle || matchedEpisode.title || matchedEpisode.name || '',
         episodeIndex,
-        episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+        displayEpisode: episodeIndex + 1,
         matchMode: meta.matchMode || 'binding',
         confidence: Number(meta.confidence || meta.score || matchedEpisode.confidence || 0)
     };
@@ -2763,32 +3091,32 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
         reason
     });
 
-    const result = await fetchDanmaku(matchedEpisode.episodeId, episodeIndex, { animeId });
+    const result = await fetchDanmaku(matchedEpisode.episodeId, episodeIndex);
     if (controller?.cancelled) return [];
     if (result && result.length > 0) {
         currentDanmuAnimeId = animeId;
         currentDanmuSourceName = sourceName || currentDanmuSourceName || '';
-        currentSessionDanmuSource = createDanmuSessionSource({
+        currentSessionDanmuSource = {
             animeId,
             animeTitle: sourceName || '',
             sourceName: sourceName || '',
             selectedBy: meta.selectedBy || (meta.manualSourceUsed ? 'manual' : 'auto'),
             episodes,
-            confidence: meta.confidence || meta.score || matchedEpisode.confidence,
-            confidenceScore: meta.confidenceScore || meta.score,
-        }, playbackContext);
+            episodeCount: episodes.length,
+            updatedAt: Date.now()
+        };
         updateLastDanmuMatchInfo({
             reason,
             matchMode: meta.matchMode || 'manual-source',
             matchQuery: meta.matchQuery || '',
             episodeIndex,
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             animeId,
             animeTitle: sourceName || '',
             episodeId: matchedEpisode.episodeId,
             episodeTitle: matchedEpisode.episodeTitle || matchedEpisode.title || matchedEpisode.name || '',
             sourceName: sourceName || '',
-            selectedBy: currentSessionDanmuSource?.selectedBy || meta.selectedBy || 'auto',
+            selectedBy: currentSessionDanmuSource.selectedBy,
             fallbackUsed: Boolean(meta.fallbackUsed),
             manualSourceUsed: Boolean(meta.manualSourceUsed),
             sessionSourceUsed: Boolean(meta.sessionSourceUsed),
@@ -2807,9 +3135,9 @@ async function loadDanmakuFromAnimeCandidate(animeId, sourceName, cleanTitle, ti
             animeTitle: sourceName,
             episodeId: matchedEpisode.episodeId,
             episodeTitle: matchedEpisode.episodeTitle || matchedEpisode.title || matchedEpisode.name || '',
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             loadedCount: result.length,
-            selectedBy: currentSessionDanmuSource?.selectedBy || meta.selectedBy || 'auto',
+            selectedBy: currentSessionDanmuSource.selectedBy,
             sessionSourceUsed: Boolean(meta.sessionSourceUsed)
         });
         danmuDebugLog('[DanmuDebug] candidate fallback loaded danmaku', {
@@ -2842,7 +3170,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
 
         danmuDebugLog('[DanmuDebug] auto fallback search start', {
             cleanTitle,
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             matchQuery,
             normalizedCurrentTitle,
             currentYear
@@ -2868,7 +3196,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
             lastDanmuAutoFallbackStats.rejectReasons.push('no_candidates');
             danmuDebugWarn('[DanmuDebug] auto fallback has no search candidates', {
                 cleanTitle,
-                episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber
+                displayEpisode: episodeIndex + 1
             });
             return null;
         }
@@ -2907,7 +3235,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
                 animeId: candidate.animeId,
                 animeTitle: candidate.animeTitle,
                 coreTitle: candidate.coreTitle,
-                episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+                displayEpisode: episodeIndex + 1,
                 score: candidate.score,
                 triedCandidateCount: lastDanmuAutoFallbackStats.triedCandidateCount
             });
@@ -2979,7 +3307,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
                 animeTitle: candidate.animeTitle,
                 coreTitle: candidate.coreTitle,
                 sourceName: candidate.sourceName,
-                episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+                displayEpisode: episodeIndex + 1,
                 episodeId: matchedEpisode.episodeId,
                 metadataScore
             });
@@ -3015,8 +3343,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
 
             lastDanmuAutoFallbackStats.triedCommentCount += 1;
             const danmuku = await fetchDanmaku(matchedEpisode.episodeId, episodeIndex, {
-                silentCandidate: true,
-                animeId: candidate.animeId,
+                silentCandidate: true
             });
             if (controller?.cancelled) return [];
             if (!danmuku || danmuku.length === 0) {
@@ -3038,7 +3365,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
                 danmuDebugWarn('[DanmuDebug] auto fallback candidate rejected', {
                     animeId: candidate.animeId,
                     animeTitle: candidate.animeTitle,
-                    episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+                    displayEpisode: episodeIndex + 1,
                     episodeId: matchedEpisode.episodeId,
                     score: candidate.score,
                     rejectReason,
@@ -3072,7 +3399,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
                 currentTitle: context.title,
                 normalizedCurrentTitle,
                 currentYear,
-                episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+                displayEpisode: episodeIndex + 1,
                 titleScore: candidate.titleScore,
                 yearMatch: Boolean(currentYear && (candidate.candidateYear || candidate.year) && currentYear === normalizeDanmuYear(candidate.candidateYear || candidate.year)),
                 yearConflict: false,
@@ -3104,33 +3431,20 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
             const matchedEpisode = best.matchedEpisode;
             const danmuku = best.danmuku;
 
-            if (best.verifiedScore < 60) {
-                lastDanmuAutoFallbackStats.rejectReason = 'candidate_confidence_too_low';
-                lastDanmuAutoFallbackStats.rejectReasons.push('candidate_confidence_too_low');
-                danmuDebugWarn('[DanmuDebug] low confidence fallback requires manual selection', {
-                    animeId: candidate.animeId,
-                    animeTitle: candidate.animeTitle,
-                    verifiedScore: best.verifiedScore,
-                });
-                return null;
-            }
-
             currentDanmuAnimeId = candidate.animeId;
             currentDanmuSourceName = candidate.sourceName || candidate.animeTitle || '';
-            currentSessionDanmuSource = createDanmuSessionSource({
+            currentSessionDanmuSource = {
                 animeId: candidate.animeId,
                 animeTitle: candidate.animeTitle || '',
                 sourceName: candidate.sourceName || candidate.animeTitle || '',
                 selectedBy: 'auto-fallback',
                 episodes: best.episodes,
-                confidence: best.verifiedScore,
-                confidenceScore: best.verifiedScore,
-            }, context);
+                episodeCount: best.episodes.length,
+                updatedAt: Date.now()
+            };
             lastDanmuFetchStats = best.fetchStats;
             currentDanmuCache = {
                 episodeIndex,
-                episodeId: matchedEpisode.episodeId,
-                videoKey: context.videoKey,
                 danmuList: danmuku,
                 timestamp: Date.now()
             };
@@ -3145,7 +3459,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
                 matchMode: 'auto-fallback',
                 matchQuery,
                 episodeIndex,
-                episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+                displayEpisode: episodeIndex + 1,
                 animeId: candidate.animeId,
                 animeTitle: candidate.animeTitle || '',
                 episodeId: matchedEpisode.episodeId,
@@ -3180,7 +3494,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
             danmuDebugLog('[DanmuDebug] auto fallback best selected', {
                 animeId: candidate.animeId,
                 animeTitle: candidate.animeTitle,
-                episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+                displayEpisode: episodeIndex + 1,
                 verifiedScore: best.verifiedScore,
                 validCandidateCount: validCandidates.length,
                 loadedCount: danmuku.length
@@ -3190,7 +3504,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
 
         danmuDebugWarn('[DanmuDebug] auto fallback failed', {
             cleanTitle,
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             candidateCount: candidates.length,
             triedCandidateCount: lastDanmuAutoFallbackStats.triedCandidateCount,
             triedCommentCount: lastDanmuAutoFallbackStats.triedCommentCount,
@@ -3218,7 +3532,7 @@ async function autoFallbackDanmakuBySearchCandidate(cleanTitle, title, episodeIn
         };
         danmuDebugWarn('[DanmuDebug] auto fallback search failed', {
             cleanTitle,
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             error: error?.message || String(error)
         });
         return null;
@@ -3235,22 +3549,12 @@ async function getDanmukuForVideo(title, episodeIndex) {
     if (_danmuFetchController) {
         _danmuFetchController.cancelled = true;
     }
-    const context = getDanmuPlaybackContext(title, episodeIndex);
-    const reloadToken = danmuReloadToken;
-    let cancelled = false;
-    const controller = {
-        get cancelled() {
-            return cancelled || reloadToken !== danmuReloadToken
-                || context.videoKey !== getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex).videoKey;
-        },
-        set cancelled(value) { cancelled = Boolean(value); },
-    };
+    const controller = { cancelled: false };
     _danmuFetchController = controller;
 
     try {
         // ① 命中弹幕缓存，直接返回
         if (currentDanmuCache.episodeIndex === episodeIndex &&
-            currentDanmuCache.videoKey === context.videoKey &&
             currentDanmuCache.danmuList &&
             Date.now() - currentDanmuCache.timestamp < DANMU_CONFIG.cacheExpiration.danmuCache) {
             currentDanmuCache.danmuList = limitDanmakuList(currentDanmuCache.danmuList);
@@ -3259,13 +3563,14 @@ async function getDanmukuForVideo(title, episodeIndex) {
                 reason: 'cache',
                 matchMode: 'cache',
                 episodeIndex,
-                episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+                displayEpisode: episodeIndex + 1,
                 loadedCount: currentDanmuCache.danmuList.length
             });
             return currentDanmuCache.danmuList;
         }
 
         const cleanTitle = getDanmuSearchKeyword(title);
+        const context = getDanmuPlaybackContext(title, episodeIndex);
         const matchQuery = buildDanmuKeyword(context);
         const matchQueries = buildDanmuMatchQueries(context);
 
@@ -3273,7 +3578,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
             cleanTitle,
             year: context.year,
             episodeIndex,
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             episodeName: context.episodeName,
             sourceCode: context.sourceCode,
             currentVideoUrl,
@@ -3288,13 +3593,11 @@ async function getDanmukuForVideo(title, episodeIndex) {
             matchMode: 'none',
             matchQuery,
             episodeIndex,
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             loadedCount: 0
         });
 
-        const sessionValidation = validateCurrentDanmuSessionSource(context);
         const hasSessionSourceWithEpisodes =
-            sessionValidation.compatible &&
             currentSessionDanmuSource?.animeId &&
             Array.isArray(currentSessionDanmuSource.episodes) &&
             currentSessionDanmuSource.episodes.length > 0;
@@ -3303,7 +3606,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
             danmuDebugLog('[DanmuDebug] session source episode mapping priority', {
                 animeId: currentSessionDanmuSource.animeId,
                 animeTitle: currentSessionDanmuSource.animeTitle || currentSessionDanmuSource.sourceName || '',
-                episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+                displayEpisode: episodeIndex + 1,
                 selectedBy: currentSessionDanmuSource.selectedBy,
                 episodeCount: currentSessionDanmuSource.episodes.length
             });
@@ -3323,10 +3626,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                     sessionSourceUsed: true,
                     fallbackUsed: false,
                     matchQuery,
-                    episodes: currentSessionDanmuSource.episodes,
-                    playbackContext: context,
-                    confidence: currentSessionDanmuSource.confidence,
-                    confidenceScore: currentSessionDanmuSource.confidenceScore,
+                    episodes: currentSessionDanmuSource.episodes
                 }
             );
             if (controller.cancelled) return [];
@@ -3336,7 +3636,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
 
             danmuDebugWarn('[DanmuDebug] session source did not resolve current episode, fallback to api match', {
                 animeId: currentSessionDanmuSource?.animeId || '',
-                episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+                displayEpisode: episodeIndex + 1,
                 matchQuery
             });
         }
@@ -3345,10 +3645,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
         if (controller.cancelled) return [];
 
         if (matchedByApi && matchedByApi.episodeId) {
-            const result = await fetchDanmaku(matchedByApi.episodeId, episodeIndex, {
-                animeId: matchedByApi.animeId,
-                videoKey: context.videoKey,
-            });
+            const result = await fetchDanmaku(matchedByApi.episodeId, episodeIndex);
             if (controller.cancelled) return [];
 
             if (result && result.length > 0) {
@@ -3358,15 +3655,15 @@ async function getDanmukuForVideo(title, episodeIndex) {
                     const episodes = await getAnimeEpisodesWithCache(currentDanmuAnimeId, cleanTitle);
                     if (controller.cancelled) return [];
                     if (Array.isArray(episodes) && episodes.length > 0) {
-                        currentSessionDanmuSource = createDanmuSessionSource({
+                        currentSessionDanmuSource = {
                             animeId: currentDanmuAnimeId,
                             animeTitle: currentDanmuSourceName,
                             sourceName: currentDanmuSourceName,
                             selectedBy: 'auto',
                             episodes,
-                            confidence: matchedByApi.confidence,
-                            confidenceScore: matchedByApi.confidenceScore,
-                        }, context);
+                            episodeCount: episodes.length,
+                            updatedAt: Date.now()
+                        };
                     }
                 }
                 updateLastDanmuMatchInfo({
@@ -3374,7 +3671,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                     matchMode: 'api-match',
                     matchQuery: matchedByApi.matchQuery || matchQuery,
                     episodeIndex,
-                    episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+                    displayEpisode: episodeIndex + 1,
                     animeId: matchedByApi.animeId || '',
                     animeTitle: matchedByApi.animeTitle || '',
                     episodeId: matchedByApi.episodeId,
@@ -3384,8 +3681,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                     fallbackUsed: false,
                     manualSourceUsed: false,
                     sessionSourceUsed: false,
-                    confidence: matchedByApi.confidenceScore || 0,
-                    confidenceLabel: matchedByApi.confidence || 'unknown',
+                    confidence: matchedByApi.confidence || 90,
                     loadedCount: result.length
                 });
                 danmuDebugLog('[DanmuDebug] match success', {
@@ -3434,7 +3730,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
 
         danmuDebugWarn('[DanmuDebug] strict match failed', {
             cleanTitle,
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             episodeName: context.episodeName,
             matchQuery,
             matchQueries,
@@ -3447,7 +3743,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
             matchMode: 'none',
             matchQuery,
             episodeIndex,
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             selectedBy: '',
             fallbackUsed: Boolean(lastDanmuAutoFallbackStats?.candidateCount || lastDanmuAutoFallbackStats?.triedCandidateCount),
             manualSourceUsed: false,
@@ -3462,8 +3758,6 @@ async function getDanmukuForVideo(title, episodeIndex) {
             loadedCount: 0,
             failReason: lastDanmuAutoFallbackStats?.rejectReason || 'api-match-and-session-source-failed'
         });
-
-        maybePromptDanmuSourceSelection(context, lastDanmuAutoFallbackStats?.rejectReason || 'ambiguous_or_low_confidence');
 
         console.warn('❌ 未自动匹配到当前集弹幕，请手动选择弹幕源');
         return [];
@@ -3512,7 +3806,7 @@ function getVideoSourceHint(url) {
 function isCurrentVideoSourceMatched(currentSrc, targetUrl) {
     if (!targetUrl) return true;
     if (!currentSrc) return false;
-    if (/^(blob:|mediastream:)/i.test(currentSrc)) return currentHls?.url === targetUrl;
+    if (/^(blob:|mediastream:)/i.test(currentSrc)) return true;
 
     const normalizedCurrent = String(currentSrc);
     const normalizedTarget = String(targetUrl);
@@ -3528,10 +3822,6 @@ function waitForCurrentVideoReady(maxWait = 10000, expected = {}) {
         const start = Date.now();
 
         const checkReady = () => {
-            if (expected.isCurrent && !expected.isCurrent()) {
-                resolve({ ready: false, waitedToNewSource: false, superseded: true });
-                return;
-            }
             const video = art?.video;
             const currentSrc = video?.currentSrc || video?.src || '';
             const readyState = video?.readyState || 0;
@@ -3539,7 +3829,7 @@ function waitForCurrentVideoReady(maxWait = 10000, expected = {}) {
             const indexMatched = typeof expected.episodeIndex !== 'number' ||
                 expected.episodeIndex === currentEpisodeIndex;
             const sourceMatched = isCurrentVideoSourceMatched(currentSrc, expected.episodeUrl);
-            const ready = readyState >= 2;
+            const ready = readyState >= 1;
             const waitedToNewSource = Boolean(ready && indexMatched && sourceMatched);
             const state = {
                 ready,
@@ -3619,7 +3909,7 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
         danmuDebugWarn('[DanmuDebug] 弹幕插件不存在，无法重新加载当前集弹幕', { reason });
         danmuDebugWarn('[DanmuDebug] episode switch danmaku failed', {
             reason,
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             failReason: 'plugin-missing',
             matchMode: lastDanmuMatchInfo?.matchMode || 'none',
             fallbackUsed: Boolean(lastDanmuMatchInfo?.fallbackUsed),
@@ -3660,7 +3950,7 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
     if (!danmuku || danmuku.length === 0) {
         danmuDebugWarn('[DanmuDebug] episode switch danmaku failed', {
             reason,
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             failReason: 'empty-danmaku',
             matchMode: lastDanmuMatchInfo?.matchMode || 'none',
             fallbackUsed: Boolean(lastDanmuMatchInfo?.fallbackUsed),
@@ -3681,7 +3971,7 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
     }
 
     danmuDebugLog('[DanmuDebug] apply danmaku to artplayer', {
-        episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+        displayEpisode: episodeIndex + 1,
         rawCount: lastDanmuFetchStats?.rawCount || 0,
         validCount: lastDanmuFetchStats?.validCount || 0,
         convertedCount: lastDanmuFetchStats?.convertedCount || 0,
@@ -3697,7 +3987,7 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
         });
     } catch (error) {
         danmuDebugWarn('[DanmuDebug] apply danmaku to artplayer failed', {
-            episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+            displayEpisode: episodeIndex + 1,
             error: error?.message || String(error)
         });
         logDanmuEpisodeSummary(reason, {
@@ -3720,13 +4010,13 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
     });
 
     danmuDebugLog('[DanmuDebug] apply danmaku to artplayer success', {
-        episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+        displayEpisode: episodeIndex + 1,
         loadedCount: danmuku.length,
         reason
     });
     danmuDebugLog('[DanmuDebug] episode switch danmaku result', {
         reason,
-        episodeNumber: getDanmuPlaybackContext(currentVideoTitle, episodeIndex).episodeNumber,
+        displayEpisode: episodeIndex + 1,
         matchedEpisodeTitle: lastDanmuMatchInfo?.episodeTitle || '',
         matchMode: lastDanmuMatchInfo?.matchMode || 'none',
         fallbackUsed: Boolean(lastDanmuMatchInfo?.fallbackUsed),
@@ -3742,13 +4032,7 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
         loadedCount: danmuku.length,
         pluginApplied: true
     });
-    const reloadedContext = getDanmuPlaybackContext(currentVideoTitle, episodeIndex);
-    danmuDebugLog(`✅ 切集后已重新加载第${reloadedContext.episodeNumber ?? '?'}集弹幕: ${danmuku.length}条`, {
-        reason,
-        episodeIndex,
-        episodeNumber: reloadedContext.episodeNumber,
-        episodeSource: reloadedContext.episodeSource,
-    });
+    danmuDebugLog(`✅ 切集后已重新加载第${episodeIndex + 1}集弹幕: ${danmuku.length}条`, { reason });
 }
 
 function reloadDanmakuForCurrentEpisode(reason = 'episode-switch') {
@@ -4359,10 +4643,6 @@ class VideoPlayer {
         // 核心实例
         this.art = null;
         this.hls = null;
-        this.hlsTelemetry = null;
-        this.hlsRuntimeCleanup = null;
-        this.destroyed = false;
-        this.lifecycleCleanups = new Set();
 
         // 定时器管理
         this.timers = {
@@ -4429,96 +4709,10 @@ class VideoPlayer {
     // ============================================
     setTimer(name, callback, delay, isInterval = false) {
         this.clearTimer(name);
-        if (this.destroyed) return null;
-        const guardedCallback = () => {
-            if (!this.isCurrent() || this.timers[name] !== timerId) return;
-            if (!isInterval) this.timers[name] = null;
-            callback();
-        };
-        const timerId = isInterval
-            ? setInterval(guardedCallback, delay)
-            : setTimeout(guardedCallback, delay);
-        this.timers[name] = timerId;
+        this.timers[name] = isInterval 
+            ? setInterval(callback, delay)
+            : setTimeout(callback, delay);
         return this.timers[name];
-    }
-
-    isCurrent() {
-        return !this.destroyed && videoPlayer === this;
-    }
-
-    addLifecycleCleanup(cleanup) {
-        if (this.destroyed) cleanup();
-        else this.lifecycleCleanups.add(cleanup);
-    }
-
-    addArtEventListener(event, handler) {
-        const target = this.art;
-        const guarded = (...args) => {
-            if (this.isCurrent() && this.art === target) handler(...args);
-        };
-        target.on(event, guarded);
-        this.addLifecycleCleanup(() => target.off(event, guarded));
-        return guarded;
-    }
-
-    trackArtFullscreenListeners() {
-        // ArtPlayer 5.3.0's fullscreen module registers two screenfull callbacks
-        // outside its events.proxy registry. A vendor-only create/destroy probe
-        // confirms they survive destroy. Recheck this shim on a vendor upgrade.
-        if (Artplayer.version !== '5.3.0') return;
-        const target = this.art;
-        const originalEmit = target.emit;
-        const emitDescriptor = Object.getOwnPropertyDescriptor(target, 'emit');
-        const listeners = [];
-        const restoreEmit = () => {
-            if (target.emit !== scopedEmit) return;
-            if (emitDescriptor) Object.defineProperty(target, 'emit', emitDescriptor);
-            else delete target.emit;
-        };
-        function scopedEmit(event, ...args) {
-            if (event !== 'video:loadedmetadata') return originalEmit.call(this, event, ...args);
-            restoreEmit();
-            const add = document.addEventListener;
-            const descriptor = Object.getOwnPropertyDescriptor(document, 'addEventListener');
-            // Synchronous, first-metadata-only scope; never leave a global hook installed.
-            document.addEventListener = function (type, handler, options) {
-                const result = add.call(this, type, handler, options);
-                if (this === document && /^(?:webkit|moz|MS)?fullscreen(?:change|error)$/i.test(type)) {
-                    listeners.push({ type, handler, options });
-                }
-                return result;
-            };
-            try {
-                return originalEmit.call(this, event, ...args);
-            } finally {
-                if (descriptor) Object.defineProperty(document, 'addEventListener', descriptor);
-                else delete document.addEventListener;
-            }
-        }
-        const cleanup = () => {
-            restoreEmit();
-            listeners.splice(0).forEach(({ type, handler, options }) => {
-                document.removeEventListener(type, handler, options);
-            });
-            target.off('destroy', cleanup);
-        };
-        target.emit = scopedEmit;
-        // Do not remove this hook in Liberty's pre-destroy cleanup. ArtPlayer's
-        // own events/template cleanup must run before releasing these callbacks.
-        target.on('destroy', cleanup);
-    }
-
-    cleanupLifecycle() {
-        if (this.destroyed) return;
-        this.destroyed = true;
-        if (videoPlayer === this) {
-            danmuReloadToken += 1;
-            if (_danmuFetchController) _danmuFetchController.cancelled = true;
-        }
-        this.clearAllTimers();
-        this.removeAllEventListeners();
-        for (const cleanup of this.lifecycleCleanups) cleanup();
-        this.lifecycleCleanups.clear();
     }
 
     clearTimer(name) {
@@ -4537,32 +4731,20 @@ class VideoPlayer {
     // 事件监听器管理方法
     // ============================================
     addEventListener(target, event, handler, options) {
-        if (this.destroyed) return () => {};
-        const guarded = (...args) => { if (this.isCurrent()) handler(...args); };
-        target.addEventListener(event, guarded, options);
+        target.addEventListener(event, handler, options);
 
         const key = `${target.constructor.name}_${event}`;
         if (!this.eventListeners.has(key)) {
             this.eventListeners.set(key, []);
         }
-        const listeners = this.eventListeners.get(key);
-        let active = true;
-        const entry = { target, event, handler: guarded, options, remove: () => {
-            if (!active) return;
-            active = false;
-            target.removeEventListener(event, guarded, options);
-            listeners.splice(listeners.indexOf(entry), 1);
-            if (!listeners.length) this.eventListeners.delete(key);
-        } };
-        listeners.push(entry);
-        return entry.remove;
+        this.eventListeners.get(key).push({ target, event, handler });
     }
 
     removeAllEventListeners() {
-        for (const listeners of [...this.eventListeners.values()]) {
-            [...listeners].forEach(({ remove }) => {
+        for (const listeners of this.eventListeners.values()) {
+            listeners.forEach(({ target, event, handler }) => {
                 try {
-                    remove();
+                    target.removeEventListener(event, handler);
                 } catch (e) {
                     console.warn('移除监听器失败:', e);
                 }
@@ -4575,7 +4757,6 @@ class VideoPlayer {
     // 防息屏管理方法
     // ============================================
     async requestWakeLock() {
-        if (!this.isCurrent()) return;
         if (!('wakeLock' in navigator)) {
             window.LibertyDebug.log('ℹ️ 浏览器不支持 Wake Lock，启用备用方案');
             this.enableNoSleepFallback();
@@ -4585,14 +4766,12 @@ class VideoPlayer {
         if (this.wakeLock.instance !== null) return;
 
         try {
-            const lock = await navigator.wakeLock.request('screen');
-            if (!this.isCurrent()) { await lock.release(); return; }
-            this.wakeLock.instance = lock;
+            this.wakeLock.instance = await navigator.wakeLock.request('screen');
             window.LibertyDebug.log('防息屏已激活');
 
             this.wakeLock.instance.addEventListener('release', () => {
                 this.wakeLock.instance = null;
-                if (this.isCurrent() && this.art?.playing) {
+                if (this.art?.playing) {
                     this.enableNoSleepFallback();
                 }
             });
@@ -4611,7 +4790,6 @@ class VideoPlayer {
     }
 
     enableNoSleepFallback() {
-        if (!this.isCurrent()) return;
         if (this.wakeLock.noSleepVideo) {
             if (this.wakeLock.noSleepVideo.paused) {
                 this.wakeLock.noSleepVideo.play().catch(() => {});
@@ -4673,15 +4851,6 @@ class VideoPlayer {
     // HLS 销毁方法
     // ============================================
     destroyHls() {
-        hlsPlaybackGeneration += 1;
-        if (this.hlsRuntimeCleanup) {
-            try { this.hlsRuntimeCleanup(); } catch (error) {}
-            this.hlsRuntimeCleanup = null;
-        }
-        if (this.hlsTelemetry) {
-            try { this.hlsTelemetry.destroy(); } catch (error) {}
-            this.hlsTelemetry = null;
-        }
         if (this.hls) {
             try {
                 const hlsEvents = [
@@ -4705,7 +4874,6 @@ class VideoPlayer {
             } catch (e) {
                 console.error('HLS 销毁失败:', e);
             } finally {
-                if (currentHls === this.hls) currentHls = null;
                 this.hls = null;
             }
         }
@@ -4724,13 +4892,26 @@ class VideoPlayer {
     destroyArtPlayer() {
         if (this.art) {
             try {
+                const events = [
+                    'ready', 'seek', 'video:loadedmetadata', 
+                    'video:error', 'video:ended', 'video:playing',
+                    'video:pause', 'fullscreenWeb', 'fullscreen',
+                    'video:play', 'destroy'
+                ];
+
+                events.forEach(event => {
+                    try {
+                        this.art.off(event);
+                    } catch (e) {}
+                });
+
                 if (this.art.video) {
                     this.art.video.pause();
                     this.art.video.removeAttribute('src');
                     this.art.video.load();
                 }
 
-                if (!this.art.isDestroy) this.art.destroy();
+                this.art.destroy();
                 window.LibertyDebug.log('✅ 播放器已完全销毁');
             } catch (e) {
                 console.error('播放器销毁失败:', e);
@@ -4788,11 +4969,11 @@ class VideoPlayer {
     // 统一销毁方法
     // ============================================
     destroy() {
-        if (this.destroyed) return;
         window.LibertyDebug.log('🧹 VideoPlayer 开始销毁...');
 
         cleanupPlayerShortcuts();
-        this.cleanupLifecycle();
+        this.clearAllTimers();
+        this.removeAllEventListeners();
         this.releaseWakeLock();
         this.destroyHls();
         this.destroyArtPlayer();
@@ -4879,8 +5060,6 @@ function initPlayerInternal(videoUrl) {
         autoplay: !shouldDisableAutoplayForWatchRoom,
         volume: 0.8
     });
-    const playerSession = videoPlayer;
-    try {
 
     // ✅ 在这里添加移动端检测
     const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -4899,45 +5078,22 @@ function initPlayerInternal(videoUrl) {
 		maxBufferSize: isMobileDevice
 			? 30 * 1000 * 1000   // 移动端 30MB
 			: 50 * 1000 * 1000,  // 桌面端 50MB
-		maxBufferHole: 0.3,
+		maxBufferHole: 0.3,              // 更小的容错空间
 
-		// hls.js 1.6.2 原生 LoadPolicy；避免继续依赖已废弃的 xLoadingMaxRetry 配置。
-		manifestLoadPolicy: {
-			default: {
-				maxTimeToFirstByteMs: 8000,
-				maxLoadTimeMs: 20000,
-				timeoutRetry: { maxNumRetry: 2, retryDelayMs: 500, maxRetryDelayMs: 4000, backoff: 'exponential' },
-				errorRetry: { maxNumRetry: 2, retryDelayMs: 500, maxRetryDelayMs: 8000, backoff: 'exponential' }
-			}
-		},
-		playlistLoadPolicy: {
-			default: {
-				maxTimeToFirstByteMs: 10000,
-				maxLoadTimeMs: 20000,
-				timeoutRetry: { maxNumRetry: 2, retryDelayMs: 500, maxRetryDelayMs: 4000, backoff: 'exponential' },
-				errorRetry: { maxNumRetry: 3, retryDelayMs: 500, maxRetryDelayMs: 8000, backoff: 'exponential' }
-			}
-		},
-		fragLoadPolicy: {
-			default: {
-				maxTimeToFirstByteMs: 10000,
-				maxLoadTimeMs: 60000,
-				timeoutRetry: { maxNumRetry: 3, retryDelayMs: 0, maxRetryDelayMs: 4000, backoff: 'exponential' },
-				errorRetry: { maxNumRetry: 4, retryDelayMs: 500, maxRetryDelayMs: 8000, backoff: 'exponential' }
-			}
-		},
+		// 🚀 快速重试（提升切换速度）
+		fragLoadingMaxRetry: 4,          // 减少重试次数
+		fragLoadingMaxRetryTimeout: 32000,
+		fragLoadingRetryDelay: 500,      // 更快的重试
+		manifestLoadingMaxRetry: 2,
+		manifestLoadingRetryDelay: 500,
+		levelLoadingMaxRetry: 3,
+		levelLoadingRetryDelay: 500,
 
 		startLevel: -1,
-		testBandwidth: true,
 		abrEwmaDefaultEstimate: 500000,
 		abrBandWidthFactor: 0.95,
 		abrBandWidthUpFactor: 0.7,
 		abrMaxWithRealBitrate: true,
-		maxStarvationDelay: 4,
-		maxLoadingDelay: 4,
-		highBufferWatchdogPeriod: 2,
-		nudgeOffset: 0.1,
-		nudgeMaxRetry: 3,
 		stretchShortVideoTrack: true,
 		appendErrorMaxRetry: 3,
 		liveSyncDurationCount: 3,
@@ -5008,44 +5164,44 @@ function initPlayerInternal(videoUrl) {
 				theme: 'light',
 			}),
 		],
-		customType: {
+        customType: {
 			m3u8: function (video, url) {
 				applyInlineVideoAttributes(video);
-				videoPlayer?.destroyHls();
+				// ===== 🔥 增强 HLS 销毁 =====
+				if (currentHls) {
+					try {
+						// 1. 移除所有事件监听器（关键！）
+						const hlsEvents = [
+							Hls.Events.ERROR,
+							Hls.Events.MANIFEST_PARSED,
+							Hls.Events.FRAG_LOADED,
+							Hls.Events.LEVEL_LOADED,
+							Hls.Events.FRAG_BUFFERED  // ⚠️ 新增：必须清理缓冲监听器
+						];
 
-                // iOS/Safari 无 MSE 时交给原生 HLS，避免强行创建不可用的 hls.js 实例。
-                const playbackGeneration = ++hlsPlaybackGeneration;
-                if (!Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
-                    video.src = url;
-                    video.disableRemotePlayback = false;
-                    video.load();
-                    window.LibertyDebug.log('[PlayerTelemetry] native HLS fallback', {
-                        hlsVersion: Hls.version,
-                        source: url,
-                    });
-                    window.LibertyPlayerTelemetry = {
-                        engine: 'native-hls',
-                        hlsVersion: Hls.version,
-                        source: url,
-                        networkQuality: 'unavailable',
-                        estimatedBandwidth: null,
-                        lastFragmentBandwidth: null,
-                        currentLevel: null,
-                        fragmentRetry: null,
-                    };
-                    if (!isWatchRoomLaunch()) video.play().catch(() => {});
-                    return;
-                }
+						hlsEvents.forEach(event => {
+							try {
+								currentHls.off(event);
+							} catch (e) {
+								// 忽略
+							}
+						});
+
+						currentHls.stopLoad();
+						currentHls.detachMedia();
+						currentHls.destroy();
+						window.LibertyDebug.log('✅ HLS 实例已完全销毁');
+					} catch (e) {
+						console.error('HLS销毁失败:', e);
+					} finally {
+						currentHls = null;
+					}
+				}
 
                 // 创建新的HLS实例
                 const hls = new Hls(hlsConfig);
                 currentHls = hls;
                 videoPlayer.hls = hls; // 🔥 绑定到 VideoPlayer 实例
-                const isCurrentPlayback = () => (
-                    playbackGeneration === hlsPlaybackGeneration
-                    && currentHls === hls
-                    && videoPlayer?.hls === hls
-                );
 
                 // 跟踪是否已经显示错误
                 let errorDisplayed = false;
@@ -5055,62 +5211,24 @@ function initPlayerInternal(videoUrl) {
                 let playbackStarted = false;
                 // 跟踪视频是否出现bufferAppendError
                 let bufferAppendErrorCount = 0;
-                let networkRecoveryCount = 0;
-                let mediaRecoveryCount = 0;
-                let lastRecoveryAt = 0;
-                const recoverNetwork = (details = '') => {
-                    if (!isCurrentPlayback() || Date.now() - lastRecoveryAt < 1000) return;
-                    lastRecoveryAt = Date.now();
-                    networkRecoveryCount += 1;
-                    if (networkRecoveryCount <= 3) {
-                        if (/manifestLoadError|manifestLoadTimeOut/i.test(details)) hls.loadSource(url);
-                        hls.startLoad(-1);
-                    } else if (!errorDisplayed) {
-                        errorDisplayed = true;
-                        showError('视频网络连续恢复失败，请尝试切换线路');
-                    }
-                };
-                const runtimeCleanups = [];
-                const addRuntimeListener = (target, eventName, handler, options) => {
-                    target.addEventListener(eventName, handler, options);
-                    runtimeCleanups.push(() => target.removeEventListener(eventName, handler, options));
-                };
-                videoPlayer.hlsRuntimeCleanup = () => {
-                    runtimeCleanups.splice(0).forEach(cleanup => {
-                        try { cleanup(); } catch (error) {}
-                    });
-                };
 
                 // 监听视频播放事件
-                addRuntimeListener(video, 'playing', function () {
+                video.addEventListener('playing', function () {
                     playbackStarted = true;
                     document.getElementById('player-loading').style.display = 'none';
                     document.getElementById('error').style.display = 'none';
                 });
 
                 // 监听视频进度事件
-                addRuntimeListener(video, 'timeupdate', function () {
+                video.addEventListener('timeupdate', function () {
                     if (video.currentTime > 1) {
                         // 视频进度超过1秒，隐藏错误（如果存在）
                         document.getElementById('error').style.display = 'none';
                     }
                 });
 
-                videoPlayer.hlsTelemetry = window.LibertyHlsTelemetry?.create({
-                    hls,
-                    video,
-                    source: url,
-                    isMobile: isMobileDevice,
-                    recoverNetwork,
-                }) || null;
                 hls.loadSource(url);
                 hls.attachMedia(video);
-                window.LibertyPlayer = window.LibertyPlayer || {};
-                window.LibertyPlayer.getDiagnostics = () => ({
-                    hls: videoPlayer?.hlsTelemetry?.getSnapshot?.() || window.LibertyPlayerTelemetry || null,
-                    danmu: lastDanmuMatchInfo,
-                    watchRoom: window.LibertyWatchRoom?.getDiagnostics?.() || null,
-                });
 
                 // ============================================
 				// 🎬 YouTube 风格的智能缓冲管理
@@ -5123,16 +5241,15 @@ function initPlayerInternal(videoUrl) {
 				const pauseHandler = () => {
 					bufferState.pauseStartTime = Date.now();
 				};
-				addRuntimeListener(video, 'pause', pauseHandler);
+				video.addEventListener('pause', pauseHandler);
 
 				// 监听播放事件
 				const playHandler = () => {
 					bufferState.pauseStartTime = 0;
 				};
-				addRuntimeListener(video, 'play', playHandler);
+				video.addEventListener('play', playHandler);
 
 				hls.on(Hls.Events.FRAG_BUFFERED, () => {
-					if (!isCurrentPlayback()) return;
 					const now = Date.now();
 
 					// 每 5 分钟检查一次（降低检查频率）
@@ -5210,7 +5327,6 @@ function initPlayerInternal(videoUrl) {
                 video.disableRemotePlayback = false;
 
                 hls.on(Hls.Events.MANIFEST_PARSED, function () {
-                    if (!isCurrentPlayback()) return;
                     if (isWatchRoomLaunch()) {
                         window.LibertyDebug.log('[WatchRoomAudit] skip hls manifest autoplay for watch room mode', {
                             role: getWatchRoomLaunchRole()
@@ -5223,7 +5339,6 @@ function initPlayerInternal(videoUrl) {
                 });
 
                 hls.on(Hls.Events.ERROR, function (event, data) {
-                    if (!isCurrentPlayback()) return;
                     // 增加错误计数
                     errorCount++;
 
@@ -5231,37 +5346,25 @@ function initPlayerInternal(videoUrl) {
                     if (data.details === 'bufferAppendError') {
                         bufferAppendErrorCount++;
                         // 如果视频已经开始播放，则忽略这个错误
-                        if (playbackStarted && !data.fatal) {
+                        if (playbackStarted) {
                             return;
                         }
 
                         // 如果出现多次bufferAppendError但视频未播放，尝试恢复
-                        if (!data.fatal && bufferAppendErrorCount >= 3) {
-                            // Share the fatal-media budget; append errors must not bypass it.
-                            data = { ...data, fatal: true, type: Hls.ErrorTypes.MEDIA_ERROR };
+                        if (bufferAppendErrorCount >= 3) {
+                            hls.recoverMediaError();
                         }
                     }
 
-                    // fatal 错误无论是否已开始播放都需要受控恢复；限制次数和频率避免恢复风暴。
-                    if (data.fatal) {
-                        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                            recoverNetwork(String(data.details || ''));
-                            return;
-                        }
-                        const recoveryNow = Date.now();
-                        if (recoveryNow - lastRecoveryAt < 1000) return;
-                        lastRecoveryAt = recoveryNow;
+                    // 如果是致命错误，且视频未播放
+                    if (data.fatal && !playbackStarted) {
+                        // 尝试恢复错误
                         switch (data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                                hls.startLoad();
+                                break;
                             case Hls.ErrorTypes.MEDIA_ERROR:
-                                mediaRecoveryCount += 1;
-                                if (mediaRecoveryCount <= 2) {
-                                    if (mediaRecoveryCount === 2) hls.swapAudioCodec();
-                                    videoPlayer.hlsTelemetry?.markMediaRecovery('recoverMediaError');
-                                    hls.recoverMediaError();
-                                } else if (!errorDisplayed) {
-                                    errorDisplayed = true;
-                                    showError('视频解码连续恢复失败，可能与当前格式不兼容');
-                                }
+                                hls.recoverMediaError();
                                 break;
                             default:
                                 // 仅在多次恢复尝试后显示错误
@@ -5276,15 +5379,11 @@ function initPlayerInternal(videoUrl) {
 
                 // 监听分段加载事件
                 hls.on(Hls.Events.FRAG_LOADED, function () {
-                    if (!isCurrentPlayback()) return;
-                    errorCount = 0;
-                    networkRecoveryCount = 0;
                     document.getElementById('player-loading').style.display = 'none';
                 });
 
                 // 监听级别加载事件
                 hls.on(Hls.Events.LEVEL_LOADED, function () {
-                    if (!isCurrentPlayback()) return;
                     document.getElementById('player-loading').style.display = 'none';
                 });
             }
@@ -5301,17 +5400,6 @@ function initPlayerInternal(videoUrl) {
 
     // 🔥 绑定到 VideoPlayer 实例
     videoPlayer.art = art;
-    playerSession.trackArtFullscreenListeners();
-    const sessionArt = art;
-    sessionArt.on('destroy', () => {
-        if (playerSession.destroyed) return;
-        playerSession.destroy();
-        if (videoPlayer === playerSession) {
-            videoPlayer = null;
-            if (art === sessionArt) art = null;
-            if (window.LibertyPlayer?.art === sessionArt) window.LibertyPlayer.art = null;
-        }
-    });
     setupPlayerShortcuts(art);
 
     // artplayer 没有 'fullscreenWeb:enter', 'fullscreenWeb:exit' 等事件
@@ -5331,20 +5419,17 @@ function initPlayerInternal(videoUrl) {
     // 重置计时器，计时器超时时间与 artplayer 保持一致
     function resetHideTimer() {
         clearTimeout(hideTimer);
-        hideTimer = playerSession.setTimer('hideControls', () => {
+        hideTimer = setTimeout(() => {
             hideControls();
         }, Artplayer.CONTROL_HIDE_TIME);
     }
 
     // 处理鼠标离开浏览器窗口
     function handleMouseOut(e) {
-        if (!playerSession.isCurrent()) return;
         if (e && !e.relatedTarget) {
             resetHideTimer();
         }
     }
-
-    playerSession.addLifecycleCleanup(() => document.removeEventListener('mouseout', handleMouseOut));
 
     // 全屏状态切换时注册/移除 mouseout 事件，监听鼠标移出屏幕事件
     // 从而对播放器状态栏进行隐藏倒计时
@@ -5374,7 +5459,7 @@ function initPlayerInternal(videoUrl) {
         }
     }
 
-	playerSession.addArtEventListener('ready', () => {
+	art.on('ready', () => {
 		hideControls();
 		applyInlineVideoAttributes(art.video);
 		refreshPlayerViewport('art-ready');
@@ -5383,7 +5468,7 @@ function initPlayerInternal(videoUrl) {
 
 		// ✅ 监听弹幕插件配置变更，持久化用户设置
 		// ArtPlayer 弹幕插件会在用户通过设置面板修改时触发 artplayerPluginDanmuku:config
-		playerSession.addArtEventListener('artplayerPluginDanmuku:config', (config) => {
+		art.on('artplayerPluginDanmuku:config', (config) => {
 		    const toSave = {};
 		    const previousDisplayArea = danmuDisplayConfig.displayArea;
 		    let shouldRefreshDanmakuLayout = false;
@@ -5414,7 +5499,7 @@ function initPlayerInternal(videoUrl) {
 		    }
 		});
 
-		playerSession.addArtEventListener('artplayerPluginDanmuku:show', () => {
+		art.on('artplayerPluginDanmuku:show', () => {
 		    if (!document.hidden) {
 		        saveDanmuConfig({ visible: true });
 		        logDanmuVisibilityState('user-show', {
@@ -5423,7 +5508,7 @@ function initPlayerInternal(videoUrl) {
 		    }
 		});
 
-		playerSession.addArtEventListener('artplayerPluginDanmuku:hide', () => {
+		art.on('artplayerPluginDanmuku:hide', () => {
 		    if (!document.hidden) {
 		        saveDanmuConfig({ visible: false });
 		        logDanmuVisibilityState('user-hide', {
@@ -5437,7 +5522,7 @@ function initPlayerInternal(videoUrl) {
 		// ============================================
 		let lastSeekTime = 0;
 
-		playerSession.addArtEventListener('seek', (currentTime) => {
+		art.on('seek', (currentTime) => {
 			const now = Date.now();
 
 			// 1️⃣ Netflix 风格：激进清理旧缓冲
@@ -5469,7 +5554,7 @@ function initPlayerInternal(videoUrl) {
 		});
 
 		// 播放器销毁时清理
-		playerSession.addArtEventListener('destroy', () => {
+		art.on('destroy', () => {
 			// HLS 缓冲管理变量会在 destroyHls() 中自动重置
 		});
 
@@ -5483,14 +5568,14 @@ function initPlayerInternal(videoUrl) {
 			}, 180000, true); // 3 分钟，使用 setInterval
 
 			// 2️⃣ 暂停时立即保存
-			playerSession.addArtEventListener('video:pause', () => {
+			art.on('video:pause', () => {
 				if (art.video && !art.video.seeking) {
 					saveToHistory(true);
 				}
 			});
 
 			// 3️⃣ 结束时立即保存
-			playerSession.addArtEventListener('video:ended', () => {
+			art.on('video:ended', () => {
 				saveToHistory(true);
 			});
 
@@ -5500,27 +5585,31 @@ function initPlayerInternal(videoUrl) {
 					saveToHistory(true);
 				}
 			};
-			playerSession.addEventListener(document, 'visibilitychange', visibilityHandler);
+			document.addEventListener('visibilitychange', visibilityHandler);
 
 			// 5️⃣ 页面卸载时立即保存
 			const beforeUnloadHandler = () => {
 				saveToHistory(true);
 			};
-			playerSession.addEventListener(window, 'beforeunload', beforeUnloadHandler);
+			window.addEventListener('beforeunload', beforeUnloadHandler);
 
 			// 清理
-			// Timers and handlers belong to playerSession, not the ArtPlayer destroy event.
+			art.on('destroy', () => {
+				videoPlayer.clearTimer('autoSaveHistory');
+				document.removeEventListener('visibilitychange', visibilityHandler);
+				window.removeEventListener('beforeunload', beforeUnloadHandler);
+			});
 		})();
 
 		// ===== 【双重保障 Pro版】防息屏方案 =====
 		// 🔥 使用 VideoPlayer 实例的防息屏方法
 
 		// 事件绑定
-		playerSession.addArtEventListener('video:play', () => videoPlayer.requestWakeLock());
-		playerSession.addArtEventListener('video:pause', () => {
+		art.on('video:play', () => videoPlayer.requestWakeLock());
+		art.on('video:pause', () => {
 			if (!art.video.seeking) videoPlayer.releaseWakeLock();
 		});
-		playerSession.addArtEventListener('video:ended', () => videoPlayer.releaseWakeLock());
+		art.on('video:ended', () => videoPlayer.releaseWakeLock());
 
 		// 页面可见性处理
 		const handleVisibilityChange = () => {
@@ -5532,10 +5621,15 @@ function initPlayerInternal(videoUrl) {
 				videoPlayer.releaseWakeLock();
 			}
 		};
-		playerSession.addEventListener(document, 'visibilitychange', handleVisibilityChange);
+		document.addEventListener('visibilitychange', handleVisibilityChange);
 
 		// 清理
-		playerSession.addLifecycleCleanup(() => playerSession.releaseWakeLock());
+		art.on('destroy', () => {
+			if (videoPlayer) {
+				videoPlayer.releaseWakeLock();
+			}
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
+		});
 
 		// ============================================
 		// 📱 移动端横屏自动全屏
@@ -5546,7 +5640,7 @@ function initPlayerInternal(videoUrl) {
 			const handleOrientationChange = () => {
 				if (window.matchMedia("(orientation: landscape)").matches) {
 					if (art.playing && !art.fullscreen) {
-						playerSession.setTimer('orientationFullscreen', () => {
+						setTimeout(() => {
 							art.fullscreen = true;
 						}, 300);
 					}
@@ -5567,12 +5661,12 @@ function initPlayerInternal(videoUrl) {
 				};
 			}
 
-			playerSession.addLifecycleCleanup(cleanupMobileOrientationFullscreen);
+			art.on('destroy', cleanupMobileOrientationFullscreen);
 		}
 	});
 
     // 全屏 Web 模式处理
-    playerSession.addArtEventListener('fullscreenWeb', function (isFullScreen) {
+    art.on('fullscreenWeb', function (isFullScreen) {
         logFullscreenDebug('art-fullscreen-web');
         handleFullScreen(isFullScreen, true);
         refreshPlayerViewport('fullscreenWeb');
@@ -5588,14 +5682,14 @@ function initPlayerInternal(videoUrl) {
     });
 
     // 全屏模式处理
-    playerSession.addArtEventListener('fullscreen', function (isFullScreen) {
+    art.on('fullscreen', function (isFullScreen) {
         logFullscreenDebug('art-fullscreen');
         handleFullScreen(isFullScreen, false);
         refreshPlayerViewport('fullscreen');
     });
 
     // ⭐⭐⭐ 在这里添加 video:loadedmetadata 事件处理 ⭐⭐⭐
-    playerSession.addArtEventListener('video:loadedmetadata', function() {
+    art.on('video:loadedmetadata', function() {
         document.getElementById('player-loading').style.display = 'none';
         videoHasEnded = false;
         const urlParams = new URLSearchParams(window.location.search);
@@ -5673,7 +5767,7 @@ function initPlayerInternal(videoUrl) {
     });
 
     // 错误处理
-    playerSession.addArtEventListener('video:error', function (error) {
+    art.on('video:error', function (error) {
         // 如果正在切换视频，忽略错误
         if (window.isSwitchingVideo) {
             return;
@@ -5693,7 +5787,7 @@ function initPlayerInternal(videoUrl) {
     setupMobileTouchSchemeA();
 
     // 视频播放结束事件
-    playerSession.addArtEventListener('video:ended', function () {
+    art.on('video:ended', function () {
         videoHasEnded = true;
 
         clearVideoProgress();
@@ -5701,7 +5795,7 @@ function initPlayerInternal(videoUrl) {
         // 如果自动播放下一集开启，且确实有下一集
         if (autoplayEnabled && currentEpisodeIndex < currentEpisodes.length - 1) {
             // 稍长延迟以确保所有事件处理完成
-            playerSession.setTimer('autoplayNext', () => {
+            setTimeout(() => {
                 // 确认不是因为用户拖拽导致的假结束事件
                 playNextEpisode('autoplay-next');
                 videoHasEnded = false; // 重置标志
@@ -5712,7 +5806,7 @@ function initPlayerInternal(videoUrl) {
     });
 
     // 10秒后如果仍在加载，但不立即显示错误
-    playerSession.setTimer('loadingHint', function () {
+    setTimeout(function () {
         // 如果视频已经播放开始，则不显示错误
         if (art && art.video && art.video.currentTime > 0) {
             return;
@@ -5755,15 +5849,8 @@ function initPlayerInternal(videoUrl) {
 
     window.LibertyDebug.log('✅ 播放器初始化完成');
 // 🔥 输出初始化后的状态
-    playerSession.setTimer('logStatus', () => playerSession.logStatus(), 1000);
-    } catch (error) {
-        playerSession.destroy();
-        if (videoPlayer === playerSession) {
-            videoPlayer = null;
-            art = null;
-            if (window.LibertyPlayer) window.LibertyPlayer.art = null;
-        }
-        throw error;
+    if (videoPlayer) {
+        setTimeout(() => videoPlayer.logStatus(), 1000);
     }
 }
 
@@ -5909,7 +5996,7 @@ function normalizeWatchRoomEpisodeEntries(episodes = currentEpisodes) {
     }));
 }
 
-function buildWatchRoomEpisodeSnapshot(index = currentEpisodeIndex) {
+function buildWatchRoomEpisodeSnapshot(index) {
     const episodeIndex = Number(index);
     const episodes = normalizeWatchRoomEpisodeEntries(currentEpisodes);
     const target = episodes[episodeIndex];
@@ -6013,7 +6100,6 @@ async function loadEpisodeFromWatchRoomSnapshot(snapshot = {}, options = {}) {
         if (videoPlayer) videoPlayer.clearDanmuCache();
 
         await clearCurrentDanmukuPlugin('watch-room-episode');
-        if (options.isCurrent && !options.isCurrent()) return { superseded: true };
 
         const errorElement = document.getElementById('error');
         if (errorElement) errorElement.style.display = 'none';
@@ -6053,14 +6139,14 @@ async function loadEpisodeFromWatchRoomSnapshot(snapshot = {}, options = {}) {
                 videoPlayer.clearTimer('progressSave');
                 videoPlayer.clearTimer('seekDebounce');
             }
-            videoPlayer?.destroyHls();
-            await new Promise(resolve => requestAnimationFrame(() => {
-                if (art && (!options.isCurrent || options.isCurrent())) art.switch = episodeUrl;
-                resolve();
-            }));
+            if (currentHls) {
+                currentHls.stopLoad();
+                currentHls.detachMedia();
+            }
+            requestAnimationFrame(() => {
+                if (art) art.switch = episodeUrl;
+            });
         }
-
-        if (options.isCurrent && !options.isCurrent()) return { superseded: true };
 
         updateEpisodeInfo();
         updateButtonStates();
@@ -6072,18 +6158,17 @@ async function loadEpisodeFromWatchRoomSnapshot(snapshot = {}, options = {}) {
 
         const readyState = await waitForCurrentVideoReady(8000, {
             episodeIndex,
-            episodeUrl,
-            isCurrent: options.isCurrent,
+            episodeUrl
         });
-        if (!readyState.waitedToNewSource) {
+        if (!readyState.ready) {
             throw new Error('Episode video is not ready');
         }
         return readyState;
     } finally {
         if (pendingWatchRoomEpisodeChangeId === changeId) {
             pendingWatchRoomEpisodeChangeId = '';
-            isApplyingWatchRoomEpisodeSnapshot = false;
         }
+        isApplyingWatchRoomEpisodeSnapshot = false;
     }
 }
 
@@ -6140,8 +6225,8 @@ function playEpisode(index, switchReason = 'manual') {
         reason: switchReason,
         oldEpisodeIndex: currentEpisodeIndex,
         newEpisodeIndex: index,
-        oldEpisodeNumber: getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex).episodeNumber,
-        newEpisodeNumber: getDanmuPlaybackContext(currentVideoTitle, index).episodeNumber,
+        oldDisplayEpisode: currentEpisodeIndex + 1,
+        newDisplayEpisode: index + 1,
         totalEpisodes: currentEpisodes?.length,
         targetEpisodeName: getCurrentEpisodeName(index),
         targetEpisodeUrl: url
@@ -6369,12 +6454,12 @@ function saveToHistory(forceImmediate = false) {
 
                 // 只在强制保存或DEBUG模式时输出日志
                 if (DEBUG_HISTORY) {
-                    window.LibertyDebug.log('[历史记录] 更新', { episodeIndex: videoInfo.episodeIndex });
+                    window.LibertyDebug.log(`[历史记录] 更新 第${videoInfo.episodeIndex + 1}集`);
                 }
             } else {
                 history.unshift(videoInfo);
                 if (DEBUG_HISTORY) {
-                    window.LibertyDebug.log('[历史记录] 新增', { episodeIndex: videoInfo.episodeIndex });
+                    window.LibertyDebug.log(`[历史记录] 新增 第${videoInfo.episodeIndex + 1}集`);
                 }
             }
 
@@ -6490,9 +6575,19 @@ function setupMobileTouchSchemeA() {
     const videoElement = art.video;
     if (!videoElement) return;
 
-    const playerSession = videoPlayer;
-    if (!playerSession) return;
-    _mobileTouchInputHandlers?.cleanup();
+    if (_mobileTouchInputHandlers) {
+        const previousTarget = _mobileTouchInputHandlers.target;
+        if (previousTarget) {
+            previousTarget.removeEventListener('touchstart', _mobileTouchInputHandlers.touchstart);
+            previousTarget.removeEventListener('touchmove', _mobileTouchInputHandlers.touchmove);
+            previousTarget.removeEventListener('touchend', _mobileTouchInputHandlers.touchend);
+            previousTarget.removeEventListener('touchcancel', _mobileTouchInputHandlers.touchcancel);
+        }
+        if (_mobileTouchInputHandlers.singleTapTimer) {
+            clearTimeout(_mobileTouchInputHandlers.singleTapTimer);
+        }
+        _mobileTouchInputHandlers = null;
+    }
 
     let lastTapTime = 0;
     let singleTapTimer = null;
@@ -6608,20 +6703,21 @@ function setupMobileTouchSchemeA() {
         _mobileLongPressTriggered = false;
     };
 
-    const removers = [
-        playerSession.addEventListener(videoElement, 'touchstart', touchStartHandler, { passive: true }),
-        playerSession.addEventListener(videoElement, 'touchmove', touchMoveHandler, { passive: true }),
-        playerSession.addEventListener(videoElement, 'touchend', touchEndHandler, { passive: false }),
-        playerSession.addEventListener(videoElement, 'touchcancel', touchCancelHandler),
-    ];
-    const handlers = { cleanup: () => {
-        removers.splice(0).forEach(remove => remove());
-        clearSingleTapTimer();
-        if (_mobileTouchInputHandlers === handlers) _mobileTouchInputHandlers = null;
-        playerSession.lifecycleCleanups.delete(handlers.cleanup);
-    } };
-    _mobileTouchInputHandlers = handlers;
-    playerSession.addLifecycleCleanup(handlers.cleanup);
+    videoElement.addEventListener('touchstart', touchStartHandler, { passive: true });
+    videoElement.addEventListener('touchmove', touchMoveHandler, { passive: true });
+    videoElement.addEventListener('touchend', touchEndHandler, { passive: false });
+    videoElement.addEventListener('touchcancel', touchCancelHandler);
+
+    _mobileTouchInputHandlers = {
+        target: videoElement,
+        touchstart: touchStartHandler,
+        touchmove: touchMoveHandler,
+        touchend: touchEndHandler,
+        touchcancel: touchCancelHandler,
+        get singleTapTimer() {
+            return singleTapTimer;
+        },
+    };
 }
 // 设置移动端长按三倍速播放功能（B站风格）
 function setupLongPressSpeedControl() {
@@ -6632,8 +6728,20 @@ function setupLongPressSpeedControl() {
     const videoElement = art.video;
     if (!videoElement) return;
 
-    const playerSession = videoPlayer;
-    _longPressHandlers?.cleanup();
+    // 🔥 先清理之前绑定的监听器，防止切集时叠加
+    if (_longPressHandlers) {
+        const previousTarget = _longPressHandlers.target || playerElement;
+        previousTarget.removeEventListener('touchstart', _longPressHandlers.touchstart);
+        previousTarget.removeEventListener('touchmove', _longPressHandlers.touchmove);
+        previousTarget.removeEventListener('touchend', _longPressHandlers.touchend);
+        previousTarget.removeEventListener('touchcancel', _longPressHandlers.touchcancel);
+        // 同时清理 video 上的监听器
+        if (art && art.video) {
+            if (_longPressHandlers.videoPause) art.video.removeEventListener('pause', _longPressHandlers.videoPause);
+            if (_longPressHandlers.videoEnded) art.video.removeEventListener('ended', _longPressHandlers.videoEnded);
+        }
+        _longPressHandlers = null;
+    }
 
     let originalPlaybackRate = 1.0;
     let isLongPress = false;
@@ -6698,18 +6806,16 @@ function setupLongPressSpeedControl() {
     }
 
     // 禁用移动端右键菜单（和原来一样）
-    const previousContextMenu = playerElement.oncontextmenu;
-    const contextMenuHandler = () => {
+    playerElement.oncontextmenu = () => {
         if (isMobileDevice) {
             return false;
         }
         return true;
     };
-    playerElement.oncontextmenu = contextMenuHandler;
 
     // 🔥 用具名函数，方便后续 removeEventListener
     const _touchstartHandler = function (e) {
-        if (videoElement.paused || isNonCenterTouchTarget(e.target)) {
+        if (art.video.paused || isNonCenterTouchTarget(e.target)) {
             longPressEligible = false;
             _mobileLongPressTriggered = false;
             return;
@@ -6717,11 +6823,11 @@ function setupLongPressSpeedControl() {
 
         longPressEligible = true;
         _mobileLongPressTriggered = false;
-        originalPlaybackRate = videoElement.playbackRate;
+        originalPlaybackRate = art.video.playbackRate;
 
-        playerSession.setTimer('longPress', () => {
-            if (longPressEligible && !videoElement.paused) {
-                videoElement.playbackRate = 3.0;
+        videoPlayer.setTimer('longPress', () => {
+            if (longPressEligible && !art.video.paused) {
+                art.video.playbackRate = 3.0;
                 isLongPress = true;
                 _mobileLongPressTriggered = true;
                 showSpeedIndicator(3.0);
@@ -6738,7 +6844,7 @@ function setupLongPressSpeedControl() {
 
         if (!isLongPress) {
             longPressEligible = false;
-            playerSession.clearTimer('longPress');
+            videoPlayer.clearTimer('longPress');
         }
 
         if (isLongPress) {
@@ -6749,11 +6855,11 @@ function setupLongPressSpeedControl() {
     const _touchendHandler = function (e) {
         if (!longPressEligible && !isLongPress) return;
 
-        playerSession.clearTimer('longPress');
+        videoPlayer.clearTimer('longPress');
         const didHandleLongPress = isLongPress;
 
         if (didHandleLongPress) {
-            videoElement.playbackRate = originalPlaybackRate;
+            art.video.playbackRate = originalPlaybackRate;
             isLongPress = false;
             hideSpeedIndicator();
 
@@ -6770,33 +6876,48 @@ function setupLongPressSpeedControl() {
     const _touchcancelHandler = function () {
         if (!longPressEligible && !isLongPress) return;
 
-        playerSession.clearTimer('longPress');
+        videoPlayer.clearTimer('longPress');
 
         if (isLongPress) {
-            videoElement.playbackRate = originalPlaybackRate;
+            art.video.playbackRate = originalPlaybackRate;
             isLongPress = false;
             hideSpeedIndicator();
         }
 
         longPressEligible = false;
         _mobileLongPressTriggered = false;
+    };
+
+    // 🔥 注册监听器
+    videoElement.addEventListener('touchstart', _touchstartHandler, { passive: true });
+    videoElement.addEventListener('touchmove', _touchmoveHandler, { passive: false });
+    videoElement.addEventListener('touchend', _touchendHandler);
+    videoElement.addEventListener('touchcancel', _touchcancelHandler);
+
+    // 🔥 保存引用，供下次调用时清理
+    _longPressHandlers = {
+        target: videoElement,
+        touchstart: _touchstartHandler,
+        touchmove: _touchmoveHandler,
+        touchend: _touchendHandler,
+        touchcancel: _touchcancelHandler
     };
 
     // 视频暂停/结束时重置，使用具名函数防止切集叠加
     const _pauseResetHandler = function () {
         if (isLongPress) {
-            videoElement.playbackRate = originalPlaybackRate;
+            art.video.playbackRate = originalPlaybackRate;
             isLongPress = false;
             hideSpeedIndicator();
         }
         longPressEligible = false;
         _mobileLongPressTriggered = false;
-        playerSession.clearTimer('longPress');
+        videoPlayer.clearTimer('longPress');
     };
 
     const _endedResetHandler = function () {
         if (isLongPress) {
-            videoElement.playbackRate = originalPlaybackRate;
+            art.video.playbackRate = originalPlaybackRate;
             isLongPress = false;
             hideSpeedIndicator();
         }
@@ -6804,31 +6925,12 @@ function setupLongPressSpeedControl() {
         _mobileLongPressTriggered = false;
     };
 
-    const removers = [
-        playerSession.addEventListener(videoElement, 'touchstart', _touchstartHandler, { passive: true }),
-        playerSession.addEventListener(videoElement, 'touchmove', _touchmoveHandler, { passive: false }),
-        playerSession.addEventListener(videoElement, 'touchend', _touchendHandler),
-        playerSession.addEventListener(videoElement, 'touchcancel', _touchcancelHandler),
-        playerSession.addEventListener(videoElement, 'pause', _pauseResetHandler),
-        playerSession.addEventListener(videoElement, 'ended', _endedResetHandler),
-    ];
-    const handlers = { cleanup: () => {
-        removers.splice(0).forEach(remove => remove());
-        playerSession.clearTimer('longPress');
-        if (isLongPress) videoElement.playbackRate = originalPlaybackRate;
-        isLongPress = false;
-        longPressEligible = false;
-        speedIndicator?.remove();
-        speedIndicator = null;
-        if (playerElement.oncontextmenu === contextMenuHandler) playerElement.oncontextmenu = previousContextMenu;
-        if (_longPressHandlers === handlers) {
-            _longPressHandlers = null;
-            _mobileLongPressTriggered = false;
-        }
-        playerSession.lifecycleCleanups.delete(handlers.cleanup);
-    } };
-    _longPressHandlers = handlers;
-    playerSession.addLifecycleCleanup(handlers.cleanup);
+    art.video.addEventListener('pause', _pauseResetHandler);
+    art.video.addEventListener('ended', _endedResetHandler);
+
+    // 保存引用到 _longPressHandlers 方便下次清理
+    _longPressHandlers.videoPause = _pauseResetHandler;
+    _longPressHandlers.videoEnded = _endedResetHandler;
 }
 
 // 清除视频进度记录
@@ -6979,49 +7081,34 @@ async function testVideoSourceSpeed(sourceKey, vodId) {
             return { speed: -1, error: '链接无效' };
         }
 
-        // 请求实际播放入口；HEAD/no-cors 的 opaque 握手不能代表 HLS 首片速度。
+        // 测试视频链接响应时间
         const videoTestStart = performance.now();
-        let timeoutId = null;
         try {
-            const controller = new AbortController();
-            timeoutId = window.setTimeout(() => controller.abort(), 5000);
             const videoResponse = await fetch(firstEpisodeUrl, {
-                method: 'GET',
-                headers: { Range: 'bytes=0-65535' },
-                cache: 'no-store',
-                signal: controller.signal,
+                method: 'HEAD',
+                mode: 'no-cors',
+                cache: 'no-cache',
+                signal: AbortSignal.timeout(5000) // 5秒超时
             });
-            if (!videoResponse.ok) throw new Error(`HTTP ${videoResponse.status}`);
-            const reader = videoResponse.body?.getReader?.();
-            const firstChunk = reader ? await reader.read() : { value: null };
-            await reader?.cancel?.().catch(() => {});
+
             const videoTestEnd = performance.now();
             const totalTime = videoTestEnd - startTime;
-            const mediaTime = Math.max(1, videoTestEnd - videoTestStart);
-            const bytes = Number(firstChunk?.value?.byteLength || 0);
 
+            // 返回总响应时间（毫秒）
             return { 
                 speed: Math.round(totalTime),
                 episodes: data.episodes.length,
-                error: null,
-                playbackEvidence: true,
-                firstMediaResponseMs: Math.round(mediaTime),
-                sampledBytes: bytes,
-                sampledBandwidth: bytes ? Math.round((bytes * 8 * 1000) / mediaTime) : 0,
-                note: '播放入口',
+                error: null 
             };
         } catch (videoError) {
-            // CORS 等原因无法采样时只保留 API 响应，并明确降级。
+            // 如果视频链接测试失败，只返回API响应时间
             const apiTime = performance.now() - startTime;
             return { 
                 speed: Math.round(apiTime),
                 episodes: data.episodes.length,
                 error: null,
-                playbackEvidence: false,
-                note: '仅API响应'
+                note: 'API响应' 
             };
-        } finally {
-            if (timeoutId) window.clearTimeout(timeoutId);
         }
 
     } catch (error) {
@@ -7172,11 +7259,7 @@ async function showSwitchResourceModal() {
         if (isCurrentA && !isCurrentB) return -1;
         if (!isCurrentA && isCurrentB) return 1;
 
-        // 有实际媒体请求证据的结果优先；仅 API 延迟不再伪装成播放速度。
-        const evidenceA = speedResults[keyA]?.playbackEvidence ? 1 : 0;
-        const evidenceB = speedResults[keyB]?.playbackEvidence ? 1 : 0;
-        if (evidenceA !== evidenceB) return evidenceB - evidenceA;
-
+        // 其余按照速度排序，速度快的在前面（速度为-1表示失败，排到最后）
         const speedA = speedResults[keyA]?.speed || 99999;
         const speedB = speedResults[keyB]?.speed || 99999;
 
@@ -7457,12 +7540,6 @@ async function switchDanmuSource(animeId, encodedSourceName) {
     }
 
     const sourceName = encodedSourceName ? decodeURIComponent(encodedSourceName) : '未知源';
-    const reloadToken = ++danmuReloadToken;
-    if (_danmuFetchController) _danmuFetchController.cancelled = true;
-    const selectedArt = art;
-    const manualContext = getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex);
-    const isCurrent = () => art === selectedArt && reloadToken === danmuReloadToken
-        && manualContext.videoKey === getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex).videoKey;
 
     const prevAnimeId = currentDanmuAnimeId;
     const prevSourceName = currentDanmuSourceName;
@@ -7491,9 +7568,9 @@ async function switchDanmuSource(animeId, encodedSourceName) {
 
         const danmukuPlugin = art.plugins.artplayerPluginDanmuku;
         await clearCurrentDanmukuPlugin('manual-source');
-        if (!isCurrent()) return;
 
         const cleanTitle = getDanmuSearchKeyword(currentVideoTitle);
+        const manualContext = getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex);
         const manualMatchQuery = buildDanmuKeyword(manualContext);
         const manualCurrentParsed = parseDanmuCandidateTitle(currentVideoTitle);
         const manualCandidateParsed = parseDanmuCandidateTitle(sourceName);
@@ -7521,7 +7598,6 @@ async function switchDanmuSource(animeId, encodedSourceName) {
         }
         
         const episodes = await getAnimeEpisodesWithCache(animeId, cleanTitle);
-        if (!isCurrent()) return;
         
 
         if (!episodes || episodes.length === 0) {
@@ -7536,15 +7612,13 @@ async function switchDanmuSource(animeId, encodedSourceName) {
         
 
         if (!matchedEpisode) {
-            showToast(`无法为第${manualContext.episodeNumber ?? '?'}集匹配弹幕`, 'warning');
+            showToast(`无法为第${currentEpisodeIndex + 1}集匹配弹幕`, 'warning');
             currentDanmuAnimeId = prevAnimeId;
             currentDanmuSourceName = prevSourceName;
             currentSessionDanmuSource = prevSessionDanmuSource;
             danmuDebugWarn('[DanmuDebug] episode switch danmaku failed', {
                 reason: 'manual-source',
-                episodeIndex: currentEpisodeIndex,
-                episodeNumber: manualContext.episodeNumber,
-                episodeSource: manualContext.episodeSource,
+                displayEpisode: currentEpisodeIndex + 1,
                 failReason: 'manual-source-episode-not-matched',
                 matchMode: 'manual-source',
                 fallbackUsed: false,
@@ -7553,8 +7627,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
             return;
         }
 
-        const newDanmuku = await fetchDanmaku(matchedEpisode.episodeId, currentEpisodeIndex, { animeId });
-        if (!isCurrent()) return;
+        const newDanmuku = await fetchDanmaku(matchedEpisode.episodeId, currentEpisodeIndex);
 
         if (!newDanmuku || newDanmuku.length === 0) {
             showToast('该弹幕源暂无弹幕', 'warning');
@@ -7582,15 +7655,15 @@ async function switchDanmuSource(animeId, encodedSourceName) {
                 failReason: 'empty-danmaku'
             });
         } else {
-            currentSessionDanmuSource = createDanmuSessionSource({
+            currentSessionDanmuSource = {
                 animeId,
                 animeTitle: sourceName,
                 sourceName,
                 selectedBy: 'manual',
                 episodes,
-                confidence: 'exact',
-                confidenceScore: 100,
-            }, manualContext);
+                episodeCount: episodes.length,
+                updatedAt: Date.now()
+            };
             updateLastDanmuMatchInfo({
                 reason: 'manual-source',
                 matchMode: 'manual-source',
@@ -7615,7 +7688,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
                 sourceName
             });
             danmuDebugLog('[DanmuDebug] apply danmaku to artplayer', {
-                episodeNumber: getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex).episodeNumber,
+                displayEpisode: currentEpisodeIndex + 1,
                 rawCount: lastDanmuFetchStats?.rawCount || 0,
                 validCount: lastDanmuFetchStats?.validCount || 0,
                 convertedCount: lastDanmuFetchStats?.convertedCount || 0,
@@ -7630,7 +7703,7 @@ async function switchDanmuSource(animeId, encodedSourceName) {
 
             showToast(`✓ 已切换到: ${sourceName} (${newDanmuku.length}条)`, 'success');
             danmuDebugLog('[DanmuDebug] apply danmaku to artplayer success', {
-                episodeNumber: getDanmuPlaybackContext(currentVideoTitle, currentEpisodeIndex).episodeNumber,
+                displayEpisode: currentEpisodeIndex + 1,
                 loadedCount: newDanmuku.length
             });
             logDanmuEpisodeSummary('manual-source', {
@@ -7647,7 +7720,6 @@ async function switchDanmuSource(animeId, encodedSourceName) {
         }
 
     } catch (error) {
-        if (!isCurrent()) return;
         console.error('切换弹幕源失败:', error);
         showToast('切换弹幕源失败', 'error');
 
@@ -7657,15 +7729,15 @@ async function switchDanmuSource(animeId, encodedSourceName) {
     } finally {
         
         // 保持当前播放时间，防止弹幕切换导致轻微跳动
-        if (isCurrent() && art && art.video && currentTime > 0 && Math.abs(art.video.currentTime - currentTime) > 2) {
+        if (art && art.video && currentTime > 0 && Math.abs(art.video.currentTime - currentTime) > 2) {
             art.currentTime = currentTime;
         }
 
         // 如果切换前视频正在播放，就自动恢复播放
-        if (shouldResume && isCurrent()) {
+        if (shouldResume) {
             setTimeout(() => {
                 try {
-                    if (isCurrent() && art && art.video && art.video.paused) {
+                    if (art && art.video && art.video.paused) {
                         const playResult = art.play();
                         if (playResult && typeof playResult.catch === 'function') {
                             playResult.catch(() => {

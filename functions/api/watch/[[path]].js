@@ -3,31 +3,6 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
   'Access-Control-Allow-Headers': '*',
 };
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const rateLimitBuckets = new Map();
-
-function getClientAddress(request) {
-  return request.headers.get('CF-Connecting-IP')
-    || request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim()
-    || 'unknown';
-}
-
-function isRateLimited(request, bucket, limit) {
-  const timestamp = Date.now();
-  const key = `${bucket}:${getClientAddress(request)}`;
-  const record = rateLimitBuckets.get(key);
-  if (!record || timestamp - record.startedAt >= RATE_LIMIT_WINDOW_MS) {
-    rateLimitBuckets.set(key, { startedAt: timestamp, count: 1 });
-    return false;
-  }
-  record.count += 1;
-  if (rateLimitBuckets.size > 2000) {
-    for (const [entryKey, entry] of rateLimitBuckets) {
-      if (timestamp - entry.startedAt >= RATE_LIMIT_WINDOW_MS) rateLimitBuckets.delete(entryKey);
-    }
-  }
-  return record.count > limit;
-}
 
 function withCors(headers = new Headers()) {
   const nextHeaders = new Headers(headers);
@@ -113,7 +88,6 @@ async function createRoom(request, env) {
         status: data.status || 'waiting',
         role: data.role || 'host',
         clientId: data.hostId || hostId,
-        resumeToken: data.resumeToken || '',
         maxMembers: data.maxMembers || 10,
       });
     }
@@ -191,7 +165,6 @@ async function endRoom(request, env) {
     },
     body: JSON.stringify({
       clientId: body.clientId || '',
-      resumeToken: body.resumeToken || '',
     }),
   });
 
@@ -221,23 +194,14 @@ export async function onRequest(context) {
 
   try {
     if (method === 'POST' && path === 'create') {
-      if (isRateLimited(request, 'create', 6)) {
-        return jsonResponse({ success: false, error: 'RATE_LIMITED' }, 429);
-      }
       return createRoom(request, env);
     }
 
     if (method === 'GET' && path === 'state') {
-      if (isRateLimited(request, 'state', 30)) {
-        return jsonResponse({ success: false, error: 'RATE_LIMITED' }, 429);
-      }
       return getRoomState(request, env);
     }
 
     if (method === 'GET' && path === 'ws') {
-      if (isRateLimited(request, 'ws', 20)) {
-        return jsonResponse({ success: false, error: 'RATE_LIMITED' }, 429);
-      }
       return connectWebSocket(request, env);
     }
 
