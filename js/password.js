@@ -113,8 +113,11 @@ function showPasswordModal() {
     const passwordModal = document.getElementById('passwordModal');
     if (passwordModal) {
         // 防止出现豆瓣区域滚动条
-        document.getElementById('doubanArea').classList.add('hidden');
-        document.getElementById('passwordCancelBtn').classList.add('hidden');
+        // 首页有豆瓣区域/取消按钮；播放器页复用密码模块但不包含这两个元素。
+        const doubanArea = document.getElementById('doubanArea');
+        const cancelButton = document.getElementById('passwordCancelBtn');
+        if (doubanArea) doubanArea.classList.add('hidden');
+        if (cancelButton) cancelButton.classList.add('hidden');
 
         // 检查是否需要强制设置密码
         if (isPasswordRequired()) {
@@ -175,8 +178,9 @@ function hidePasswordModal() {
         passwordModal.style.display = 'none';
 
         // 如果启用豆瓣区域则显示豆瓣区域
-        if (localStorage.getItem('doubanEnabled') === 'true') {
-            document.getElementById('doubanArea').classList.remove('hidden');
+        const doubanArea = document.getElementById('doubanArea');
+        if (doubanArea && localStorage.getItem('doubanEnabled') === 'true') {
+            doubanArea.classList.remove('hidden');
             initDouban();
         }
     }

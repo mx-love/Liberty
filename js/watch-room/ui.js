@@ -23,11 +23,23 @@
     const SESSION_ROOM_ID_KEY = 'watchRoomId';
     const SESSION_ROOM_ROLE_KEY = 'watchRoomRole';
     const SESSION_ROOM_CLIENT_ID_KEY = 'watchRoomClientId';
+    const SESSION_ROOM_RESUME_TOKEN_KEY = 'watchRoomResumeToken';
     const SESSION_REDIRECTING_KEY = 'watchRoomRedirecting';
 
     let activeRoom = null;
     let socket = null;
     let heartbeatTimer = null;
+    let reconnectTimer = null;
+    let reconnectAttempt = 0;
+    let reconnectCount = 0;
+    let socketConnectSerial = 0;
+    let intentionalSocketClose = false;
+    let serverClockOffsetMs = 0;
+    let serverRttMs = 0;
+    let clockSampleCount = 0;
+    let clockEstimate = {};
+    let participantResumeToken = '';
+    const pendingHeartbeatSamples = new Map();
     let hostSyncTimer = null;
     let hostSeekDebounceTimer = null;
     let playerSyncSetupTimer = null;
@@ -54,6 +66,7 @@
     let waitTargetTime = 0;
     let watchRoomPlayerAdapter = null;
     let watchRoomController = null;
+    let controllerInitializationFailed = false;
     let pageExitHandlerBound = false;
     let watchRoomEntryMode = 'create';
 
@@ -61,6 +74,9 @@
     const HOST_SEEK_DEBOUNCE = 300;
     const REMOTE_SYNC_LOCK_MS = 500;
     const VIEWER_INITIAL_SYNC_DELAY = 900;
+    const RECONNECT_BASE_DELAY_MS = 1000;
+    const RECONNECT_MAX_DELAY_MS = 15000;
+    const HEARTBEAT_INTERVAL_MS = 10000;
 
     function showMessage(message, type = 'info') {
         if (typeof window.showToast === 'function') {
@@ -96,21 +112,32 @@
 
     function getWatchRoomController() {
         if (watchRoomController) return watchRoomController;
+        if (controllerInitializationFailed) return null;
 
         const PlayerAdapter = window.LibertyWatchRoom?.PlayerAdapter;
         const Controller = window.LibertyWatchRoom?.Controller;
         if (!PlayerAdapter || !Controller) return null;
 
-        watchRoomPlayerAdapter = watchRoomPlayerAdapter || new PlayerAdapter();
-        watchRoomController = new Controller({
-            player: watchRoomPlayerAdapter,
-            socketSend: sendSocketMessage,
-            socketClose: closeSocket,
-            render: syncLegacyStateFromController,
-            toast: showMessage,
-            onEnded: handleControllerRoomEnded,
-            onError: handleControllerRoomError,
-        });
+        try {
+            watchRoomPlayerAdapter = watchRoomPlayerAdapter || new PlayerAdapter();
+            watchRoomController = new Controller({
+                player: watchRoomPlayerAdapter,
+                socketSend: sendSocketMessage,
+                socketClose: closeSocket,
+                render: syncLegacyStateFromController,
+                toast: showMessage,
+                onEnded: handleControllerRoomEnded,
+                onError: handleControllerRoomError,
+            });
+        } catch (error) {
+            watchRoomPlayerAdapter?.cancelPending?.();
+            watchRoomPlayerAdapter?.offLocalListeners?.();
+            watchRoomPlayerAdapter?.stopBufferingObserver?.();
+            watchRoomPlayerAdapter = null;
+            controllerInitializationFailed = true;
+            window.LibertyDebug.warn('[WatchRoom] Controller initialization failed; using legacy fallback', error);
+            return null;
+        }
         return watchRoomController;
     }
 
@@ -125,7 +152,10 @@
             participants: Array.isArray(room.participants) ? room.participants : [],
             participantCount: room.participantCount || room.participantsCount || room.participants?.length || 0,
             maxMembers: room.maxMembers || 10,
-            connected: Boolean(room.roomId),
+            connected: Boolean(room.roomId) && !['connecting', 'reconnecting'].includes(room.connectionState),
+            connectionState: room.connectionState || (room.roomId ? 'connected' : 'disconnected'),
+            rttMs: serverRttMs,
+            clockOffsetMs: serverClockOffsetMs,
         });
     }
 
@@ -138,6 +168,7 @@
             clientId: viewModel.clientId || activeRoom?.clientId || '',
             role: viewModel.role || activeRoom?.role || '',
             status: viewModel.status || activeRoom?.status || 'waiting',
+            connectionState: viewModel.connectionState || activeRoom?.connectionState,
             participants: Array.isArray(viewModel.participants) ? viewModel.participants : activeRoom?.participants || [],
             participantCount: Array.isArray(viewModel.participants)
                 ? (viewModel.participantCount || viewModel.participants.length)
@@ -329,12 +360,16 @@
         if (room.clientId !== undefined) {
             writeSessionValue(SESSION_ROOM_CLIENT_ID_KEY, room.clientId);
         }
+        if (participantResumeToken) {
+            writeSessionValue(SESSION_ROOM_RESUME_TOKEN_KEY, participantResumeToken);
+        }
     }
 
     function clearStoredRoomSession() {
         removeSessionValue(SESSION_ROOM_ID_KEY);
         removeSessionValue(SESSION_ROOM_ROLE_KEY);
         removeSessionValue(SESSION_ROOM_CLIENT_ID_KEY);
+        removeSessionValue(SESSION_ROOM_RESUME_TOKEN_KEY);
         removeSessionValue('watchRoomMediaSnapshot');
         removeSessionValue('watchRoomPlaybackSnapshot');
     }
@@ -656,6 +691,8 @@
     }
 
     function getRoomStatusText() {
+        if (activeRoom?.connectionState === 'reconnecting') return '正在重连';
+        if (activeRoom?.hostConnectionState === 'reconnecting') return '房主正在重连';
         if (activeRoom?.status === 'waiting') return '等待开播';
         if (activeRoom?.status === 'starting') return '准备开播';
         if (activeRoom?.status === 'playing') return '一起看中';
@@ -671,7 +708,7 @@
     }
 
     function areAllViewersReady() {
-        const viewers = getViewers();
+        const viewers = getViewers().filter((participant) => participant.connected !== false);
         return viewers.length === 0 || viewers.every((participant) => participant.ready);
     }
 
@@ -698,7 +735,11 @@
 
         const rows = participants.map((participant) => {
             const label = participant.role === 'host' ? '房主' : '观众';
-            const readyText = participant.ready ? '已准备' : '未准备';
+            const readyText = participant.connected === false
+                ? '正在重连'
+                : participant.buffering
+                    ? '正在缓冲'
+                    : participant.ready ? '已准备' : '未准备';
             return `<div class="watch-room-member-row">
                 <span>${escapeHtml(participant.name || participant.id || label)}</span>
                 <strong>${escapeHtml(label)} · ${readyText}</strong>
@@ -888,12 +929,13 @@
         }
         updatePlayerWatchRoomButton();
         setupPlayerSyncForRoom();
-        if (isPlayerPage() && activeRoom) {
+        if (isPlayerPage() && activeRoom && !watchRoomController) {
             bindPlaybackGateToCurrentVideo();
         }
         if (
             isPlayerPage()
             && activeRoom?.role === 'viewer'
+            && !watchRoomController
             && !viewerInitialSyncComplete
             && pendingInitialPlayback
             && !viewerInitialSyncTimer
@@ -932,11 +974,9 @@
         playerSyncVideo = video;
         playerSyncRole = activeRoom.role;
 
+        if (getWatchRoomController()) return;
         bindPlaybackGateToCurrentVideo();
         if (activeRoom.role === 'host') {
-            if (getWatchRoomController()) {
-                return;
-            }
             setupHostPlaybackSync(video);
         } else if (activeRoom.role === 'viewer') {
             setupViewerWaitingGuard(video);
@@ -1146,6 +1186,10 @@
             }]
         });
 
+        if (getWatchRoomController()) {
+            watchRoomPlayerAdapter?.pause?.();
+            return;
+        }
         bindPlaybackGateToCurrentVideo();
         enforceWatchRoomPause('host_enter_waiting');
         window.setTimeout(() => {
@@ -1843,9 +1887,11 @@
                     ready: true
                 }]
             };
+            participantResumeToken = String(data.resumeToken || '');
+            if (!participantResumeToken) throw new Error('Missing host resume credential');
             setActiveRoom(room);
             persistRoomSession(room);
-            connectRoomSocket(data.roomId, 'host', data.clientId || data.hostId);
+            connectRoomSocket(data.roomId, 'host', data.clientId || data.hostId, participantResumeToken);
             renderWatchRoomPanel();
             ensureWatchRoomModal().classList.remove('hidden');
         } catch (error) {
@@ -1979,41 +2025,124 @@
         }
     }
 
-    function connectRoomSocket(roomId, role, clientId = '') {
-        closeSocket(false);
+    function connectRoomSocket(roomId, role, clientId = '', resumeToken = '') {
+        if (!clientId) {
+            clientId = `viewer_${crypto.randomUUID()}`;
+            if (activeRoom?.roomId === roomId) activeRoom.clientId = clientId;
+        }
+        const previous = socket;
+        socket = null;
+        if (previous) {
+            try { previous.close(1000, 'replaced'); } catch (error) {}
+        }
+        intentionalSocketClose = false;
+        const serial = ++socketConnectSerial;
+        const connection = new WebSocket(buildWebSocketUrl(roomId, role, clientId));
+        socket = connection;
 
-        socket = new WebSocket(buildWebSocketUrl(roomId, role, clientId));
-
-        socket.addEventListener('open', () => {
-            startHeartbeat();
+        connection.addEventListener('open', () => {
+            if (socket !== connection || serial !== socketConnectSerial) return;
+            const recovered = reconnectAttempt > 0;
+            if (reconnectTimer) {
+                window.clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
+            if (activeRoom) {
+                setActiveRoom({
+                    ...activeRoom,
+                    connectionState: 'connecting',
+                    reconnectCount,
+                });
+            }
+            // Never pass this credential through debug/logging helpers. New viewers use an empty token.
+            connection.send(JSON.stringify({ type: 'client:resume', roomId, clientId, resumeToken }));
             if (role === 'viewer') {
                 window.LibertyDebug.log('[WatchRoom] viewer socket connected', {
                     roomId,
                     role,
-                    clientId: clientId || '(server-generated)'
+                    clientId: clientId || '(server-generated)',
+                    recovered,
                 });
                 window.LibertyDebug.log('[WatchRoom] join room success', roomId);
-                showMessage('已连接一起看房间', 'success');
+                if (!recovered) showMessage('已连接一起看房间', 'success');
             }
         });
 
-        socket.addEventListener('message', (event) => {
+        connection.addEventListener('message', (event) => {
+            if (socket !== connection || serial !== socketConnectSerial) return;
             handleSocketMessage(event.data);
         });
 
-        socket.addEventListener('close', () => {
+        connection.addEventListener('close', (event) => {
+            if (socket !== connection || serial !== socketConnectSerial) return;
+            socket = null;
             stopHeartbeat();
-        });
-
-        socket.addEventListener('error', () => {
-            if (role === 'viewer') {
-                showMessage('房间不存在或已结束', 'error');
+            if (event.code === 4003 || event.reason === 'replaced') {
                 clearRoomState();
+                showMessage(event.code === 4003 ? '房间身份认证失败，请重新加入或创建房间' : '房间已在另一连接中打开', 'warning');
                 return;
             }
-            showMessage('一起看连接失败', 'error');
-            clearRoomState();
+            if (!intentionalSocketClose && activeRoom?.roomId === roomId) {
+                window.LibertyDebug.warn('[WatchRoom] socket disconnected', {
+                    code: event.code,
+                    reason: event.reason,
+                    roomId,
+                    role,
+                });
+                scheduleSocketReconnect(roomId, role, clientId || activeRoom?.clientId || '', participantResumeToken || resumeToken);
+            }
         });
+
+        connection.addEventListener('error', () => {
+            window.LibertyDebug.warn('[WatchRoom] socket error; waiting for close/reconnect', {
+                roomId,
+                role,
+            });
+        });
+    }
+
+    function scheduleSocketReconnect(roomId, role, clientId, resumeToken = '') {
+        if (intentionalSocketClose || reconnectTimer || activeRoom?.roomId !== roomId
+            || activeRoom.status === 'ended') return;
+        const baseDelay = Math.min(
+            RECONNECT_MAX_DELAY_MS,
+            RECONNECT_BASE_DELAY_MS * (2 ** Math.min(reconnectAttempt, 4))
+        );
+        const delay = Math.min(RECONNECT_MAX_DELAY_MS, Math.round(baseDelay * (1 + Math.random() * 0.25)));
+        const serial = socketConnectSerial;
+        reconnectAttempt += 1;
+        reconnectCount += 1;
+        setActiveRoom({
+            ...activeRoom,
+            connectionState: 'reconnecting',
+            reconnectCount,
+        });
+        reconnectTimer = window.setTimeout(() => {
+            reconnectTimer = null;
+            if (intentionalSocketClose || activeRoom?.roomId !== roomId || serial !== socketConnectSerial) return;
+            connectRoomSocket(roomId, role, clientId, resumeToken);
+        }, delay);
+        window.LibertyDebug.log('[WatchRoom] reconnect scheduled', {
+            attempt: reconnectAttempt,
+            delay,
+            roomId,
+            role,
+        });
+    }
+
+    function retrySocketNow() {
+        if (!activeRoom?.roomId || intentionalSocketClose) return;
+        if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) return;
+        if (reconnectTimer) {
+            window.clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+        connectRoomSocket(
+            activeRoom.roomId,
+            activeRoom.role,
+            activeRoom.clientId || '',
+            participantResumeToken
+        );
     }
 
     function handleSocketMessage(rawData) {
@@ -2021,6 +2150,55 @@
         try {
             message = JSON.parse(rawData);
         } catch (error) {
+            return;
+        }
+
+        if (message.type === 'client:authenticated') {
+            const token = message.payload?.resumeToken;
+            if (activeRoom && typeof token === 'string' && /^[a-f0-9]{64}$/.test(token)) {
+                participantResumeToken = token;
+                activeRoom.clientId = message.clientId || activeRoom.clientId;
+                persistRoomSession(activeRoom);
+            }
+            return;
+        }
+
+        if (message.type === 'room:state') {
+            reconnectAttempt = 0;
+            startHeartbeat();
+            sendSocketMessage({ type: 'client:heartbeat' });
+        }
+
+        if (message.type === 'server:pong') {
+            const payload = message.payload || {};
+            const clientSentAt = Number(payload.clientSentAt || 0);
+            const monotonicSentAt = pendingHeartbeatSamples.get(clientSentAt);
+            pendingHeartbeatSamples.delete(clientSentAt);
+            if (!Number.isFinite(monotonicSentAt)) return;
+            const sample = window.LibertyWatchRoomClock?.updateClockEstimate(clockEstimate, {
+                rttMs: Math.max(0, performance.now() - monotonicSentAt),
+                serverSentAt: Number(payload.serverSentAt), localNow: Date.now(), monotonicNow: performance.now(),
+            });
+            if (!sample?.accepted) return;
+            clockEstimate = sample;
+            serverRttMs = sample.rttMs;
+            serverClockOffsetMs = sample.offsetMs;
+            clockSampleCount = sample.count;
+            watchRoomPlayerAdapter?.updateClockSync?.({
+                offsetMs: serverClockOffsetMs,
+                rttMs: serverRttMs,
+                serverNow: sample.serverNow,
+            });
+            watchRoomController?.updateClockTelemetry?.({
+                rttMs: serverRttMs,
+                clockOffsetMs: serverClockOffsetMs,
+            });
+            window.LibertyDebug.log('[WatchRoomTelemetry] clock sync', {
+                rttMs: Math.round(serverRttMs),
+                clockOffsetMs: Math.round(serverClockOffsetMs),
+                sampleCount: clockSampleCount,
+                reconnectCount,
+            });
             return;
         }
 
@@ -2150,6 +2328,24 @@
             return;
         }
 
+        if (message.type === 'room:host-reconnecting') {
+            setActiveRoom({
+                ...(activeRoom || {}),
+                hostConnectionState: 'reconnecting',
+                hostReconnectDeadlineAt: message.payload?.reconnectDeadlineAt || 0,
+            });
+            return;
+        }
+
+        if (message.type === 'room:host-reconnected') {
+            setActiveRoom({
+                ...(activeRoom || {}),
+                hostConnectionState: 'connected',
+                hostReconnectDeadlineAt: 0,
+            });
+            return;
+        }
+
         if (message.type === 'room:error') {
             showMessage(getErrorMessage(message.payload?.code) || message.payload?.message || '一起看发生错误', 'error');
             if (
@@ -2173,7 +2369,7 @@
         stopHeartbeat();
         heartbeatTimer = window.setInterval(() => {
             sendSocketMessage({ type: 'client:heartbeat' });
-        }, 30000);
+        }, HEARTBEAT_INTERVAL_MS);
     }
 
     function stopHeartbeat() {
@@ -2185,42 +2381,64 @@
 
     function sendSocketMessage(message) {
         if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+        const sentAt = Date.now();
+        if (message.type === 'client:heartbeat') {
+            pendingHeartbeatSamples.set(sentAt, performance.now());
+            while (pendingHeartbeatSamples.size > 4) {
+                pendingHeartbeatSamples.delete(pendingHeartbeatSamples.keys().next().value);
+            }
+        }
         socket.send(JSON.stringify({
             ...message,
             roomId: activeRoom?.roomId,
             clientId: activeRoom?.clientId,
-            sentAt: Date.now()
+            sentAt,
         }));
         return true;
     }
 
     function closeSocket(sendLeave = true) {
-        if (socket) {
-            if (sendLeave && socket.readyState === WebSocket.OPEN) {
+        intentionalSocketClose = true;
+        socketConnectSerial += 1;
+        if (reconnectTimer) {
+            window.clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+        const connection = socket;
+        socket = null;
+        if (connection) {
+            if (sendLeave && connection.readyState === WebSocket.OPEN) {
+                socket = connection;
                 sendSocketMessage({ type: 'room:leave' });
+                socket = null;
             }
-            socket.close();
-            socket = null;
+            connection.close();
         }
         stopHeartbeat();
+        pendingHeartbeatSamples.clear();
     }
 
     function handlePageExit() {
-        if (!activeRoom || !socket) return;
-
+        if (!activeRoom) return;
+        // 页面刷新、系统回收后台页面和真实离开在 unload 阶段无法可靠区分。
+        // 保留 session，让 Durable Object 的 host grace period / 客户端重连决定后续状态。
         try {
-            if (socket.readyState === WebSocket.OPEN) {
-                sendSocketMessage({
-                    type: activeRoom.role === 'host' ? 'room:end' : 'room:leave'
-                });
+            intentionalSocketClose = true;
+            socketConnectSerial += 1;
+            if (reconnectTimer) {
+                window.clearTimeout(reconnectTimer);
+                reconnectTimer = null;
             }
-        } catch (error) {}
-
-        try {
-            socket.close();
+            socket?.close();
         } catch (error) {}
         socket = null;
         stopHeartbeat();
+    }
+
+    function handlePageShow() {
+        if (!activeRoom?.roomId || socket) return;
+        intentionalSocketClose = false;
+        retrySocketNow();
     }
 
     async function endRoom() {
@@ -2238,7 +2456,8 @@
                 },
                 body: JSON.stringify({
                     roomId: activeRoom.roomId,
-                    clientId: activeRoom.clientId
+                    clientId: activeRoom.clientId,
+                    resumeToken: participantResumeToken,
                 })
             });
         } catch (error) {}
@@ -2291,6 +2510,11 @@
         resetViewerInitialSync();
         clearStoredRoomSession();
         activeRoom = null;
+        participantResumeToken = '';
+        clockSampleCount = 0;
+        clockEstimate = {};
+        serverClockOffsetMs = 0;
+        serverRttMs = 0;
         watchRoomController = null;
         watchRoomEntryMode = 'create';
         isApplyingRemoteSync = false;
@@ -2312,16 +2536,16 @@
         const roomState = await fetchRoomState(cleaned);
         if (!roomState) return false;
 
-        if (roomState.status !== 'waiting') {
+        if (!['waiting', 'starting', 'playing'].includes(roomState.status)) {
             showMessage(
-                ['starting', 'playing'].includes(roomState.status)
-                    ? '房间已开播，暂不支持加入'
-                    : '房间不存在或已结束',
+                '房间不存在或已结束',
                 'warning'
             );
             return false;
         }
 
+        participantResumeToken = '';
+        removeSessionValue(SESSION_ROOM_RESUME_TOKEN_KEY);
         setActiveRoom({
             roomId: cleaned,
             role: 'viewer',
@@ -2348,12 +2572,17 @@
 
         const roomId = readSessionValue(SESSION_ROOM_ID_KEY);
         const role = readSessionValue(SESSION_ROOM_ROLE_KEY);
-        const clientId = readSessionValue(SESSION_ROOM_CLIENT_ID_KEY);
+        let clientId = readSessionValue(SESSION_ROOM_CLIENT_ID_KEY);
+        const resumeToken = readSessionValue(SESSION_ROOM_RESUME_TOKEN_KEY);
 
-        if (!isValidRoomId(roomId) || !['host', 'viewer'].includes(role)) {
+        if (!isValidRoomId(roomId)
+            || !['host', 'viewer'].includes(role)
+            || (role === 'host' && !resumeToken)) {
             clearStoredRoomSession();
             return;
         }
+        participantResumeToken = resumeToken;
+        if (role === 'viewer' && !resumeToken) clientId = ''; // Legacy viewers join with a fresh identity.
 
         if (role === 'viewer') {
             resetViewerInitialSync();
@@ -2368,7 +2597,7 @@
             status: 'waiting',
             pendingPlayerRedirect: false
         });
-        connectRoomSocket(roomId, role, clientId);
+        connectRoomSocket(roomId, role, clientId, participantResumeToken);
     }
 
     async function copyRoomId() {
@@ -2454,6 +2683,8 @@
             pageExitHandlerBound = true;
             window.addEventListener('pagehide', handlePageExit);
             window.addEventListener('beforeunload', handlePageExit);
+            window.addEventListener('pageshow', handlePageShow);
+            window.addEventListener('online', retrySocketNow);
         }
     }
 
