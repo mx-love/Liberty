@@ -1253,10 +1253,12 @@ function buildDanmuKeyword({ title, year, season, episode, platform }) {
     const parts = [cleanTitle];
     if (year) parts.push(String(year));
 
-    if (season || episode) {
-        const seasonPart = `S${String(season || 1).padStart(2, '0')}`;
+    if (season) {
+        const seasonPart = `S${String(season).padStart(2, '0')}`;
         const episodePart = episode ? `E${String(episode).padStart(2, '0')}` : '';
         parts.push(`${seasonPart}${episodePart}`);
+    } else if (episode) {
+        parts.push(`第${episode}集`);
     }
     if (platform) parts.push(`@${platform}`);
 
@@ -1266,9 +1268,9 @@ function buildDanmuKeyword({ title, year, season, episode, platform }) {
 function buildDanmuMatchQueries(context) {
     const cleanTitle = normalizeDanmuTitle(context.title);
     const episode = Number(context.episode || 0);
-    const season = Number(context.season || 1);
+    const season = Number(context.season || 0);
     const seasonEpisode = episode
-        ? `S${String(season || 1).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
+        ? (season ? `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}` : `第${episode}集`)
         : '';
     const platform = context.platform ? `@${context.platform}` : '';
 
@@ -1443,8 +1445,8 @@ function extractEpisodeNumberFromDanmuTitle(title) {
     return null;
 }
 
-function pickValidDanmuApiMatch(matches, episodeIndex, options = {}) {
-    const targetNumber = episodeIndex + 1;
+function pickValidDanmuApiMatch(matches, targetEpisodeNumber, options = {}) {
+    const targetNumber = targetEpisodeNumber;
     const list = Array.isArray(matches)
         ? matches.filter(m => m && m.episodeId)
         : [];
@@ -1519,7 +1521,7 @@ async function matchDanmuByApi(title, episodeIndex) {
                 fileName,
                 matches: data?.matches || []
             });
-            const match = pickValidDanmuApiMatch(data?.matches, episodeIndex);
+            const match = pickValidDanmuApiMatch(data?.matches, context.episode);
 
             if (data?.isMatched && match?.episodeId) {
                 danmuDebugLog('✅ match 自动匹配成功:', {
@@ -2160,7 +2162,7 @@ function rankDanmuSourceCandidates(animes, cleanTitle, videoIdentity = getVideoI
     const targetInfo = advancedCleanTitle(videoIdentity.title || normalizedTitle);
     const targetYear = normalizeDanmuYear(videoIdentity.year || targetParsed.year || targetInfo.year || '');
     const targetEpisodeCount = Number(videoIdentity.episodeCount || 0);
-    const displayEpisode = currentEpisodeIndex + 1;
+    const targetEpisodeNumber = getDanmuPlaybackContext(videoIdentity.title || cleanTitle, currentEpisodeIndex).episode;
     const targetTypeCategory = getDanmuTypeCategory(targetParsed.type || targetInfo.typeDescription || targetInfo.type, targetEpisodeCount);
 
     return (animes || []).map(anime => {
@@ -2191,11 +2193,11 @@ function rankDanmuSourceCandidates(animes, cleanTitle, videoIdentity = getVideoI
             else score -= 10;
         }
 
-        if (displayEpisode === 1 && episodeCount === 1) {
+        if (targetEpisodeNumber === 1 && episodeCount === 1) {
             score += 5;
-        } else if (displayEpisode > 1 && episodeCount >= displayEpisode) {
+        } else if (targetEpisodeNumber > 1 && episodeCount >= targetEpisodeNumber) {
             score += 10;
-        } else if (displayEpisode > 1 && episodeCount > 0 && episodeCount < displayEpisode) {
+        } else if (targetEpisodeNumber > 1 && episodeCount > 0 && episodeCount < targetEpisodeNumber) {
             score -= 30;
         }
 
@@ -2484,10 +2486,10 @@ const DANMU_SEGMENT_SIZE = 6000; // 每段最多6000条（B站标准）
 const DANMU_TIME_WINDOW = 360; // 6分钟窗口（秒）
 
 // ✅ 智能匹配集数（增强版）
-function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
+function findBestEpisodeMatch(episodes, targetEpisodeNumber, showTitle) {
     if (!episodes || episodes.length === 0) return null;
 
-    const targetNumber = targetIndex + 1;
+    const targetNumber = targetEpisodeNumber;
 
     function normalizeEpisodeTitle(title) {
         return String(title || '')
@@ -2626,6 +2628,8 @@ function findBestEpisodeMatch(episodes, targetIndex, showTitle) {
     }
 
     // 策略3：所有弹幕标题都解析不出明确集数，才允许按索引匹配
+    // 这里是弹幕剧集列表的位置，不是采集站播放列表的 episodeIndex。
+    const targetIndex = targetEpisodeNumber - 1;
     if (targetIndex >= 0 && targetIndex < episodes.length) {
         const indexMatch = episodesWithInfo[targetIndex];
 
@@ -2672,7 +2676,8 @@ function pickMatchedDanmuEpisode(episodes, episodeIndex, title) {
         return null;
     }
 
-    return findBestEpisodeMatch(episodes, episodeIndex, title);
+    const context = getDanmuPlaybackContext(title, episodeIndex);
+    return findBestEpisodeMatch(episodes, context.episode, title);
 }
 
 // ✅ 优化后的弹幕获取函数 - 解决主线程阻塞
