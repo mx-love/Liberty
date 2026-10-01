@@ -1,0 +1,62 @@
+{
+  "aliasWithIndependentMetadata": {
+    "left": {
+      "recordId": "source-a:1",
+      "rawTitle": "Sousou no Frieren",
+      "aliases": ["葬送的芙莉莲"],
+      "year": 2023,
+      "season": 1,
+      "mediaType": "anime",
+      "directors": ["斋藤圭一郎"]
+    },
+    "right": {
+      "recordId": "source-b:8",
+      "rawTitle": "葬送的芙莉莲",
+      "aliases": ["Frieren: Beyond Journey's End"],
+      "year": 2023,
+      "season": 1,
+      "mediaType": "anime",
+      "directors": ["斋藤圭一郎"]
+    }
+  },
+  "explicitSeasonConflict": {
+    "left": {
+      "rawTitle": "示例作品 第一季",
+      "year": 2025,
+      "season": 1,
+      "mediaType": "series"
+    },
+    "right": {
+      "rawTitle": "示例作品 第二季",
+      "year": 2025,
+      "season": 2,
+      "mediaType": "series"
+    }
+  },
+  "explicitYearConflict": {
+    "left": {
+      "rawTitle": "同名作品",
+      "year": 2011,
+      "mediaType": "series"
+    },
+    "right": {
+      "rawTitle": "同名作品",
+      "year": 2019,
+      "mediaType": "series"
+    }
+  },
+  "missingMetadata": {
+    "left": { "rawTitle": "只有标题" },
+    "right": { "rawTitle": "只有标题" }
+  },
+  "confirmedExternalIdentity": {
+    "left": {
+      "rawTitle": "译名甲",
+      "externalIds": { "tmdb": "123" }
+    },
+    "right": {
+      "rawTitle": "Translated Name",
+      "externalIds": { "tmdb": "123" }
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "nonContinuous": {
+    "source": ["第11集", "第12集", "第14集"],
+    "target": ["第10集", "第11集", "第12集", "第13集", "第14集"],
+    "expected": [1, 2, 4]
+  },
+  "missingEpisode": {
+    "source": ["第11集", "第12集", "第13集"],
+    "target": ["第11集", "第13集"]
+  },
+  "insertedSpecial": {
+    "source": ["第11集", "SP1", "第12集"],
+    "target": ["第11集", "第12集", "SP1"]
+  },
+  "differentStart": {
+    "source": ["第11集", "第12集", "第13集"],
+    "target": ["第9集", "第10集", "第11集", "第12集", "第13集"],
+    "expected": [2, 3, 4]
+  },
+  "boundedUnknown": {
+    "source": ["第11集", "来源未命名项", "第13集"],
+    "target": ["第11集", "目标未命名项", "第13集"]
+  },
+  "singleAnchorInsufficient": {
+    "source": ["第11集", "来源未命名项"],
+    "target": ["第11集", "目标未命名项"]
+  }
+}

@@ -1,0 +1,2050 @@
+var __defProp = Object.defineProperty;
+var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+
+// src/core/types/source.ts
+var SourceError = class extends Error {
+  constructor(code, message, options = {}) {
+    super(message);
+    __publicField(this, "code");
+    __publicField(this, "sourceKey");
+    __publicField(this, "status");
+    __publicField(this, "retryable");
+    __publicField(this, "cause");
+    this.name = "SourceError";
+    this.code = code;
+    this.sourceKey = options.sourceKey ?? null;
+    this.status = options.status ?? null;
+    this.retryable = options.retryable ?? false;
+    this.cause = options.cause;
+  }
+};
+
+// src/core/identity/title-parser.ts
+var CHINESE_DIGITS = {
+  "\u96F6": 0,
+  "\u3007": 0,
+  "\u4E00": 1,
+  "\u4E8C": 2,
+  "\u4E24": 2,
+  "\u4E09": 3,
+  "\u56DB": 4,
+  "\u4E94": 5,
+  "\u516D": 6,
+  "\u4E03": 7,
+  "\u516B": 8,
+  "\u4E5D": 9
+};
+var CHINESE_UNITS = {
+  "\u5341": 10,
+  "\u767E": 100,
+  "\u5343": 1e3
+};
+var EDITION_PATTERN = /(?:未删减(?:版)?|完整(?:版)?|导演剪辑(?:版)?|加长(?:版)?|重制(?:版)?|修复(?:版)?|蓝光(?:版)?|(?:4K|8K)(?:版)?|杜比(?:版)?|国语(?:版)?|粤语(?:版)?|中字(?:版)?|双语(?:版)?)/giu;
+var SEASON_TOKEN_PATTERN = "[\u3007\u96F6\u4E00\u4E8C\u4E24\u4E09\u56DB\u4E94\u516D\u4E03\u516B\u4E5D\u5341\u767E\\d]+";
+function uniqueStrings(values) {
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    const key = normalizeTitleForIdentity(trimmed);
+    if (trimmed && key && !seen.has(key)) {
+      seen.add(key);
+      result.push(trimmed);
+    }
+  }
+  return result;
+}
+function parseChineseNumberToken(value) {
+  const token = value.normalize("NFKC").trim();
+  if (/^\d+$/.test(token)) {
+    const number = Number(token);
+    return Number.isSafeInteger(number) ? number : null;
+  }
+  if (!token || !/^[〇零一二两三四五六七八九十百千]+$/u.test(token)) {
+    return null;
+  }
+  if (!/[十百千]/u.test(token)) {
+    const digits = [...token].map((character) => CHINESE_DIGITS[character]);
+    if (digits.some((digit) => digit === void 0)) return null;
+    const number = Number(digits.join(""));
+    return Number.isSafeInteger(number) ? number : null;
+  }
+  let total = 0;
+  let currentDigit = 0;
+  for (const character of token) {
+    const digit = CHINESE_DIGITS[character];
+    if (digit !== void 0) {
+      currentDigit = digit;
+      continue;
+    }
+    const unit = CHINESE_UNITS[character];
+    if (unit === void 0) return null;
+    total += (currentDigit || 1) * unit;
+    currentDigit = 0;
+  }
+  return total + currentDigit;
+}
+function normalizeTitleForIdentity(value) {
+  return value.normalize("NFKC").toLocaleLowerCase("zh-CN").replace(/[\s\-_.·•:：,，/\\|()（）[\]【】《》"'“”‘’]+/gu, "");
+}
+function compactTitle(value) {
+  return value.replace(/\s+/gu, " ").replace(/^[-–—:：|/\s]+|[-–—:：|/\s]+$/gu, "").trim();
+}
+function extractSeason(value) {
+  const chinese = new RegExp(`\u7B2C\\s*(${SEASON_TOKEN_PATTERN})\\s*\u5B63`, "iu").exec(value);
+  if (chinese) {
+    const number = parseChineseNumberToken(chinese[1] ?? "");
+    if (number !== null && number > 0) {
+      return {
+        value: number,
+        source: "explicit_chinese_season",
+        matched: chinese[0]
+      };
+    }
+  }
+  const english = /\bSeason\s*0*(\d{1,3})\b/iu.exec(value);
+  if (english) {
+    const number = Number(english[1]);
+    if (number > 0) {
+      return {
+        value: number,
+        source: "explicit_english_season",
+        matched: english[0]
+      };
+    }
+  }
+  const shortCode = /S\s*0*(\d{1,3})(?![\dA-Z])/iu.exec(value);
+  if (shortCode) {
+    const number = Number(shortCode[1]);
+    if (number > 0) {
+      return {
+        value: number,
+        source: "explicit_s_code",
+        matched: shortCode[0]
+      };
+    }
+  }
+  return null;
+}
+function extractYear(value) {
+  const bracketed = /[（(\[【]\s*((?:19|20)\d{2})\s*[）)\]】]/u.exec(value);
+  if (bracketed) {
+    return {
+      value: Number(bracketed[1]),
+      source: "explicit_year",
+      matched: bracketed[0]
+    };
+  }
+  const separatedSuffix = /\s+((?:19|20)\d{2})\s*$/u.exec(value);
+  if (separatedSuffix) {
+    return {
+      value: Number(separatedSuffix[1]),
+      source: "explicit_year",
+      matched: separatedSuffix[0]
+    };
+  }
+  return null;
+}
+function stripEditionMarkers(value) {
+  const markers = [];
+  const title = value.replace(EDITION_PATTERN, (match) => {
+    markers.push(match);
+    return " ";
+  });
+  return { title, markers: uniqueStrings(markers) };
+}
+function splitTitleAndAliases(value) {
+  return value.replace(/\s+又名\s*[:：]?\s*/gu, "|").split(/\s*[|｜]\s*|\s+[／/]\s+/gu).map((item) => item.trim()).filter(Boolean);
+}
+function parseTitle(rawTitle) {
+  const raw = String(rawTitle ?? "");
+  const normalizedRaw = raw.normalize("NFKC").trim();
+  const titleParts = splitTitleAndAliases(normalizedRaw);
+  const primary = titleParts[0] ?? normalizedRaw;
+  const seasonToken = extractSeason(primary);
+  const yearToken = extractYear(primary);
+  let cleanedPrimary = primary;
+  if (seasonToken) cleanedPrimary = cleanedPrimary.replace(seasonToken.matched, " ");
+  if (yearToken) cleanedPrimary = cleanedPrimary.replace(yearToken.matched, " ");
+  const primaryEdition = stripEditionMarkers(cleanedPrimary);
+  const baseTitle = compactTitle(primaryEdition.title) || compactTitle(primary);
+  const aliasResults = titleParts.slice(1).map((alias) => {
+    const withoutSeason = extractSeason(alias);
+    const withoutYear = extractYear(alias);
+    let cleaned = alias;
+    if (withoutSeason) cleaned = cleaned.replace(withoutSeason.matched, " ");
+    if (withoutYear) cleaned = cleaned.replace(withoutYear.matched, " ");
+    return stripEditionMarkers(cleaned);
+  });
+  const aliases = uniqueStrings(aliasResults.map((result) => compactTitle(result.title)));
+  const editionMarkers = uniqueStrings([
+    ...primaryEdition.markers,
+    ...aliasResults.flatMap((result) => result.markers)
+  ]);
+  const uncertainTokens = [];
+  const trailingNumber = /(?:^|[^\d])((?:\d{1,3}))\s*$/u.exec(baseTitle);
+  if (!seasonToken && trailingNumber?.[1]) uncertainTokens.push(trailingNumber[1]);
+  const partMarker = /(?:第\s*[〇零一二两三四五六七八九十百\d]+\s*部|\bPart\s*\d+\b)/iu.exec(baseTitle);
+  if (!seasonToken && partMarker) uncertainTokens.push(partMarker[0]);
+  const interpretations = [
+    {
+      baseTitle,
+      season: seasonToken?.value ?? null,
+      confidence: seasonToken ? "high" : "medium",
+      source: seasonToken?.source ?? "literal_title"
+    }
+  ];
+  if (!seasonToken && trailingNumber?.[1]) {
+    const possibleSeason = Number(trailingNumber[1]);
+    const stripped = compactTitle(baseTitle.slice(0, Math.max(0, baseTitle.length - trailingNumber[1].length)));
+    if (stripped && possibleSeason > 0 && possibleSeason <= 99) {
+      interpretations.push({
+        baseTitle: stripped,
+        season: possibleSeason,
+        confidence: "low",
+        source: "trailing_number"
+      });
+    }
+  }
+  return {
+    rawTitle: raw,
+    baseTitle,
+    normalizedBaseTitle: normalizeTitleForIdentity(baseTitle),
+    aliases,
+    season: seasonToken?.value ?? null,
+    seasonSource: seasonToken?.source ?? null,
+    year: yearToken?.value ?? null,
+    yearSource: yearToken?.source ?? null,
+    editionMarkers,
+    uncertainTokens: uniqueStrings(uncertainTokens),
+    interpretations
+  };
+}
+var TitleParser = class {
+  parse(rawTitle) {
+    return parseTitle(rawTitle);
+  }
+};
+
+// src/core/identity/candidate-evidence.ts
+function normalizeComparable(value) {
+  return value.normalize("NFKC").toLocaleLowerCase("zh-CN").replace(/[\s\-_.·•:：,，/\\|()（）[\]【】"'“”‘’]+/gu, "");
+}
+function normalizeValues(values) {
+  return new Set((values ?? []).map(normalizeComparable).filter(Boolean));
+}
+function titleValues(input, title) {
+  const result = /* @__PURE__ */ new Map();
+  const primary = normalizeTitleForIdentity(title.baseTitle);
+  if (primary) result.set(primary, "title");
+  for (const alias of [...title.aliases, ...input.aliases ?? []]) {
+    const normalized = normalizeTitleForIdentity(alias);
+    if (normalized && !result.has(normalized)) result.set(normalized, "alias");
+  }
+  return result;
+}
+function prepare(input) {
+  const title = input.parsedTitle ?? parseTitle(input.rawTitle);
+  return {
+    input,
+    title,
+    titleValues: titleValues(input, title),
+    year: input.year !== void 0 ? input.year : title.year,
+    season: input.season !== void 0 ? input.season : title.season
+  };
+}
+function unknown(field, reason, left, right) {
+  return { field, state: "unknown", reason, leftValue: left, rightValue: right };
+}
+function compareTitle(left, right) {
+  for (const [value, leftKind] of left.titleValues) {
+    const rightKind = right.titleValues.get(value);
+    if (rightKind) {
+      const field = leftKind === "alias" || rightKind === "alias" ? "alias" : "title";
+      return {
+        field,
+        state: "supporting",
+        reason: field === "title" ? "Normalized base titles are equal" : "A declared title or alias is shared",
+        leftValue: left.title.baseTitle,
+        rightValue: right.title.baseTitle
+      };
+    }
+  }
+  if (!left.title.normalizedBaseTitle || !right.title.normalizedBaseTitle) {
+    return unknown("title", "At least one title is empty after normalization", left.title.rawTitle, right.title.rawTitle);
+  }
+  return {
+    field: "title",
+    state: "conflicting",
+    reason: "No normalized base title or declared alias is shared",
+    leftValue: left.title.baseTitle,
+    rightValue: right.title.baseTitle
+  };
+}
+function compareOptionalNumber(field, left, right) {
+  if (left === null || right === null) {
+    return unknown(field, `${field} is unknown on at least one side`, left, right);
+  }
+  if (left === right) {
+    return {
+      field,
+      state: "supporting",
+      reason: `${field} values are equal`,
+      leftValue: left,
+      rightValue: right
+    };
+  }
+  if (field === "year" && Math.abs(left - right) === 1) {
+    return unknown(
+      field,
+      "One-year differences can be broadcast, import, or edition metadata and are not decisive",
+      left,
+      right
+    );
+  }
+  return {
+    field,
+    state: "conflicting",
+    reason: `${field} values explicitly differ`,
+    leftValue: left,
+    rightValue: right
+  };
+}
+function compareMediaType(left, right) {
+  const leftType = left.input.mediaType ?? "unknown";
+  const rightType = right.input.mediaType ?? "unknown";
+  if (leftType === "unknown" || rightType === "unknown") {
+    return unknown("mediaType", "Media type is unknown on at least one side", leftType, rightType);
+  }
+  return {
+    field: "mediaType",
+    state: leftType === rightType ? "supporting" : "conflicting",
+    reason: leftType === rightType ? "Media types are equal" : "Known media types explicitly differ",
+    leftValue: leftType,
+    rightValue: rightType
+  };
+}
+function comparePeople(field, leftValues, rightValues) {
+  const left = normalizeValues(leftValues);
+  const right = normalizeValues(rightValues);
+  if (left.size === 0 || right.size === 0) {
+    return unknown(field, `${field} metadata is missing on at least one side`, leftValues ?? [], rightValues ?? []);
+  }
+  const shared = [...left].filter((value) => right.has(value));
+  if (shared.length === 0) {
+    return unknown(
+      field,
+      `No normalized ${field} value is shared; incomplete upstream credits cannot prove a conflict`,
+      leftValues,
+      rightValues
+    );
+  }
+  return {
+    field,
+    state: "supporting",
+    reason: `${shared.length} normalized ${field} value(s) are shared`,
+    leftValue: leftValues,
+    rightValue: rightValues
+  };
+}
+function compareDescriptiveList(field, leftValues, rightValues) {
+  const left = normalizeValues(leftValues);
+  const right = normalizeValues(rightValues);
+  if (left.size === 0 || right.size === 0) {
+    return unknown(field, `${field} metadata is missing on at least one side`, leftValues ?? [], rightValues ?? []);
+  }
+  const shared = [...left].filter((value) => right.has(value));
+  return shared.length > 0 ? {
+    field,
+    state: "supporting",
+    reason: `A normalized ${field} value is shared`,
+    leftValue: leftValues,
+    rightValue: rightValues
+  } : unknown(
+    field,
+    `${field} labels differ but are not authoritative identity blockers`,
+    leftValues,
+    rightValues
+  );
+}
+function compareExternalIds(left, right) {
+  const leftIds = left.input.externalIds ?? {};
+  const rightIds = right.input.externalIds ?? {};
+  const sharedProviders = Object.keys(leftIds).filter((provider) => rightIds[provider] !== void 0);
+  if (sharedProviders.length === 0) {
+    return [unknown("externalId", "No external ID namespace is shared", leftIds, rightIds)];
+  }
+  return sharedProviders.map((provider) => {
+    const leftValue = String(leftIds[provider] ?? "").trim();
+    const rightValue = String(rightIds[provider] ?? "").trim();
+    const equal = leftValue !== "" && leftValue === rightValue;
+    return {
+      field: "externalId",
+      state: equal ? "confirmed" : "conflicting",
+      reason: equal ? `Verified ${provider} IDs are equal` : `Verified ${provider} IDs explicitly differ`,
+      leftValue,
+      rightValue,
+      source: provider
+    };
+  });
+}
+function compareKnownRelation(left, right) {
+  const leftRejectsRight = right.input.recordId !== void 0 && left.input.knownDifferentFrom?.includes(right.input.recordId);
+  const rightRejectsLeft = left.input.recordId !== void 0 && right.input.knownDifferentFrom?.includes(left.input.recordId);
+  if (leftRejectsRight || rightRejectsLeft) {
+    return {
+      field: "knownRelation",
+      state: "conflicting",
+      reason: "A verified relation marks these records as different works",
+      leftValue: left.input.recordId ?? null,
+      rightValue: right.input.recordId ?? null
+    };
+  }
+  return unknown(
+    "knownRelation",
+    "No verified same/different relation is available",
+    left.input.recordId ?? null,
+    right.input.recordId ?? null
+  );
+}
+function collectCandidateEvidence(leftInput, rightInput) {
+  const left = prepare(leftInput);
+  const right = prepare(rightInput);
+  return [
+    compareKnownRelation(left, right),
+    ...compareExternalIds(left, right),
+    compareTitle(left, right),
+    compareOptionalNumber("year", left.year, right.year),
+    compareOptionalNumber("season", left.season, right.season),
+    compareMediaType(left, right),
+    comparePeople("director", left.input.directors, right.input.directors),
+    comparePeople("actors", left.input.actors, right.input.actors),
+    compareDescriptiveList("area", left.input.areas, right.input.areas),
+    compareDescriptiveList("language", left.input.languages, right.input.languages)
+  ];
+}
+var CandidateEvidenceCollector = class {
+  collect(left, right) {
+    return collectCandidateEvidence(left, right);
+  }
+};
+
+// src/core/identity/identity-policy.ts
+var DEFAULT_IDENTITY_POLICY = Object.freeze({
+  minimumSupportingFields: 2,
+  rejectConfirmedTitleConflict: true,
+  strictYear: true,
+  strictMediaType: true,
+  strictSeason: true
+});
+function blockerFor(evidence, index, code) {
+  const item = evidence[index];
+  if (!item) throw new RangeError(`Evidence index ${index} does not exist`);
+  return {
+    code,
+    field: item.field,
+    reason: item.reason,
+    evidenceIndex: index
+  };
+}
+function findIdentityBlockers(left, right, evidence, policy = DEFAULT_IDENTITY_POLICY) {
+  const blockers = [];
+  for (let index = 0; index < evidence.length; index += 1) {
+    const item = evidence[index];
+    if (!item || item.state !== "conflicting") continue;
+    if (item.field === "knownRelation") {
+      blockers.push(blockerFor(evidence, index, "known_different_media"));
+    } else if (item.field === "externalId") {
+      blockers.push(blockerFor(evidence, index, "external_id_conflict"));
+    } else if (item.field === "year" && policy.strictYear) {
+      blockers.push(blockerFor(evidence, index, "release_year_conflict"));
+    } else if (item.field === "season" && policy.strictSeason) {
+      blockers.push(blockerFor(evidence, index, "season_conflict"));
+    } else if (item.field === "mediaType" && policy.strictMediaType) {
+      blockers.push(blockerFor(evidence, index, "media_type_conflict"));
+    } else if (item.field === "title" && policy.rejectConfirmedTitleConflict && left.titleAuthority === "confirmed" && right.titleAuthority === "confirmed") {
+      blockers.push(blockerFor(evidence, index, "confirmed_title_conflict"));
+    }
+  }
+  return blockers;
+}
+
+// src/core/identity/entity-resolver.ts
+function resolveEntityIdentity(left, right, policy = DEFAULT_IDENTITY_POLICY) {
+  const evidence = collectCandidateEvidence(left, right);
+  const blockers = findIdentityBlockers(left, right, evidence, policy);
+  const matchedFields = [...new Set(
+    evidence.filter((item) => item.state === "confirmed" || item.state === "supporting").map((item) => item.field)
+  )];
+  if (blockers.length > 0) {
+    return {
+      decision: "rejected",
+      evidence,
+      blockers,
+      matchedFields,
+      reason: `Rejected by ${blockers.map((blocker) => blocker.code).join(", ")}`
+    };
+  }
+  const hasConfirmedIdentity = evidence.some(
+    (item) => item.field === "externalId" && item.state === "confirmed"
+  );
+  if (hasConfirmedIdentity) {
+    return {
+      decision: "confirmed",
+      evidence,
+      blockers,
+      matchedFields,
+      reason: "A verified external identity is equal and no blocking conflict exists"
+    };
+  }
+  const hasTitleSupport = evidence.some(
+    (item) => (item.field === "title" || item.field === "alias") && item.state === "supporting"
+  );
+  const supportingFields = new Set(
+    evidence.filter((item) => item.state === "supporting").map((item) => item.field)
+  );
+  const hasUnblockedConflict = evidence.some((item) => item.state === "conflicting");
+  if (hasTitleSupport && !hasUnblockedConflict && supportingFields.size >= policy.minimumSupportingFields) {
+    return {
+      decision: "supported",
+      evidence,
+      blockers,
+      matchedFields,
+      reason: "Title evidence is supported by independent compatible metadata"
+    };
+  }
+  return {
+    decision: "uncertain",
+    evidence,
+    blockers,
+    matchedFields,
+    reason: hasTitleSupport ? "Title evidence lacks enough independent support" : "Available metadata cannot establish the same work"
+  };
+}
+var EntityResolver = class {
+  constructor(policy = DEFAULT_IDENTITY_POLICY) {
+    __publicField(this, "policy", policy);
+  }
+  resolve(left, right) {
+    return resolveEntityIdentity(left, right, this.policy);
+  }
+};
+
+// src/core/episode/episode-parser.ts
+var NUMBER_TOKEN = "[\u3007\u96F6\u4E00\u4E8C\u4E24\u4E09\u56DB\u4E94\u516D\u4E03\u516B\u4E5D\u5341\u767E\u5343\\d]+";
+var TECHNICAL_TOKEN_PATTERN = /(?:1080p|720p|2160p|4k|8k|h\.?264|h\.?265|hevc|av1|10bit|hdr|dolby|aac|国语|粤语|中字|双语|bd|bluray|web-?dl|webrip|线路\s*\d+|备用|高清|超清)/giu;
+function validPositiveEpisodeNumber(value) {
+  return Number.isSafeInteger(value) && value > 0 && value <= 1e5;
+}
+function toNumber(token) {
+  const value = parseChineseNumberToken(token);
+  return value !== null && validPositiveEpisodeNumber(value) ? value : null;
+}
+function asIsoDate(year, month, day) {
+  if (year < 1900 || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) {
+    return null;
+  }
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+function extractBroadcastDate(value) {
+  const separated = /(?<!\d)((?:19|20)\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})(?:日)?(?!\d)/u.exec(value);
+  if (separated) {
+    const airDate = asIsoDate(Number(separated[1]), Number(separated[2]), Number(separated[3]));
+    if (airDate) return { airDate, matched: separated[0] };
+  }
+  const compact = /(?<!\d)((?:19|20)\d{2})(\d{2})(\d{2})(?!\d)/u.exec(value);
+  if (compact) {
+    const airDate = asIsoDate(Number(compact[1]), Number(compact[2]), Number(compact[3]));
+    if (airDate) return { airDate, matched: compact[0] };
+  }
+  return null;
+}
+function extractPart(value) {
+  const upper = /(?:上篇|上部|上集|上期)(?:版)?/u.exec(value);
+  if (upper) return { part: "upper", matched: upper[0] };
+  const lower = /(?:下篇|下部|下集|下期)(?:版)?/u.exec(value);
+  if (lower) return { part: "lower", matched: lower[0] };
+  const english = /\bPart\s*0*(\d{1,3})\b/iu.exec(value);
+  if (english) return { part: Number(english[1]), matched: english[0] };
+  return null;
+}
+function extractContentMarker(value) {
+  const preview = /(?:预告(?:片)?|先导片|先行片|\btrailer\b|\bPV\s*\d*\b)/iu.exec(value);
+  if (preview) {
+    return {
+      contentType: "preview",
+      specialKind: null,
+      specialNumber: null,
+      matched: preview[0],
+      evidenceCode: "preview_marker"
+    };
+  }
+  const recap = /(?:总集篇|总集编|回顾|\brecap\b)/iu.exec(value);
+  if (recap) {
+    return {
+      contentType: "recap",
+      specialKind: null,
+      specialNumber: null,
+      matched: recap[0],
+      evidenceCode: "recap_marker"
+    };
+  }
+  const interview = /(?:采访|访谈|\binterview\b)/iu.exec(value);
+  if (interview) {
+    return {
+      contentType: "interview",
+      specialKind: null,
+      specialNumber: null,
+      matched: interview[0],
+      evidenceCode: "interview_marker"
+    };
+  }
+  const codedSpecial = /\b(SP|OVA|OAD)\s*0*(\d{1,4})?\b/iu.exec(value);
+  if (codedSpecial) {
+    const kind = (codedSpecial[1] ?? "").toLocaleLowerCase("en-US");
+    const specialNumber = codedSpecial[2] ? Number(codedSpecial[2]) : null;
+    return {
+      contentType: "special",
+      specialKind: kind,
+      specialNumber,
+      matched: codedSpecial[0],
+      evidenceCode: "special_marker"
+    };
+  }
+  const extra = /(?:番外|加更(?:版)?|花絮|彩蛋|特别节目)/u.exec(value);
+  if (extra) {
+    return {
+      contentType: "special",
+      specialKind: "extra",
+      specialNumber: null,
+      matched: extra[0],
+      evidenceCode: "special_marker"
+    };
+  }
+  const special = /(?:特别篇|特别编|特别版)/u.exec(value);
+  if (special) {
+    return {
+      contentType: "special",
+      specialKind: "special",
+      specialNumber: null,
+      matched: special[0],
+      evidenceCode: "special_marker"
+    };
+  }
+  const movie = /(?:正片|剧场版|電影版|电影版)/u.exec(value);
+  if (movie) {
+    return {
+      contentType: "movie",
+      specialKind: null,
+      specialNumber: null,
+      matched: movie[0],
+      evidenceCode: "movie_marker"
+    };
+  }
+  return null;
+}
+function extractNumericIdentity(value) {
+  const seasonEpisode = /S\s*0*(\d{1,3})\s*E(?:P)?\s*0*(\d{1,5})(?!\d)/iu.exec(value);
+  if (seasonEpisode) {
+    const season = Number(seasonEpisode[1]);
+    const episode = Number(seasonEpisode[2]);
+    if (season > 0 && validPositiveEpisodeNumber(episode)) {
+      return {
+        number: episode,
+        kind: "episode",
+        season,
+        matched: seasonEpisode[0],
+        confidence: "high",
+        evidenceCode: "explicit_season_episode"
+      };
+    }
+  }
+  const explicitEpisode = new RegExp(`\u7B2C\\s*(${NUMBER_TOKEN})\\s*(\u96C6|\u8BDD)`, "iu").exec(value);
+  if (explicitEpisode) {
+    const number = toNumber(explicitEpisode[1] ?? "");
+    if (number !== null) {
+      return {
+        number,
+        kind: "episode",
+        season: null,
+        matched: explicitEpisode[0],
+        confidence: "high",
+        evidenceCode: "explicit_episode_label"
+      };
+    }
+  }
+  const explicitIssue = new RegExp(`\u7B2C\\s*(${NUMBER_TOKEN})\\s*\u671F`, "iu").exec(value);
+  if (explicitIssue) {
+    const number = toNumber(explicitIssue[1] ?? "");
+    if (number !== null) {
+      return {
+        number,
+        kind: "issue",
+        season: null,
+        matched: explicitIssue[0],
+        confidence: "high",
+        evidenceCode: "explicit_issue_label"
+      };
+    }
+  }
+  const shortEpisode = /(?:^|[^A-Z\d])(?:EP|E)\s*0*(\d{1,5})(?![A-Z\d])/iu.exec(value);
+  if (shortEpisode) {
+    const number = Number(shortEpisode[1]);
+    if (validPositiveEpisodeNumber(number)) {
+      return {
+        number,
+        kind: "episode",
+        season: null,
+        matched: shortEpisode[0].trim(),
+        confidence: "high",
+        evidenceCode: "short_episode_label"
+      };
+    }
+  }
+  const suffixEpisode = /(?:^|[^\d])(\d{1,5})\s*(集|话)(?![集话])/u.exec(value);
+  if (suffixEpisode) {
+    const number = Number(suffixEpisode[1]);
+    if (validPositiveEpisodeNumber(number)) {
+      return {
+        number,
+        kind: "episode",
+        season: null,
+        matched: suffixEpisode[0].trim(),
+        confidence: "high",
+        evidenceCode: "explicit_episode_label"
+      };
+    }
+  }
+  const pureNumeric = /^0*(\d{1,8})$/u.exec(value.trim());
+  if (pureNumeric) {
+    const number = Number(pureNumeric[1]);
+    if (validPositiveEpisodeNumber(number) && !(number >= 1900 && number <= 2099)) {
+      return {
+        number,
+        kind: "episode",
+        season: null,
+        matched: pureNumeric[0],
+        confidence: "medium",
+        evidenceCode: "pure_numeric_label"
+      };
+    }
+  }
+  return null;
+}
+function episodeTitle(value, consumed) {
+  let title = value;
+  for (const token of consumed.filter(Boolean)) title = title.replace(token, " ");
+  title = title.replace(TECHNICAL_TOKEN_PATTERN, " ").replace(/[-–—_|/]+/gu, " ").replace(/\s+/gu, " ").trim();
+  return title.length >= 2 ? title : null;
+}
+function technicalOnly(value) {
+  const remaining = value.replace(TECHNICAL_TOKEN_PATTERN, " ").replace(/[\s._\-()[\]（）【】]+/gu, "");
+  return value.trim() !== "" && remaining === "";
+}
+function parseEpisode(rawName, options = {}) {
+  const raw = String(rawName ?? "");
+  const value = raw.normalize("NFKC").trim();
+  const evidence = [];
+  const uncertainTokens = [];
+  const date = extractBroadcastDate(value);
+  const part = extractPart(value);
+  const marker = extractContentMarker(value);
+  const numeric = date ? null : extractNumericIdentity(value);
+  if (date) {
+    evidence.push({
+      code: "broadcast_date",
+      token: date.matched,
+      reason: "A valid calendar date identifies this item and is not an episode number"
+    });
+  }
+  if (part) {
+    evidence.push({ code: "part_marker", token: part.matched, reason: "An explicit part marker was found" });
+  }
+  if (marker) {
+    evidence.push({
+      code: marker.evidenceCode,
+      token: marker.matched,
+      reason: `The item is explicitly marked as ${marker.contentType}`
+    });
+  }
+  if (numeric) {
+    evidence.push({
+      code: numeric.evidenceCode,
+      token: numeric.matched,
+      reason: `Parsed an explicit ${numeric.kind} identity`
+    });
+  }
+  const isTechnicalOnly = technicalOnly(value);
+  if (isTechnicalOnly) {
+    evidence.push({
+      code: "ignored_technical_token",
+      token: value,
+      reason: "Resolution, codec, language, or route labels cannot be episode numbers"
+    });
+  }
+  let contentType = marker?.contentType ?? "unknown";
+  if (!marker && numeric) contentType = "regular";
+  if (!marker && date) contentType = "regular";
+  if (!marker && isTechnicalOnly && options.mediaType === "movie") contentType = "movie";
+  const nonRegularMarker = marker !== null && marker.contentType !== "regular";
+  const episodeNumber = nonRegularMarker || date ? null : numeric?.number ?? null;
+  const numberKind = date ? "date" : marker?.contentType === "special" ? "special" : episodeNumber !== null ? numeric?.kind ?? "episode" : "none";
+  const consumed = [date?.matched ?? "", marker?.matched ?? "", numeric?.matched ?? "", part?.matched ?? ""];
+  if (nonRegularMarker && numeric) {
+    uncertainTokens.push(numeric.matched);
+  }
+  if (part && !numeric && !date) {
+    uncertainTokens.push(part.matched);
+  }
+  let confidence = "none";
+  if (date || marker || numeric?.confidence === "high") confidence = "high";
+  else if (numeric) confidence = numeric.confidence;
+  else if (part || isTechnicalOnly) confidence = "low";
+  if (evidence.length === 0) {
+    evidence.push({ code: "unrecognized", token: value, reason: "No reliable episode identity was found" });
+  }
+  return {
+    rawName: raw,
+    contentType,
+    seasonNumber: numeric?.season ?? null,
+    episodeNumber,
+    absoluteNumber: numeric?.kind === "episode" && numeric.season === null ? numeric.number : null,
+    specialNumber: marker?.specialNumber ?? null,
+    specialKind: marker?.specialKind ?? null,
+    airDate: date?.airDate ?? null,
+    episodeTitle: episodeTitle(value, consumed),
+    part: part?.part ?? null,
+    numberKind,
+    confidence,
+    ambiguous: numeric?.evidenceCode === "pure_numeric_label" || nonRegularMarker && numeric !== null || part !== null && numeric === null && date === null || marker?.contentType === "special" && marker.specialNumber === null,
+    evidence,
+    uncertainTokens
+  };
+}
+var EpisodeParser = class {
+  parse(rawName, options = {}) {
+    return parseEpisode(rawName, options);
+  }
+};
+
+// src/core/episode/episode-aligner.ts
+function parseSequence(sequence) {
+  return sequence.map((entry) => typeof entry === "string" ? parseEpisode(entry) : entry);
+}
+function normalizedEpisodeTitle(episode) {
+  return episode.episodeTitle ? normalizeTitleForIdentity(episode.episodeTitle) : "";
+}
+function compatibleContentType(left, right) {
+  return left.contentType === "unknown" || right.contentType === "unknown" || left.contentType === right.contentType;
+}
+function compatibleSeason(left, right) {
+  return left.seasonNumber === null || right.seasonNumber === null || left.seasonNumber === right.seasonNumber;
+}
+function matchCandidate(source, target, targetIndex) {
+  if (!compatibleContentType(source, target)) return null;
+  if (source.airDate !== null && target.airDate !== null && source.airDate === target.airDate) {
+    return {
+      targetIndex,
+      rank: 3,
+      mappingState: "confirmed",
+      evidence: [{
+        code: "exact_air_date",
+        reason: `Both entries identify broadcast date ${source.airDate}`,
+        targetIndex
+      }]
+    };
+  }
+  if (source.absoluteNumber !== null && target.absoluteNumber !== null && source.absoluteNumber === target.absoluteNumber && compatibleSeason(source, target)) {
+    return {
+      targetIndex,
+      rank: 3,
+      mappingState: "confirmed",
+      evidence: [{
+        code: "exact_absolute_number",
+        reason: `Both entries identify absolute episode ${source.absoluteNumber}`,
+        targetIndex
+      }]
+    };
+  }
+  if (source.episodeNumber !== null && target.episodeNumber !== null && source.episodeNumber === target.episodeNumber && source.numberKind === target.numberKind && compatibleSeason(source, target)) {
+    const isIssue = source.numberKind === "issue";
+    const seasonDescription = source.seasonNumber !== null && target.seasonNumber !== null ? ` in season ${source.seasonNumber}` : "";
+    return {
+      targetIndex,
+      rank: 3,
+      mappingState: "confirmed",
+      evidence: [{
+        code: isIssue ? "exact_issue_number" : "exact_episode_number",
+        reason: `Both entries identify ${isIssue ? "issue" : "episode"} ${source.episodeNumber}${seasonDescription}`,
+        targetIndex
+      }]
+    };
+  }
+  if (source.contentType === "special" && target.contentType === "special" && source.specialKind !== null && source.specialKind === target.specialKind && source.specialNumber !== null && source.specialNumber === target.specialNumber) {
+    return {
+      targetIndex,
+      rank: 3,
+      mappingState: "confirmed",
+      evidence: [{
+        code: "exact_special_identity",
+        reason: `Both entries identify ${source.specialKind.toUpperCase()} ${source.specialNumber}`,
+        targetIndex
+      }]
+    };
+  }
+  const sourceTitle = normalizedEpisodeTitle(source);
+  const targetTitle = normalizedEpisodeTitle(target);
+  if (sourceTitle && sourceTitle === targetTitle) {
+    const samePart = source.part !== null && source.part === target.part;
+    return {
+      targetIndex,
+      rank: samePart ? 2 : 1,
+      mappingState: samePart ? "supported" : "uncertain",
+      evidence: [{
+        code: "exact_content_title",
+        reason: samePart ? "Episode titles and explicit part markers are equal" : "Episode titles are equal, but title evidence alone cannot confirm an episode",
+        targetIndex
+      }]
+    };
+  }
+  return null;
+}
+function hasReliableIdentity(episode) {
+  return episode.airDate !== null || episode.episodeNumber !== null || episode.contentType === "special" && episode.specialKind !== null && episode.specialNumber !== null;
+}
+function canInferBetweenAnchors(episode) {
+  return !hasReliableIdentity(episode) && episode.contentType === "unknown" && episode.numberKind === "none" && episode.part === null;
+}
+function unresolvedMapping(sourceIndex, source, candidates) {
+  if (candidates.length === 0) {
+    const reliable = hasReliableIdentity(source);
+    return {
+      sourceIndex,
+      targetIndices: [],
+      state: reliable ? "unmatched" : "uncertain",
+      evidence: [{
+        code: "no_reliable_identity",
+        reason: reliable ? "The source has a reliable identity, but the target sequence has no compatible entry" : "The source entry has no reliable episode identity",
+        sourceIndex
+      }],
+      alternatives: []
+    };
+  }
+  const alternatives = candidates.map((candidate) => candidate.targetIndex);
+  return {
+    sourceIndex,
+    targetIndices: alternatives,
+    state: "uncertain",
+    evidence: [{
+      code: "ambiguous_candidates",
+      reason: candidates.length === 1 ? "Only episode-title evidence is available; title equality alone is not decisive" : `${candidates.length} target entries share the best available identity evidence`,
+      sourceIndex
+    }, ...candidates.flatMap((candidate) => candidate.evidence)],
+    alternatives
+  };
+}
+function automaticMapping(sourceIndex, source, targets) {
+  const candidates = targets.map((target, targetIndex) => matchCandidate(source, target, targetIndex)).filter((candidate) => candidate !== null);
+  const highestRank = candidates.reduce((rank, candidate) => Math.max(rank, candidate.rank), 0);
+  const best = candidates.filter((candidate) => candidate.rank === highestRank);
+  if (best.length !== 1) return unresolvedMapping(sourceIndex, source, best);
+  const selected = best[0];
+  if (!selected || selected.mappingState === "uncertain") {
+    return unresolvedMapping(sourceIndex, source, best);
+  }
+  return {
+    sourceIndex,
+    targetIndices: [selected.targetIndex],
+    state: selected.mappingState,
+    evidence: selected.evidence.map((evidence) => ({ ...evidence, sourceIndex })),
+    alternatives: []
+  };
+}
+function normalizedAnchorTargets(anchor) {
+  return [...new Set(anchor.targetIndices)].sort((left, right) => left - right);
+}
+function sameIndices(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+function manualMappings(sourceLength, targetLength, anchors) {
+  const mappings = /* @__PURE__ */ new Map();
+  const evidence = [];
+  for (const anchor of anchors) {
+    const targetIndices = normalizedAnchorTargets(anchor);
+    const inBounds = anchor.sourceIndex >= 0 && anchor.sourceIndex < sourceLength && targetIndices.length > 0 && targetIndices.every((index) => index >= 0 && index < targetLength);
+    if (!inBounds) {
+      evidence.push({
+        code: "anchor_conflict",
+        reason: `Manual anchor ${anchor.sourceIndex} -> [${targetIndices.join(", ")}] is out of bounds`,
+        sourceIndex: anchor.sourceIndex
+      });
+      continue;
+    }
+    const existing = mappings.get(anchor.sourceIndex);
+    if (existing && !sameIndices(existing.targetIndices, targetIndices)) {
+      const conflict = {
+        sourceIndex: anchor.sourceIndex,
+        targetIndices: [],
+        state: "conflicting",
+        evidence: [{
+          code: "anchor_conflict",
+          reason: `Manual anchors assign source ${anchor.sourceIndex} to different targets`,
+          sourceIndex: anchor.sourceIndex
+        }],
+        alternatives: [.../* @__PURE__ */ new Set([...existing.targetIndices, ...targetIndices])]
+      };
+      mappings.set(anchor.sourceIndex, conflict);
+      evidence.push(...conflict.evidence);
+      continue;
+    }
+    if (!existing) {
+      mappings.set(anchor.sourceIndex, {
+        sourceIndex: anchor.sourceIndex,
+        targetIndices,
+        state: "confirmed",
+        evidence: [{
+          code: "manual_anchor",
+          reason: anchor.evidence?.trim() || "A caller-provided manual anchor confirms this mapping",
+          sourceIndex: anchor.sourceIndex,
+          targetIndex: targetIndices.length === 1 ? targetIndices[0] : void 0
+        }],
+        alternatives: []
+      });
+    }
+  }
+  return { mappings, evidence };
+}
+function markOrderConflicts(mappings, sources, targets) {
+  const conflicts = /* @__PURE__ */ new Set();
+  const anchors = mappings.filter((mapping) => {
+    const targetIndex = mapping.targetIndices[0];
+    const source = sources[mapping.sourceIndex];
+    const target = targetIndex === void 0 ? void 0 : targets[targetIndex];
+    return mapping.state === "confirmed" && mapping.targetIndices.length === 1 && source?.contentType === "regular" && target?.contentType === "regular";
+  }).map((mapping) => ({
+    sourceIndex: mapping.sourceIndex,
+    targetIndex: mapping.targetIndices[0]
+  })).sort((left, right) => left.sourceIndex - right.sourceIndex);
+  for (let index = 1; index < anchors.length; index += 1) {
+    const previous = anchors[index - 1];
+    const current = anchors[index];
+    if (previous && current && current.targetIndex <= previous.targetIndex) {
+      conflicts.add(previous.sourceIndex);
+      conflicts.add(current.sourceIndex);
+    }
+  }
+  if (conflicts.size === 0) return { mappings, evidence: [] };
+  const evidence = [...conflicts].map((sourceIndex) => ({
+    code: "anchor_conflict",
+    reason: "Reliable episode anchors reverse or duplicate target sequence order",
+    sourceIndex
+  }));
+  return {
+    mappings: mappings.map((mapping) => conflicts.has(mapping.sourceIndex) ? {
+      ...mapping,
+      state: "conflicting",
+      evidence: [...mapping.evidence, ...evidence.filter((item) => item.sourceIndex === mapping.sourceIndex)],
+      alternatives: mapping.targetIndices,
+      targetIndices: []
+    } : mapping),
+    evidence
+  };
+}
+function inferBoundedMappings(mappings, sources, targets) {
+  const result = [...mappings];
+  const anchors = result.filter((mapping) => mapping.state === "confirmed" && mapping.targetIndices.length === 1).map((mapping) => ({
+    sourceIndex: mapping.sourceIndex,
+    targetIndex: mapping.targetIndices[0]
+  })).sort((left, right) => left.sourceIndex - right.sourceIndex);
+  const usedTargets = new Set(
+    result.filter((mapping) => mapping.state === "confirmed" || mapping.state === "supported").flatMap((mapping) => mapping.targetIndices)
+  );
+  for (let anchorIndex = 1; anchorIndex < anchors.length; anchorIndex += 1) {
+    const left = anchors[anchorIndex - 1];
+    const right = anchors[anchorIndex];
+    if (!left || !right || right.targetIndex <= left.targetIndex) continue;
+    const sourceIndices = Array.from(
+      { length: Math.max(0, right.sourceIndex - left.sourceIndex - 1) },
+      (_, offset) => left.sourceIndex + offset + 1
+    );
+    const targetIndices = Array.from(
+      { length: Math.max(0, right.targetIndex - left.targetIndex - 1) },
+      (_, offset) => left.targetIndex + offset + 1
+    ).filter((targetIndex) => !usedTargets.has(targetIndex));
+    if (sourceIndices.length === 0 || sourceIndices.length !== targetIndices.length) continue;
+    const inferable = sourceIndices.every((sourceIndex) => {
+      const mapping = result[sourceIndex];
+      const source = sources[sourceIndex];
+      return mapping?.state === "uncertain" && source !== void 0 && canInferBetweenAnchors(source);
+    }) && targetIndices.every((targetIndex) => {
+      const target = targets[targetIndex];
+      return target !== void 0 && canInferBetweenAnchors(target);
+    });
+    if (!inferable) continue;
+    sourceIndices.forEach((sourceIndex, offset) => {
+      const targetIndex = targetIndices[offset];
+      if (targetIndex === void 0) return;
+      result[sourceIndex] = {
+        sourceIndex,
+        targetIndices: [targetIndex],
+        state: "supported",
+        evidence: [{
+          code: "bounded_by_two_anchors",
+          reason: `Order is bounded by reliable mappings ${left.sourceIndex}->${left.targetIndex} and ${right.sourceIndex}->${right.targetIndex}`,
+          sourceIndex,
+          targetIndex
+        }],
+        alternatives: []
+      };
+      usedTargets.add(targetIndex);
+    });
+  }
+  return result;
+}
+function alignEpisodeSequences(sourceSequence, targetSequence, anchors = []) {
+  const sources = parseSequence(sourceSequence);
+  const targets = parseSequence(targetSequence);
+  const manual = manualMappings(sources.length, targets.length, anchors);
+  const initial = sources.map((source, sourceIndex) => manual.mappings.get(sourceIndex) ?? automaticMapping(sourceIndex, source, targets));
+  const ordered = markOrderConflicts(initial, sources, targets);
+  const mappings = ordered.evidence.length === 0 ? inferBoundedMappings(ordered.mappings, sources, targets) : ordered.mappings;
+  const evidence = [
+    ...manual.evidence,
+    ...ordered.evidence,
+    ...mappings.flatMap((mapping) => mapping.evidence)
+  ];
+  const reliableAnchorCount = mappings.filter(
+    (mapping) => mapping.state === "confirmed" && mapping.targetIndices.length > 0
+  ).length;
+  const hasConflict = manual.evidence.some((item) => item.code === "anchor_conflict") || mappings.some((mapping) => mapping.state === "conflicting");
+  const mappedCount = mappings.filter(
+    (mapping) => mapping.state === "confirmed" || mapping.state === "supported"
+  ).length;
+  return {
+    state: hasConflict ? "conflicting" : mappings.length > 0 && mappedCount === mappings.length ? "aligned" : mappedCount > 0 ? "partial" : "uncertain",
+    mappings,
+    reliableAnchorCount,
+    evidence
+  };
+}
+var EpisodeAligner = class {
+  align(sourceSequence, targetSequence, anchors = []) {
+    return alignEpisodeSequences(sourceSequence, targetSequence, anchors);
+  }
+};
+
+// src/core/episode/episode-resolver.ts
+function sameSourceCoordinate(left, right) {
+  const samePosition = left.sourceKey === right.sourceKey && left.vodId === right.vodId && left.playGroup === right.playGroup && left.playGroupIndex === right.playGroupIndex && left.rawIndex === right.rawIndex;
+  if (!samePosition) return false;
+  const leftName = left.rawEpisodeName.trim();
+  const rightName = right.rawEpisodeName.trim();
+  return leftName || rightName ? left.rawEpisodeName === right.rawEpisodeName : left.rawEntry === right.rawEntry;
+}
+function matchingSourceIndices(sourceEpisode, sourceSequence) {
+  return sourceSequence.flatMap((candidate, index) => sameSourceCoordinate(candidate, sourceEpisode) ? [index] : []);
+}
+function canonicalAsParsedEpisode(episode) {
+  const parsedTitle = parseEpisode(episode.episodeTitle ?? "");
+  const contentType = episode.contentType === "unknown" ? parsedTitle.contentType : episode.contentType;
+  const seasonNumber = episode.seasonNumber ?? parsedTitle.seasonNumber;
+  const episodeNumber = episode.episodeNumber ?? parsedTitle.episodeNumber;
+  const absoluteNumber = episode.absoluteNumber ?? parsedTitle.absoluteNumber;
+  const airDate = episode.airDate ?? parsedTitle.airDate;
+  const part = episode.part ?? parsedTitle.part;
+  const isSpecial = contentType === "special";
+  const hasNumber = episodeNumber !== null || absoluteNumber !== null;
+  return {
+    ...parsedTitle,
+    rawName: episode.episodeTitle ?? episode.canonicalEpisodeId,
+    contentType,
+    seasonNumber,
+    episodeNumber,
+    absoluteNumber,
+    specialNumber: isSpecial ? parsedTitle.specialNumber ?? episodeNumber ?? absoluteNumber : null,
+    specialKind: isSpecial ? parsedTitle.specialKind ?? "special" : null,
+    airDate,
+    episodeTitle: episode.episodeTitle ?? parsedTitle.episodeTitle,
+    part,
+    numberKind: airDate !== null ? "date" : isSpecial ? "special" : parsedTitle.numberKind !== "none" ? parsedTitle.numberKind : hasNumber ? "episode" : "none",
+    confidence: parsedTitle.confidence !== "none" || hasNumber || isSpecial ? "high" : "none",
+    ambiguous: parsedTitle.ambiguous
+  };
+}
+function prepareVerifiedMappings(input) {
+  const anchors = [];
+  const rejectionReasons = [];
+  for (const mapping of input.verifiedMappings ?? []) {
+    const sourceIndices = matchingSourceIndices(mapping.sourceEpisode, input.sourceSequence);
+    if (sourceIndices.length !== 1) {
+      rejectionReasons.push(
+        sourceIndices.length === 0 ? "A verified mapping references a source episode outside the supplied source sequence" : "A verified mapping does not uniquely identify one source episode in the supplied sequence"
+      );
+      continue;
+    }
+    const canonicalIds = [...new Set(mapping.canonicalEpisodeIds)];
+    if (canonicalIds.length === 0) {
+      rejectionReasons.push("A verified mapping must name at least one canonical episode");
+      continue;
+    }
+    const targetIndices = [];
+    for (const canonicalEpisodeId of canonicalIds) {
+      const matches = input.candidateEpisodes.flatMap((episode, index) => episode.canonicalEpisodeId === canonicalEpisodeId ? [index] : []);
+      if (matches.length !== 1) {
+        rejectionReasons.push(
+          matches.length === 0 ? `Verified canonical episode ${canonicalEpisodeId} is absent from the candidate sequence` : `Verified canonical episode ${canonicalEpisodeId} is duplicated in the candidate sequence`
+        );
+        continue;
+      }
+      const targetIndex = matches[0];
+      if (targetIndex !== void 0) targetIndices.push(targetIndex);
+    }
+    if (targetIndices.length !== canonicalIds.length) continue;
+    const sourceIndex = sourceIndices[0];
+    if (sourceIndex === void 0) continue;
+    anchors.push({
+      sourceIndex,
+      targetIndices,
+      evidence: mapping.evidence?.trim() || "A caller-provided verified mapping confirms this identity"
+    });
+  }
+  return { anchors, rejectionReasons };
+}
+function alignmentEvidence(evidence, candidateEpisodes) {
+  return evidence.map((item) => ({
+    ...item,
+    canonicalEpisodeId: item.targetIndex === void 0 ? void 0 : candidateEpisodes[item.targetIndex]?.canonicalEpisodeId
+  }));
+}
+function candidateResults(candidateEpisodes, targetIndices, state, evidence, rejectionReasons = []) {
+  return [...new Set(targetIndices)].flatMap((targetIndex) => {
+    const episode = candidateEpisodes[targetIndex];
+    if (!episode) return [];
+    const candidateEvidence = evidence.filter((item) => item.targetIndex === void 0 || item.targetIndex === targetIndex);
+    return [{ episode, state, evidence: candidateEvidence, rejectionReasons }];
+  });
+}
+function explicitSeasonConflict(source, candidates) {
+  if (source.seasonNumber === null) return [];
+  return candidates.flatMap((candidate, index) => {
+    if (candidate.seasonNumber === null || candidate.seasonNumber === source.seasonNumber) return [];
+    const sameEpisodeNumber = source.episodeNumber !== null && candidate.episodeNumber !== null && source.episodeNumber === candidate.episodeNumber;
+    const sameAbsoluteNumber = source.absoluteNumber !== null && candidate.absoluteNumber !== null && source.absoluteNumber === candidate.absoluteNumber;
+    return sameEpisodeNumber || sameAbsoluteNumber ? [index] : [];
+  });
+}
+function rejectedResult(input, alignment, targetIndices, evidence, rejectionReasons) {
+  return {
+    state: "rejected",
+    sourceEpisode: input.sourceEpisode,
+    selectedEpisode: null,
+    candidates: candidateResults(
+      input.candidateEpisodes,
+      targetIndices,
+      "rejected",
+      evidence,
+      rejectionReasons
+    ),
+    evidence,
+    rejectionReasons,
+    alignment,
+    reason: rejectionReasons.join("; ") || "Episode resolution evidence is conflicting"
+  };
+}
+function mappedResult(input, alignment, targetIndices, state, evidence) {
+  const candidates = candidateResults(input.candidateEpisodes, targetIndices, state, evidence);
+  return {
+    state,
+    sourceEpisode: input.sourceEpisode,
+    selectedEpisode: candidates.length === 1 ? candidates[0]?.episode ?? null : null,
+    candidates,
+    evidence,
+    rejectionReasons: [],
+    alignment,
+    reason: state === "verified" ? "A validated caller-provided mapping verifies the canonical episode identity" : "Reliable episode identity or bounded sequence evidence supports the canonical episode"
+  };
+}
+function resolveEpisode(input) {
+  const sourceEntries = input.sourceSequence.map((episode) => episode.parsedEpisodeInfo);
+  const targetEntries = input.candidateEpisodes.map(canonicalAsParsedEpisode);
+  const verified = prepareVerifiedMappings(input);
+  const alignment = alignEpisodeSequences(sourceEntries, targetEntries, verified.anchors);
+  const sourceIndices = matchingSourceIndices(input.sourceEpisode, input.sourceSequence);
+  const sourceIndex = sourceIndices.length === 1 ? sourceIndices[0] : void 0;
+  const membershipEvidence = {
+    code: sourceIndices.length === 1 ? "source_sequence_membership" : "verified_mapping_conflict",
+    reason: sourceIndices.length === 1 ? "The current source episode is uniquely present in the complete source sequence" : sourceIndices.length === 0 ? "The current source episode is absent from the supplied source sequence" : "The current source episode coordinate is duplicated in the supplied source sequence",
+    sourceIndex
+  };
+  if (sourceIndex === void 0) {
+    return rejectedResult(input, alignment, [], [membershipEvidence], [membershipEvidence.reason]);
+  }
+  const mediaConflictIndices = input.candidateEpisodes.flatMap((episode, index) => episode.mediaId === input.canonicalMedia.mediaId ? [] : [index]);
+  if (mediaConflictIndices.length > 0) {
+    const reasons = mediaConflictIndices.map((index) => {
+      const episode = input.candidateEpisodes[index];
+      return `Candidate ${episode?.canonicalEpisodeId ?? index} belongs to media ${episode?.mediaId ?? "unknown"}, not ${input.canonicalMedia.mediaId}`;
+    });
+    const evidence2 = [membershipEvidence, ...mediaConflictIndices.map((index, reasonIndex) => ({
+      code: "canonical_media_conflict",
+      reason: reasons[reasonIndex] ?? "Candidate media identity conflicts",
+      canonicalEpisodeId: input.candidateEpisodes[index]?.canonicalEpisodeId,
+      targetIndex: index
+    }))];
+    return rejectedResult(input, alignment, mediaConflictIndices, evidence2, reasons);
+  }
+  const canonicalSeasonConflicts = input.canonicalMedia.season === null ? [] : input.candidateEpisodes.flatMap((episode, index) => episode.seasonNumber !== null && episode.seasonNumber !== input.canonicalMedia.season ? [index] : []);
+  if (canonicalSeasonConflicts.length > 0) {
+    const reasons = canonicalSeasonConflicts.map((index) => `Candidate ${input.candidateEpisodes[index]?.canonicalEpisodeId ?? index} declares season ${input.candidateEpisodes[index]?.seasonNumber}, but canonical media declares season ${input.canonicalMedia.season}`);
+    const evidence2 = [membershipEvidence, ...canonicalSeasonConflicts.map((index, reasonIndex) => ({
+      code: "explicit_season_conflict",
+      reason: reasons[reasonIndex] ?? "Canonical season identity conflicts",
+      canonicalEpisodeId: input.candidateEpisodes[index]?.canonicalEpisodeId,
+      targetIndex: index
+    }))];
+    return rejectedResult(input, alignment, canonicalSeasonConflicts, evidence2, reasons);
+  }
+  if (verified.rejectionReasons.length > 0) {
+    const evidence2 = [membershipEvidence, ...verified.rejectionReasons.map((reason) => ({
+      code: "verified_mapping_conflict",
+      reason
+    }))];
+    return rejectedResult(input, alignment, [], evidence2, verified.rejectionReasons);
+  }
+  const mapping = alignment.mappings[sourceIndex];
+  if (!mapping) {
+    const reason = "The aligner produced no mapping for the current source episode";
+    return rejectedResult(input, alignment, [], [membershipEvidence, {
+      code: "verified_mapping_conflict",
+      reason,
+      sourceIndex
+    }], [reason]);
+  }
+  const mappedEvidence = alignmentEvidence(mapping.evidence, input.candidateEpisodes);
+  const scopedEvidence = {
+    code: "canonical_media_match",
+    reason: `All candidate episodes belong to canonical media ${input.canonicalMedia.mediaId}`
+  };
+  const evidence = [membershipEvidence, scopedEvidence, ...mappedEvidence];
+  const verifiedCurrent = verified.anchors.some((anchor) => anchor.sourceIndex === sourceIndex);
+  if (mapping.state === "conflicting" || alignment.state === "conflicting") {
+    const reasons = mapping.evidence.filter((item) => item.code === "anchor_conflict").map((item) => item.reason);
+    if (reasons.length === 0) reasons.push("Episode evidence conflicts with reliable sequence order");
+    return rejectedResult(input, alignment, mapping.alternatives, evidence, reasons);
+  }
+  if (verifiedCurrent) {
+    const verifiedEvidence = [
+      ...evidence,
+      ...mapping.targetIndices.map((targetIndex) => ({
+        code: "verified_mapping",
+        reason: "The source identity and canonical episode ID were both validated before using this mapping",
+        canonicalEpisodeId: input.candidateEpisodes[targetIndex]?.canonicalEpisodeId,
+        sourceIndex,
+        targetIndex
+      }))
+    ];
+    return mappedResult(input, alignment, mapping.targetIndices, "verified", verifiedEvidence);
+  }
+  if (input.canonicalMedia.season !== null && input.sourceEpisode.parsedEpisodeInfo.seasonNumber !== null && input.canonicalMedia.season !== input.sourceEpisode.parsedEpisodeInfo.seasonNumber) {
+    const reason = `Source episode declares season ${input.sourceEpisode.parsedEpisodeInfo.seasonNumber}, but canonical media declares season ${input.canonicalMedia.season}`;
+    return rejectedResult(input, alignment, [], [...evidence, {
+      code: "explicit_season_conflict",
+      reason,
+      sourceIndex
+    }], [reason]);
+  }
+  const seasonConflicts = explicitSeasonConflict(
+    input.sourceEpisode.parsedEpisodeInfo,
+    input.candidateEpisodes
+  );
+  if (mapping.state === "unmatched" && seasonConflicts.length > 0) {
+    const reasons = seasonConflicts.map((index) => {
+      const candidate = input.candidateEpisodes[index];
+      return `Episode number agrees with ${candidate?.canonicalEpisodeId ?? index}, but explicit seasons ${input.sourceEpisode.parsedEpisodeInfo.seasonNumber} and ${candidate?.seasonNumber} conflict`;
+    });
+    const conflictEvidence = [...evidence, ...seasonConflicts.map((index, reasonIndex) => ({
+      code: "explicit_season_conflict",
+      reason: reasons[reasonIndex] ?? "Explicit episode seasons conflict",
+      canonicalEpisodeId: input.candidateEpisodes[index]?.canonicalEpisodeId,
+      sourceIndex,
+      targetIndex: index
+    }))];
+    return rejectedResult(input, alignment, seasonConflicts, conflictEvidence, reasons);
+  }
+  if (mapping.state === "confirmed" || mapping.state === "supported") {
+    return mappedResult(input, alignment, mapping.targetIndices, "supported", evidence);
+  }
+  if (mapping.state === "unmatched") {
+    return {
+      state: "not_found",
+      sourceEpisode: input.sourceEpisode,
+      selectedEpisode: null,
+      candidates: [],
+      evidence,
+      rejectionReasons: [],
+      alignment,
+      reason: "The source episode has a reliable identity that is absent from the canonical candidates"
+    };
+  }
+  return {
+    state: "uncertain",
+    sourceEpisode: input.sourceEpisode,
+    selectedEpisode: null,
+    candidates: candidateResults(
+      input.candidateEpisodes,
+      mapping.targetIndices,
+      "uncertain",
+      evidence
+    ),
+    evidence,
+    rejectionReasons: [],
+    alignment,
+    reason: mapping.targetIndices.length > 0 ? "Available evidence leaves multiple or title-only canonical candidates" : "The source episode has insufficient identity evidence"
+  };
+}
+var EpisodeResolver = class {
+  resolve(input) {
+    return resolveEpisode(input);
+  }
+};
+
+// src/core/source/source-normalizer.ts
+var HTML_ENTITIES = {
+  "&amp;": "&",
+  "&nbsp;": " ",
+  "&#36;": "$",
+  "&quot;": '"',
+  "&#39;": "'"
+};
+function stringValue(value) {
+  if (value === null || value === void 0) return "";
+  return String(value);
+}
+function cleanText(value) {
+  let result = stringValue(value).replace(/<[^>]*>/g, " ");
+  for (const [entity, replacement] of Object.entries(HTML_ENTITIES)) {
+    result = result.replaceAll(entity, replacement);
+  }
+  return result.replace(/\s+/g, " ").trim();
+}
+function splitPeople(value) {
+  const seen = /* @__PURE__ */ new Set();
+  return cleanText(value).split(/[,，、/|;；]+/).map((item) => item.trim()).filter((item) => {
+    if (!item || seen.has(item)) return false;
+    seen.add(item);
+    return true;
+  });
+}
+function parseYear(value) {
+  const match = cleanText(value).match(/(?:^|\D)((?:19|20)\d{2})(?:\D|$)/);
+  return match ? Number(match[1]) : null;
+}
+function classifyMediaType(category) {
+  const value = cleanText(category).toLowerCase();
+  if (!value) return "unknown";
+  if (/(动漫|动画|anime)/i.test(value)) return "anime";
+  if (/(综艺|真人秀|variety)/i.test(value)) return "variety";
+  if (/(纪录片|纪录|documentary)/i.test(value)) return "documentary";
+  if (/(电影|影片|movie)/i.test(value)) return "movie";
+  if (/(电视剧|连续剧|剧集|欧美剧|国产剧|日韩剧|tv)/i.test(value)) return "series";
+  return "unknown";
+}
+function parseSourceEpisodeNumber(rawEpisodeName, mediaType = "unknown") {
+  return parseEpisode(stringValue(rawEpisodeName), { mediaType });
+}
+function isPlayableUrl(value) {
+  return /^https?:\/\//i.test(value.trim());
+}
+function parseEpisodeEntry(rawEntry, rawIndex, group, mediaType) {
+  if (!rawEntry.trim()) return null;
+  const separatorIndex = rawEntry.indexOf("$");
+  const rawName = separatorIndex >= 0 ? rawEntry.slice(0, separatorIndex) : "";
+  const playUrl = (separatorIndex >= 0 ? rawEntry.slice(separatorIndex + 1) : rawEntry).trim();
+  if (!isPlayableUrl(playUrl)) return null;
+  const cleanedName = cleanText(rawName);
+  return {
+    sourceKey: group.sourceKey,
+    vodId: group.vodId,
+    playGroup: group.displayName,
+    playGroupIndex: group.rawIndex,
+    rawIndex,
+    rawEpisodeName: rawName,
+    displayName: cleanedName || `\u64AD\u653E\u9879 ${rawIndex + 1}`,
+    rawEntry,
+    playUrl,
+    parsedEpisodeInfo: parseSourceEpisodeNumber(rawName, mediaType),
+    canonicalEpisodeId: null,
+    mappingState: "unmapped",
+    mappingEvidence: []
+  };
+}
+function parseAppleCmsPlaySources(sourceKey, vodId, vodPlayFrom, vodPlayUrl, mediaType = "unknown") {
+  const rawFrom = stringValue(vodPlayFrom);
+  const rawUrl = stringValue(vodPlayUrl);
+  if (!rawUrl) return [];
+  const groupNames = rawFrom.split("$$$");
+  return rawUrl.split("$$$").map((rawValue, rawIndex) => {
+    const rawName = groupNames[rawIndex] ?? "";
+    const displayName = cleanText(rawName) || `\u64AD\u653E\u6E90 ${rawIndex + 1}`;
+    const groupBase = { sourceKey, vodId, rawIndex, displayName };
+    const episodes = rawValue.split("#").map((entry, episodeIndex) => parseEpisodeEntry(entry, episodeIndex, groupBase, mediaType)).filter((episode) => episode !== null);
+    if (episodes.length === 0) return null;
+    return {
+      ...groupBase,
+      rawName,
+      rawValue,
+      episodes
+    };
+  }).filter((group) => group !== null);
+}
+var SourceNormalizer = class {
+  static normalize(raw, context) {
+    const vodId = stringValue(raw.vod_id).trim();
+    const rawTitle = stringValue(raw.vod_name);
+    const rawYear = stringValue(raw.vod_year);
+    const rawDirector = stringValue(raw.vod_director);
+    const rawActors = stringValue(raw.vod_actor);
+    const rawArea = stringValue(raw.vod_area);
+    const rawLanguage = stringValue(raw.vod_lang);
+    const rawCategory = stringValue(raw.type_name ?? raw.vod_class);
+    const rawRemarks = stringValue(raw.vod_remarks);
+    const rawDescription = stringValue(raw.vod_content);
+    const rawCover = stringValue(raw.vod_pic);
+    const vodPlayFrom = stringValue(raw.vod_play_from);
+    const vodPlayUrl = stringValue(raw.vod_play_url);
+    const mediaType = classifyMediaType(rawCategory);
+    const parsedTitle = parseTitle(rawTitle);
+    const parsedRemarks = parseTitle(rawRemarks);
+    return {
+      sourceKey: context.sourceKey,
+      sourceName: context.sourceName ?? context.sourceKey,
+      vodId,
+      rawTitle,
+      rawYear,
+      rawDirector,
+      rawActors,
+      rawArea,
+      rawLanguage,
+      rawCategory,
+      rawRemarks,
+      rawDescription,
+      rawCover,
+      rawPlaySources: { vodPlayFrom, vodPlayUrl },
+      rawData: { ...raw },
+      normalizedTitle: cleanText(rawTitle).normalize("NFKC").toLowerCase(),
+      normalizedActors: splitPeople(rawActors),
+      normalizedDirector: splitPeople(rawDirector),
+      parsedYear: parseYear(rawYear),
+      parsedSeason: parsedTitle.season ?? parsedRemarks.season,
+      mediaType,
+      playGroups: parseAppleCmsPlaySources(context.sourceKey, vodId, vodPlayFrom, vodPlayUrl, mediaType),
+      fetchedAt: context.fetchedAt ?? Date.now()
+    };
+  }
+};
+
+// src/core/source/apple-cms-adapter.ts
+var DEFAULT_ENDPOINT_PATH = "/api.php/provide/vod/";
+var DEFAULT_TIMEOUT_MS = 1e4;
+function nonNegativeInteger(value) {
+  const text = typeof value === "number" ? String(value) : String(value ?? "").trim();
+  if (!text) return null;
+  const parsed = Number(text);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+function positiveInteger(value) {
+  const parsed = nonNegativeInteger(value);
+  return parsed !== null && parsed > 0 ? parsed : null;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function buildEndpointUrl(config, requestKind) {
+  const configuredBaseUrl = requestKind === "detail" ? config.detailBaseUrl ?? config.baseUrl : config.baseUrl;
+  let base;
+  try {
+    base = new URL(configuredBaseUrl.trim());
+  } catch (error) {
+    throw new SourceError("invalid_argument", `\u91C7\u96C6\u6E90 ${config.sourceKey} \u7684 URL \u65E0\u6548`, {
+      sourceKey: config.sourceKey,
+      cause: error
+    });
+  }
+  if (!/^https?:$/.test(base.protocol)) {
+    throw new SourceError("invalid_argument", `\u91C7\u96C6\u6E90 ${config.sourceKey} \u4EC5\u652F\u6301 HTTP(S) URL`, {
+      sourceKey: config.sourceKey
+    });
+  }
+  const alreadyProviderEndpoint = /\/api\.php\/provide\/vod\/?$/i.test(base.pathname);
+  if (!alreadyProviderEndpoint) {
+    const basePath = base.pathname.replace(/\/+$/, "");
+    const configuredEndpointPath = requestKind === "detail" ? config.detailEndpointPath ?? config.endpointPath : config.endpointPath;
+    const endpointPath = (configuredEndpointPath ?? DEFAULT_ENDPOINT_PATH).trim().replace(/^\/+/, "").replace(/\/+$/, "");
+    base.pathname = `${basePath}/${endpointPath}/`.replace(/\/{2,}/g, "/");
+  }
+  base.hash = "";
+  for (const [key, value] of Object.entries(config.query ?? {})) {
+    base.searchParams.set(key, value);
+  }
+  return base;
+}
+function normalizeResponse(raw, sourceKey, requestedPage) {
+  if (!isRecord(raw) || !Array.isArray(raw.list)) {
+    throw new SourceError("invalid_response", `\u91C7\u96C6\u6E90 ${sourceKey} \u8FD4\u56DE\u7684\u6570\u636E\u683C\u5F0F\u65E0\u6548`, { sourceKey });
+  }
+  if (!raw.list.every(isRecord)) {
+    throw new SourceError("invalid_response", `\u91C7\u96C6\u6E90 ${sourceKey} \u8FD4\u56DE\u4E86\u65E0\u6548\u7684\u5F71\u89C6\u8BB0\u5F55`, { sourceKey });
+  }
+  if (raw.list.some((item) => {
+    const vodId = item.vod_id;
+    return !(typeof vodId === "string" && vodId.trim().length > 0 || typeof vodId === "number" && Number.isFinite(vodId));
+  })) {
+    throw new SourceError("invalid_response", `\u91C7\u96C6\u6E90 ${sourceKey} \u8FD4\u56DE\u4E86\u7F3A\u5C11 vod_id \u7684\u5F71\u89C6\u8BB0\u5F55`, { sourceKey });
+  }
+  return {
+    list: raw.list,
+    page: positiveInteger(raw.page) ?? requestedPage,
+    pageCount: nonNegativeInteger(raw.pagecount ?? raw.page_count),
+    total: nonNegativeInteger(raw.total)
+  };
+}
+var AppleCMSAdapter = class {
+  constructor(config, dependencies = {}) {
+    __publicField(this, "sourceKey");
+    __publicField(this, "sourceName");
+    __publicField(this, "config");
+    __publicField(this, "fetchFn");
+    __publicField(this, "now");
+    __publicField(this, "transformRequestUrl");
+    if (!config.sourceKey.trim() || !config.sourceName.trim()) {
+      throw new SourceError("invalid_argument", "\u91C7\u96C6\u6E90\u5FC5\u987B\u63D0\u4F9B sourceKey \u548C sourceName");
+    }
+    if (!Number.isFinite(config.timeoutMs ?? DEFAULT_TIMEOUT_MS) || (config.timeoutMs ?? DEFAULT_TIMEOUT_MS) <= 0) {
+      throw new SourceError("invalid_argument", `\u91C7\u96C6\u6E90 ${config.sourceKey} \u7684 timeoutMs \u65E0\u6548`, {
+        sourceKey: config.sourceKey
+      });
+    }
+    const fetchFn = dependencies.fetch ?? globalThis.fetch;
+    if (typeof fetchFn !== "function") {
+      throw new SourceError("invalid_argument", "\u5F53\u524D\u73AF\u5883\u6CA1\u6709\u53EF\u7528\u7684 fetch\uFF0C\u8BF7\u663E\u5F0F\u6CE8\u5165");
+    }
+    buildEndpointUrl(config, "search");
+    buildEndpointUrl(config, "detail");
+    this.config = config;
+    this.sourceKey = config.sourceKey;
+    this.sourceName = config.sourceName;
+    this.fetchFn = fetchFn.bind(globalThis);
+    this.now = dependencies.now ?? Date.now;
+    this.transformRequestUrl = dependencies.transformRequestUrl ?? ((url) => url);
+  }
+  async search(query, options = {}) {
+    const cleanQuery = query.trim();
+    if (!cleanQuery) {
+      throw new SourceError("invalid_argument", "\u641C\u7D22\u5173\u952E\u8BCD\u4E0D\u80FD\u4E3A\u7A7A", { sourceKey: this.sourceKey });
+    }
+    const page = options.page ?? 1;
+    if (!Number.isSafeInteger(page) || page < 1) {
+      throw new SourceError("invalid_argument", "\u641C\u7D22\u9875\u7801\u5FC5\u987B\u662F\u6B63\u6574\u6570", { sourceKey: this.sourceKey });
+    }
+    const url = this.createRequestUrl("search", {
+      ac: this.config.searchAction ?? "videolist",
+      wd: cleanQuery,
+      pg: String(page)
+    });
+    const response = normalizeResponse(await this.requestJson(url, options), this.sourceKey, page);
+    const fetchedAt = this.now();
+    return {
+      sourceKey: this.sourceKey,
+      page: response.page,
+      pageCount: response.pageCount,
+      total: response.total,
+      records: response.list.map((record) => SourceNormalizer.normalize(record, {
+        sourceKey: this.sourceKey,
+        sourceName: this.sourceName,
+        fetchedAt
+      }))
+    };
+  }
+  async detail(vodId, options = {}) {
+    const cleanVodId = vodId.trim();
+    if (!cleanVodId) {
+      throw new SourceError("invalid_argument", "vodId \u4E0D\u80FD\u4E3A\u7A7A", { sourceKey: this.sourceKey });
+    }
+    const url = this.createRequestUrl("detail", {
+      ac: this.config.detailAction ?? "videolist",
+      ids: cleanVodId
+    });
+    const response = normalizeResponse(await this.requestJson(url, options), this.sourceKey, 1);
+    const record = response.list.find((item) => String(item.vod_id ?? "").trim() === cleanVodId);
+    if (!record) {
+      throw new SourceError("record_not_found", `\u91C7\u96C6\u6E90 ${this.sourceKey} \u672A\u8FD4\u56DE vodId=${cleanVodId}`, {
+        sourceKey: this.sourceKey
+      });
+    }
+    return SourceNormalizer.normalize(record, {
+      sourceKey: this.sourceKey,
+      sourceName: this.sourceName,
+      fetchedAt: this.now()
+    });
+  }
+  createRequestUrl(requestKind, params) {
+    const url = buildEndpointUrl(this.config, requestKind);
+    for (const [key, value] of Object.entries(params)) {
+      url.searchParams.set(key, value);
+    }
+    return url.toString();
+  }
+  async requestJson(upstreamUrl, options) {
+    if (options.signal?.aborted) {
+      throw new SourceError("aborted", `\u91C7\u96C6\u6E90 ${this.sourceKey} \u8BF7\u6C42\u5DF2\u53D6\u6D88`, {
+        sourceKey: this.sourceKey,
+        cause: options.signal.reason
+      });
+    }
+    const controller = new AbortController();
+    const timeoutMs = this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    let timedOut = false;
+    let rejectOnAbort = () => void 0;
+    const abortPromise = new Promise((_resolve, reject) => {
+      rejectOnAbort = () => {
+        if (timedOut) {
+          reject(new SourceError("timeout", `\u91C7\u96C6\u6E90 ${this.sourceKey} \u8BF7\u6C42\u8D85\u65F6`, {
+            sourceKey: this.sourceKey,
+            retryable: true
+          }));
+          return;
+        }
+        reject(new SourceError("aborted", `\u91C7\u96C6\u6E90 ${this.sourceKey} \u8BF7\u6C42\u5DF2\u53D6\u6D88`, {
+          sourceKey: this.sourceKey,
+          cause: options.signal?.reason
+        }));
+      };
+      controller.signal.addEventListener("abort", rejectOnAbort, { once: true });
+    });
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort("timeout");
+    }, timeoutMs);
+    const abortFromCaller = () => controller.abort(options.signal?.reason);
+    options.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    if (options.signal?.aborted) abortFromCaller();
+    try {
+      const requestPromise = (async () => {
+        const requestUrl = await this.transformRequestUrl(upstreamUrl);
+        const response = await this.fetchFn(requestUrl, {
+          headers: {
+            Accept: "application/json",
+            ...this.config.headers
+          },
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          throw new SourceError("http_error", `\u91C7\u96C6\u6E90 ${this.sourceKey} \u8BF7\u6C42\u5931\u8D25: HTTP ${response.status}`, {
+            sourceKey: this.sourceKey,
+            status: response.status,
+            retryable: response.status === 408 || response.status === 429 || response.status >= 500
+          });
+        }
+        try {
+          return await response.json();
+        } catch (error) {
+          throw new SourceError("invalid_response", `\u91C7\u96C6\u6E90 ${this.sourceKey} \u8FD4\u56DE\u7684\u5185\u5BB9\u4E0D\u662F\u6709\u6548 JSON`, {
+            sourceKey: this.sourceKey,
+            cause: error
+          });
+        }
+      })();
+      return await Promise.race([requestPromise, abortPromise]);
+    } catch (error) {
+      if (error instanceof SourceError) throw error;
+      if (options.signal?.aborted) {
+        throw new SourceError("aborted", `\u91C7\u96C6\u6E90 ${this.sourceKey} \u8BF7\u6C42\u5DF2\u53D6\u6D88`, {
+          sourceKey: this.sourceKey,
+          cause: error
+        });
+      }
+      if (controller.signal.aborted) {
+        throw new SourceError("timeout", `\u91C7\u96C6\u6E90 ${this.sourceKey} \u8BF7\u6C42\u8D85\u65F6`, {
+          sourceKey: this.sourceKey,
+          retryable: true,
+          cause: error
+        });
+      }
+      throw new SourceError("network_error", `\u91C7\u96C6\u6E90 ${this.sourceKey} \u7F51\u7EDC\u8BF7\u6C42\u5931\u8D25`, {
+        sourceKey: this.sourceKey,
+        retryable: true,
+        cause: error
+      });
+    } finally {
+      clearTimeout(timeoutId);
+      options.signal?.removeEventListener("abort", abortFromCaller);
+      controller.signal.removeEventListener("abort", rejectOnAbort);
+    }
+  }
+};
+
+// src/core/source/source-manager.ts
+var DEFAULT_CONCURRENCY = 5;
+var DEFAULT_TIMEOUT_MS2 = 1e4;
+var DEFAULT_CACHE_TTL_MS = 3e4;
+var DEFAULT_CACHE_MAX_ENTRIES = 100;
+function asSourceError(error, sourceKey) {
+  if (error instanceof SourceError) return error;
+  return new SourceError("network_error", `\u91C7\u96C6\u6E90 ${sourceKey} \u8BF7\u6C42\u5931\u8D25`, {
+    sourceKey,
+    retryable: true,
+    cause: error
+  });
+}
+var SourceManager = class {
+  constructor(adapters, options = {}) {
+    __publicField(this, "adapters", /* @__PURE__ */ new Map());
+    __publicField(this, "concurrency");
+    __publicField(this, "timeoutMs");
+    __publicField(this, "cacheTtlMs");
+    __publicField(this, "cacheMaxEntries");
+    __publicField(this, "now");
+    __publicField(this, "cache", /* @__PURE__ */ new Map());
+    this.concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS2;
+    this.cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+    this.cacheMaxEntries = options.cacheMaxEntries ?? DEFAULT_CACHE_MAX_ENTRIES;
+    this.now = options.now ?? Date.now;
+    if (!Number.isSafeInteger(this.concurrency) || this.concurrency < 1) {
+      throw new SourceError("invalid_argument", "SourceManager concurrency \u5FC5\u987B\u662F\u6B63\u6574\u6570");
+    }
+    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) {
+      throw new SourceError("invalid_argument", "SourceManager timeoutMs \u5FC5\u987B\u662F\u6B63\u6570");
+    }
+    if (!Number.isFinite(this.cacheTtlMs) || this.cacheTtlMs < 0) {
+      throw new SourceError("invalid_argument", "SourceManager cacheTtlMs \u4E0D\u80FD\u4E3A\u8D1F\u6570");
+    }
+    if (!Number.isSafeInteger(this.cacheMaxEntries) || this.cacheMaxEntries < 0) {
+      throw new SourceError("invalid_argument", "SourceManager cacheMaxEntries \u4E0D\u80FD\u4E3A\u8D1F\u6570");
+    }
+    for (const adapter of adapters) {
+      if (this.adapters.has(adapter.sourceKey)) {
+        throw new SourceError("invalid_argument", `\u91CD\u590D\u7684\u91C7\u96C6\u6E90 sourceKey: ${adapter.sourceKey}`);
+      }
+      this.adapters.set(adapter.sourceKey, adapter);
+    }
+  }
+  get sourceKeys() {
+    return [...this.adapters.keys()];
+  }
+  async search(query, options = {}) {
+    const cleanQuery = query.trim();
+    if (!cleanQuery) throw new SourceError("invalid_argument", "\u641C\u7D22\u5173\u952E\u8BCD\u4E0D\u80FD\u4E3A\u7A7A");
+    const page = options.page ?? 1;
+    if (!Number.isSafeInteger(page) || page < 1) {
+      throw new SourceError("invalid_argument", "\u641C\u7D22\u9875\u7801\u5FC5\u987B\u662F\u6B63\u6574\u6570");
+    }
+    const sourceKeys = options.sourceKeys ? [...new Set(options.sourceKeys)] : this.sourceKeys;
+    for (const sourceKey of sourceKeys) this.requireAdapter(sourceKey);
+    const pages = [];
+    const failures = [];
+    let cursor = 0;
+    const workerCount = Math.min(this.concurrency, sourceKeys.length);
+    const worker = async () => {
+      while (cursor < sourceKeys.length) {
+        if (options.signal?.aborted) {
+          throw new SourceError("aborted", "\u591A\u6E90\u641C\u7D22\u5DF2\u53D6\u6D88", { cause: options.signal.reason });
+        }
+        const sourceKey = sourceKeys[cursor];
+        cursor += 1;
+        if (sourceKey === void 0) break;
+        const adapter = this.requireAdapter(sourceKey);
+        try {
+          const result = await this.getOrLoad(
+            `search:${sourceKey}:${page}:${cleanQuery}`,
+            () => this.runAdapterRequest(
+              sourceKey,
+              options.signal,
+              (signal) => adapter.search(cleanQuery, { page, signal })
+            )
+          );
+          pages.push(result);
+          options.onSourceResult?.({ sourceKey, page: result });
+        } catch (error) {
+          const sourceError = asSourceError(error, sourceKey);
+          if (sourceError.code === "aborted" && options.signal?.aborted) throw sourceError;
+          failures.push({ sourceKey, error: sourceError });
+          options.onSourceResult?.({ sourceKey, error: sourceError });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: workerCount }, worker));
+    return {
+      records: pages.flatMap((result) => result.records),
+      pages,
+      failures
+    };
+  }
+  async detail(sourceKey, vodId, signal) {
+    const adapter = this.requireAdapter(sourceKey);
+    const cleanVodId = vodId.trim();
+    if (!cleanVodId) {
+      throw new SourceError("invalid_argument", "vodId \u4E0D\u80FD\u4E3A\u7A7A", { sourceKey });
+    }
+    return this.getOrLoad(
+      `detail:${sourceKey}:${cleanVodId}`,
+      () => this.runAdapterRequest(
+        sourceKey,
+        signal,
+        (requestSignal) => adapter.detail(cleanVodId, { signal: requestSignal })
+      )
+    );
+  }
+  clearCache(sourceKey) {
+    if (!sourceKey) {
+      this.cache.clear();
+      return;
+    }
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(`search:${sourceKey}:`) || key.startsWith(`detail:${sourceKey}:`)) {
+        this.cache.delete(key);
+      }
+    }
+  }
+  requireAdapter(sourceKey) {
+    const adapter = this.adapters.get(sourceKey);
+    if (!adapter) {
+      throw new SourceError("unknown_source", `\u672A\u77E5\u91C7\u96C6\u6E90: ${sourceKey}`, { sourceKey });
+    }
+    return adapter;
+  }
+  async getOrLoad(key, load) {
+    const cached = this.cache.get(key);
+    const now = this.now();
+    if (cached && cached.expiresAt > now) {
+      this.cache.delete(key);
+      this.cache.set(key, cached);
+      return cached.value;
+    }
+    if (cached) this.cache.delete(key);
+    const value = await load();
+    if (this.cacheTtlMs > 0 && this.cacheMaxEntries > 0) {
+      this.cache.set(key, { value, expiresAt: this.now() + this.cacheTtlMs });
+      this.pruneCache();
+    }
+    return value;
+  }
+  async runAdapterRequest(sourceKey, parentSignal, operation) {
+    if (parentSignal?.aborted) {
+      throw new SourceError("aborted", `\u91C7\u96C6\u6E90 ${sourceKey} \u8BF7\u6C42\u5DF2\u53D6\u6D88`, {
+        sourceKey,
+        cause: parentSignal.reason
+      });
+    }
+    const controller = new AbortController();
+    let timedOut = false;
+    let rejectOnAbort = () => void 0;
+    const abortPromise = new Promise((_resolve, reject) => {
+      rejectOnAbort = () => {
+        if (timedOut) {
+          reject(new SourceError("timeout", `\u91C7\u96C6\u6E90 ${sourceKey} \u8BF7\u6C42\u8D85\u65F6`, {
+            sourceKey,
+            retryable: true
+          }));
+          return;
+        }
+        reject(new SourceError("aborted", `\u91C7\u96C6\u6E90 ${sourceKey} \u8BF7\u6C42\u5DF2\u53D6\u6D88`, {
+          sourceKey,
+          cause: parentSignal?.reason
+        }));
+      };
+      controller.signal.addEventListener("abort", rejectOnAbort, { once: true });
+    });
+    const abortFromParent = () => controller.abort(parentSignal?.reason);
+    parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort("timeout");
+    }, this.timeoutMs);
+    try {
+      const operationPromise = Promise.resolve().then(() => operation(controller.signal));
+      return await Promise.race([operationPromise, abortPromise]);
+    } catch (error) {
+      if (error instanceof SourceError) throw error;
+      if (timedOut) {
+        throw new SourceError("timeout", `\u91C7\u96C6\u6E90 ${sourceKey} \u8BF7\u6C42\u8D85\u65F6`, {
+          sourceKey,
+          retryable: true,
+          cause: error
+        });
+      }
+      if (parentSignal?.aborted) {
+        throw new SourceError("aborted", `\u91C7\u96C6\u6E90 ${sourceKey} \u8BF7\u6C42\u5DF2\u53D6\u6D88`, {
+          sourceKey,
+          cause: error
+        });
+      }
+      throw asSourceError(error, sourceKey);
+    } finally {
+      clearTimeout(timeoutId);
+      parentSignal?.removeEventListener("abort", abortFromParent);
+      controller.signal.removeEventListener("abort", rejectOnAbort);
+    }
+  }
+  pruneCache() {
+    const now = this.now();
+    for (const [key, entry] of this.cache) {
+      if (entry.expiresAt <= now) this.cache.delete(key);
+    }
+    while (this.cache.size > this.cacheMaxEntries) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey === void 0) break;
+      this.cache.delete(oldestKey);
+    }
+  }
+};
+
+// src/core/index.ts
+var LibertyCore = Object.freeze({
+  SourceError,
+  TitleParser,
+  parseTitle,
+  CandidateEvidenceCollector,
+  collectCandidateEvidence,
+  DEFAULT_IDENTITY_POLICY,
+  EntityResolver,
+  resolveEntityIdentity,
+  EpisodeParser,
+  parseEpisode,
+  EpisodeAligner,
+  alignEpisodeSequences,
+  EpisodeResolver,
+  resolveEpisode,
+  SourceNormalizer,
+  parseAppleCmsPlaySources,
+  AppleCMSAdapter,
+  SourceManager
+});
+if (typeof window !== "undefined") {
+  window.LibertyCore = LibertyCore;
+}
+export {
+  AppleCMSAdapter,
+  CandidateEvidenceCollector,
+  DEFAULT_IDENTITY_POLICY,
+  EntityResolver,
+  EpisodeAligner,
+  EpisodeParser,
+  EpisodeResolver,
+  LibertyCore,
+  SourceError,
+  SourceManager,
+  SourceNormalizer,
+  TitleParser,
+  alignEpisodeSequences,
+  collectCandidateEvidence,
+  parseAppleCmsPlaySources,
+  parseEpisode,
+  parseTitle,
+  resolveEntityIdentity,
+  resolveEpisode
+};
+//# sourceMappingURL=liberty-core.js.map

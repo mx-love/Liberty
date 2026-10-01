@@ -1,0 +1,26 @@
+{
+  "code": 1,
+  "page": "2",
+  "pagecount": "4",
+  "total": "7",
+  "list": [
+    {
+      "vod_id": 101,
+      "vod_name": "示例剧 第二季",
+      "vod_year": "2025年",
+      "vod_director": "甲 / 乙",
+      "vod_actor": "演员A,演员B、演员A",
+      "vod_area": "中国大陆",
+      "vod_lang": "国语",
+      "type_name": "国产剧",
+      "vod_remarks": "更新至第12集",
+      "vod_content": "<p>保留的原始简介</p>",
+      "vod_pic": "https://img.example/101.jpg",
+      "vod_play_from": "m3u8$$$备用线路",
+      "vod_play_url": "第11集$https://media.example/11.m3u8#第12集$https://media.example/12.m3u8#https://media.example/unnamed.m3u8$$$正片$https://media.example/movie.mp4#坏项$javascript:alert(1)",
+      "upstream_extension": {
+        "kept": true
+      }
+    }
+  ]
+}
