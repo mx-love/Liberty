@@ -1,0 +1,129 @@
+{
+  "serviceMatrix": {
+    "A": "normal series match",
+    "B": "rawIndex one is real episode twelve",
+    "C": "reordered danmu list still resolves episode twelve",
+    "D": "explicit first-season versus second-season conflict",
+    "E": "same title with conflicting release year",
+    "F": "source omits a special without shifting later episodes",
+    "G": "source-only interview is not mapped to a regular episode",
+    "H": "sequence starts at episode eleven",
+    "I": "long-running animation episode 125",
+    "J": "variety item identified by broadcast date",
+    "K": "movie main feature does not invent S01E01",
+    "L": "title-only work evidence remains uncertain",
+    "M": "multiple viable work candidates remain uncertain",
+    "N": "ambiguous episode candidates remain uncertain",
+    "O": "valid binding with empty comments",
+    "P": "HTTP 429 remains rate-limited",
+    "Q": "network failure remains network-error",
+    "R": "HTTP 500 remains server-error",
+    "S": "invalid response remains invalid-response",
+    "T": "caller cancellation remains aborted",
+    "U": "comments are requested only after media and episode resolution",
+    "V": "empty comments never trigger a wrong-candidate fallback"
+  },
+  "cases": {
+    "A": {
+      "description": "normal first-season episode",
+      "media": { "title": "Orbital Patrol", "year": 2025, "season": 1, "mediaType": "series" },
+      "source": { "rawIndex": 0, "rawEpisodeName": "S01E01" },
+      "episode": { "season": 1, "number": 1 },
+      "candidate": { "animeId": "anime-s1", "animeTitle": "Orbital Patrol S01", "year": 2025, "mediaType": "series" },
+      "danmuEpisodes": [{ "episodeId": "dm-s1-e1", "episodeTitle": "S01E01" }],
+      "expectedEpisodeId": "dm-s1-e1"
+    },
+    "B": {
+      "description": "raw index one is real episode twelve",
+      "source": { "rawIndex": 1, "rawEpisodeName": "E12" },
+      "episode": { "season": 1, "number": 12 },
+      "danmuEpisodes": [
+        { "episodeId": "dm-e12", "episodeTitle": "E12", "apiEpisodeNumber": 1 },
+        { "episodeId": "dm-e13", "episodeTitle": "E13", "apiEpisodeNumber": 2 }
+      ],
+      "expectedEpisodeId": "dm-e12"
+    },
+    "C": {
+      "description": "explicit season conflict",
+      "media": { "title": "Orbital Patrol", "year": 2025, "season": 2, "mediaType": "series" },
+      "candidate": { "animeId": "anime-s1", "animeTitle": "Orbital Patrol S01", "year": 2025, "season": 1, "mediaType": "series" },
+      "expectedState": "conflicting"
+    },
+    "D": {
+      "description": "same title but conflicting release years",
+      "media": { "title": "The Return", "year": 2011, "season": null, "mediaType": "series" },
+      "candidate": { "animeId": "return-2024", "animeTitle": "The Return", "year": 2024, "season": null, "mediaType": "series" },
+      "expectedState": "conflicting"
+    },
+    "E": {
+      "description": "source omits a special without shifting episode three",
+      "sourceEpisodes": ["E1", "E2", "E3", "E4"],
+      "canonicalEpisodes": ["E1", "E2", "SP1", "E3", "E4"],
+      "danmuEpisodes": ["E1", "E2", "SP1", "E3", "E4"],
+      "target": "E3",
+      "expectedEpisodeTitle": "E3"
+    },
+    "F": {
+      "description": "danmu omits a special",
+      "canonicalEpisodes": ["E1", "E2", "SP1", "E3"],
+      "danmuEpisodes": ["E1", "E2", "E3"],
+      "specialTarget": "SP1",
+      "regularTarget": "E3",
+      "expectedSpecialState": "not_found",
+      "expectedRegularTitle": "E3"
+    },
+    "G": {
+      "description": "sequence begins at episode eleven",
+      "sourceEpisodes": ["E11", "E12", "E13"],
+      "danmuEpisodes": ["E11", "E12", "E13"],
+      "target": "E12",
+      "expectedEpisodeTitle": "E12"
+    },
+    "H": {
+      "description": "long-running animation episode 125",
+      "source": { "rawIndex": 2, "rawEpisodeName": "E125" },
+      "episode": { "season": null, "number": 125 },
+      "danmuEpisodes": [{ "episodeId": "dm-e125", "episodeTitle": "E125", "apiEpisodeNumber": 1 }],
+      "expectedEpisodeId": "dm-e125"
+    },
+    "I": {
+      "description": "variety episode identified by broadcast date",
+      "source": { "rawIndex": 0, "rawEpisodeName": "20251001" },
+      "episode": { "airDate": "2025-10-01", "number": null },
+      "danmuEpisodes": [{ "episodeId": "dm-date", "episodeTitle": "20251001" }],
+      "expectedEpisodeId": "dm-date"
+    },
+    "J": {
+      "description": "movie main feature must not invent S01E01",
+      "media": { "title": "One Film", "year": 2025, "season": null, "mediaType": "movie" },
+      "source": { "rawIndex": 0, "rawEpisodeName": "正片" },
+      "episode": { "season": null, "number": null },
+      "forbiddenQuery": "S01E01"
+    },
+    "K": { "description": "valid binding with empty comments", "comments": [], "expectedState": "comments-empty" },
+    "L": { "description": "HTTP 429", "status": 429, "expectedState": "rate-limited" },
+    "M": { "description": "network failure", "error": "network", "expectedState": "network-error" },
+    "N": { "description": "HTTP 500", "status": 500, "expectedState": "server-error" },
+    "O": { "description": "invalid JSON or schema", "payload": "invalid", "expectedState": "invalid-response" },
+    "P": {
+      "description": "two indistinguishable media candidates",
+      "candidateIds": ["ambiguous-a", "ambiguous-b"],
+      "expectedState": "uncertain"
+    },
+    "Q": {
+      "description": "duplicate explicit episode identities",
+      "danmuEpisodes": [
+        { "episodeId": "duplicate-a", "episodeTitle": "E12" },
+        { "episodeId": "duplicate-b", "episodeTitle": "E12" }
+      ],
+      "expectedState": "uncertain"
+    },
+    "R": {
+      "description": "manual media selection remains episode-scoped",
+      "animeId": "manual-anime",
+      "episodeId": "manual-e12",
+      "selectedBy": "manual",
+      "scope": "canonical_episode"
+    }
+  }
+}

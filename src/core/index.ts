@@ -72,6 +72,37 @@ export type {
     SourceSearchFailure,
     SourceSearchProgress,
 } from './source/source-manager.js';
+export type {
+    DanmakuBinding,
+    DanmakuBindingEvidence,
+    DanmakuCandidateEvaluation,
+    DanmakuCandidateResolution,
+    DanmakuCandidateResolutionState,
+    DanmakuEpisodeResolution,
+    DanmakuEpisodeResolutionState,
+    DanmakuMediaCandidate,
+    DanmakuResolveInput,
+    DanmakuServiceResult,
+    DanmakuServiceState,
+    DanmuBangumi,
+    DanmuClientError,
+    DanmuClientErrorKind,
+    DanmuClientResult,
+    DanmuComment,
+    DanmuCommentResponse,
+    DanmuEpisode,
+    DanmuMatchCandidate,
+    DanmuMatchResponse,
+    DanmuSearchAnime,
+    DanmuSearchResponse,
+} from './danmaku/danmu-types.js';
+export type {
+    DanmuClientOptions,
+    DanmuRequestOptions,
+} from './danmaku/danmu-client.js';
+export type { DanmuCandidateResolutionOptions } from './danmaku/danmu-candidate-resolver.js';
+export type { DanmakuEpisodeResolutionInput } from './danmaku/danmu-episode-resolver.js';
+export type { DanmuServiceDependencies } from './danmaku/danmu-service.js';
 
 export { SourceError } from './types/source.js';
 export { TitleParser, parseTitle } from './identity/title-parser.js';
@@ -87,6 +118,17 @@ export { EpisodeResolver, resolveEpisode } from './episode/episode-resolver.js';
 export { SourceNormalizer, parseAppleCmsPlaySources } from './source/source-normalizer.js';
 export { AppleCMSAdapter } from './source/apple-cms-adapter.js';
 export { SourceManager } from './source/source-manager.js';
+export { DanmuClient } from './danmaku/danmu-client.js';
+export {
+    DanmuCandidateResolver,
+    adaptDanmakuCandidate,
+    resolveDanmakuCandidate,
+} from './danmaku/danmu-candidate-resolver.js';
+export {
+    DanmuEpisodeResolver,
+    resolveDanmakuEpisode,
+} from './danmaku/danmu-episode-resolver.js';
+export { DanmuService } from './danmaku/danmu-service.js';
 
 import { SourceError } from './types/source.js';
 import { TitleParser, parseTitle } from './identity/title-parser.js';
@@ -102,6 +144,17 @@ import { EpisodeResolver, resolveEpisode } from './episode/episode-resolver.js';
 import { SourceNormalizer, parseAppleCmsPlaySources } from './source/source-normalizer.js';
 import { AppleCMSAdapter } from './source/apple-cms-adapter.js';
 import { SourceManager } from './source/source-manager.js';
+import { DanmuClient } from './danmaku/danmu-client.js';
+import {
+    DanmuCandidateResolver,
+    adaptDanmakuCandidate,
+    resolveDanmakuCandidate,
+} from './danmaku/danmu-candidate-resolver.js';
+import {
+    DanmuEpisodeResolver,
+    resolveDanmakuEpisode,
+} from './danmaku/danmu-episode-resolver.js';
+import { DanmuService } from './danmaku/danmu-service.js';
 
 /**
  * Transitional browser boundary for Core V2.
@@ -128,6 +181,13 @@ export const LibertyCore = Object.freeze({
     parseAppleCmsPlaySources,
     AppleCMSAdapter,
     SourceManager,
+    DanmuClient,
+    DanmuCandidateResolver,
+    adaptDanmakuCandidate,
+    resolveDanmakuCandidate,
+    DanmuEpisodeResolver,
+    resolveDanmakuEpisode,
+    DanmuService,
 });
 
 declare global {

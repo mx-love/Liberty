@@ -2002,6 +2002,930 @@ var SourceManager = class {
   }
 };
 
+// src/core/danmaku/danmu-client.ts
+var DanmuTimeoutError = class extends Error {
+};
+var DanmuAbortError = class extends Error {
+};
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function stringValue2(value) {
+  if (typeof value === "string") return value;
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+}
+function nullableString(value) {
+  const result = stringValue2(value).trim();
+  return result || null;
+}
+function nullableNumber(value) {
+  if (value === null || value === void 0) return null;
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  if (typeof value === "string" && !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/iu.test(value.trim())) {
+    return null;
+  }
+  const result = typeof value === "number" ? value : Number(value.trim());
+  return Number.isFinite(result) ? result : null;
+}
+function validOptionalNumber(value, options = {}) {
+  if (value === null || value === void 0 || typeof value === "string" && value.trim() === "") {
+    return true;
+  }
+  const parsed = nullableNumber(value);
+  return parsed !== null && (!options.integer || Number.isInteger(parsed)) && (!options.nonNegative || parsed >= 0);
+}
+function retryAfterMs(headers) {
+  const value = headers.get("retry-after");
+  if (!value) return void 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1e3;
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : void 0;
+}
+function errorResult(kind, status, message, retryAfter) {
+  const error = {
+    kind,
+    status,
+    message,
+    ...retryAfter === void 0 ? {} : { retryAfterMs: retryAfter }
+  };
+  return { ok: false, status, error };
+}
+function envelopeError(value, status) {
+  if (!isRecord2(value) || value.success !== false) return null;
+  const code = Number(value.errorCode);
+  const effectiveStatus = Number.isFinite(code) && code >= 400 ? code : status;
+  const kind = effectiveStatus === 429 ? "rate-limited" : effectiveStatus >= 500 ? "server-error" : effectiveStatus >= 400 ? "client-error" : "invalid-response";
+  return errorResult(kind, effectiveStatus, stringValue2(value.errorMessage) || "danmu_api rejected the request");
+}
+function mediaFields(raw) {
+  return {
+    animeId: nullableString(raw.animeId) ?? "",
+    bangumiId: nullableString(raw.bangumiId) ?? "",
+    animeTitle: nullableString(raw.animeTitle) ?? "",
+    type: nullableString(raw.type) ?? "",
+    typeDescription: nullableString(raw.typeDescription) ?? "",
+    imageUrl: nullableString(raw.imageUrl) ?? "",
+    startDate: nullableString(raw.startDate) ?? "",
+    episodeCount: nullableNumber(raw.episodeCount),
+    source: nullableString(raw.source) ?? ""
+  };
+}
+function parseSearchAnime(value) {
+  if (!isRecord2(value)) return null;
+  if (!validOptionalNumber(value.episodeCount, { integer: true, nonNegative: true })) return null;
+  const fields = mediaFields(value);
+  if (!fields.animeId || !fields.animeTitle) return null;
+  return { ...fields, rawData: { ...value } };
+}
+function parseMatchCandidate(value) {
+  if (!isRecord2(value)) return null;
+  const animeId = nullableString(value.animeId) ?? "";
+  const episodeId = nullableString(value.episodeId) ?? "";
+  const animeTitle = nullableString(value.animeTitle) ?? "";
+  if (!animeId || !episodeId || !animeTitle || !validOptionalNumber(value.shift)) return null;
+  return {
+    animeId,
+    animeTitle,
+    episodeId,
+    episodeTitle: nullableString(value.episodeTitle) ?? "",
+    type: nullableString(value.type) ?? "",
+    typeDescription: nullableString(value.typeDescription) ?? "",
+    shift: nullableNumber(value.shift) ?? 0,
+    imageUrl: nullableString(value.imageUrl) ?? "",
+    url: nullableString(value.url) ?? "",
+    rawData: { ...value }
+  };
+}
+function parseEpisode2(value, animeId, rawIndex) {
+  if (!isRecord2(value)) return null;
+  const episodeId = nullableString(value.episodeId) ?? "";
+  if (!episodeId) return null;
+  return {
+    animeId,
+    rawIndex,
+    seasonId: nullableString(value.seasonId) ?? "",
+    episodeId,
+    episodeTitle: nullableString(value.episodeTitle) ?? "",
+    apiEpisodeNumber: nullableString(value.episodeNumber),
+    airDate: nullableString(value.airDate),
+    url: nullableString(value.url) ?? "",
+    rawData: { ...value }
+  };
+}
+function parseComment(value) {
+  if (!isRecord2(value) || typeof value.p !== "string" || typeof value.m !== "string") return null;
+  return { p: value.p, m: value.m, rawData: { ...value } };
+}
+var DanmuClient = class {
+  constructor(options) {
+    __publicField(this, "baseUrl");
+    __publicField(this, "fetchImpl");
+    __publicField(this, "timeoutMs");
+    __publicField(this, "headers");
+    this.baseUrl = options.baseUrl.trim().replace(/\/+$/, "");
+    if (!this.baseUrl) throw new TypeError("DanmuClient baseUrl is required");
+    this.fetchImpl = options.fetch ?? globalThis.fetch;
+    if (typeof this.fetchImpl !== "function") throw new TypeError("DanmuClient fetch implementation is required");
+    this.timeoutMs = options.timeoutMs ?? 1e4;
+    this.headers = new Headers(options.headers);
+  }
+  async match(fileName, options = {}) {
+    const query = fileName.trim();
+    if (!query) return errorResult("client-error", 400, "fileName is required");
+    const response = await this.requestJson("/api/v2/match", {
+      method: "POST",
+      body: JSON.stringify({ fileName: query }),
+      headers: { "content-type": "application/json" }
+    }, options.signal);
+    if (!response.ok) return response;
+    const envelope = envelopeError(response.data.value, response.data.status);
+    if (envelope) return envelope;
+    const value = response.data.value;
+    if (!isRecord2(value) || typeof value.isMatched !== "boolean" || !Array.isArray(value.matches)) {
+      return errorResult("invalid-response", response.data.status, "Invalid match response");
+    }
+    const matches = value.matches.map(parseMatchCandidate).filter((item) => item !== null);
+    if (matches.length !== value.matches.length || value.isMatched && matches.length === 0) {
+      return errorResult("invalid-response", response.data.status, "Match response contains invalid candidates");
+    }
+    return { ok: true, status: response.data.status, data: { isMatched: value.isMatched, matches } };
+  }
+  async searchAnime(keyword, options = {}) {
+    const query = keyword.trim();
+    if (!query) return errorResult("client-error", 400, "keyword is required");
+    const path = `/api/v2/search/anime?keyword=${encodeURIComponent(query)}`;
+    const response = await this.requestJson(path, { method: "GET" }, options.signal);
+    if (!response.ok) return response;
+    const envelope = envelopeError(response.data.value, response.data.status);
+    if (envelope) return envelope;
+    const value = response.data.value;
+    if (!isRecord2(value) || !Array.isArray(value.animes)) {
+      return errorResult("invalid-response", response.data.status, "Invalid anime search response");
+    }
+    const animes = value.animes.map(parseSearchAnime).filter((item) => item !== null);
+    if (animes.length !== value.animes.length) {
+      return errorResult("invalid-response", response.data.status, "Anime search response contains invalid candidates");
+    }
+    return { ok: true, status: response.data.status, data: { animes } };
+  }
+  async getBangumi(animeId, options = {}) {
+    const id = animeId.trim();
+    if (!id) return errorResult("client-error", 400, "animeId is required");
+    const response = await this.requestJson(`/api/v2/bangumi/${encodeURIComponent(id)}`, { method: "GET" }, options.signal);
+    if (!response.ok) return response;
+    const envelope = envelopeError(response.data.value, response.data.status);
+    if (envelope) return envelope;
+    const value = response.data.value;
+    if (!isRecord2(value) || !isRecord2(value.bangumi) || !Array.isArray(value.bangumi.episodes)) {
+      return errorResult("invalid-response", response.data.status, "Invalid bangumi response");
+    }
+    const raw = value.bangumi;
+    const rawEpisodes = raw.episodes;
+    if (!Array.isArray(rawEpisodes)) {
+      return errorResult("invalid-response", response.data.status, "Bangumi episodes are invalid");
+    }
+    const normalizedAnimeId = nullableString(raw.animeId) ?? "";
+    const normalizedAnimeTitle = nullableString(raw.animeTitle) ?? "";
+    if (!normalizedAnimeId || !normalizedAnimeTitle) {
+      return errorResult("invalid-response", response.data.status, "Bangumi identity is missing");
+    }
+    const episodes = rawEpisodes.map((episode, index) => parseEpisode2(episode, normalizedAnimeId, index)).filter((episode) => episode !== null);
+    if (episodes.length !== rawEpisodes.length) {
+      return errorResult("invalid-response", response.data.status, "Bangumi response contains invalid episodes");
+    }
+    return {
+      ok: true,
+      status: response.data.status,
+      data: {
+        animeId: normalizedAnimeId,
+        bangumiId: nullableString(raw.bangumiId) ?? "",
+        animeTitle: normalizedAnimeTitle,
+        type: nullableString(raw.type) ?? "",
+        typeDescription: nullableString(raw.typeDescription) ?? "",
+        episodes,
+        rawData: { ...raw }
+      }
+    };
+  }
+  async getComments(episodeId, options = {}) {
+    const id = episodeId.trim();
+    if (!id) return errorResult("client-error", 400, "episodeId is required");
+    const path = `/api/v2/comment/${encodeURIComponent(id)}?format=json&duration=true`;
+    const response = await this.requestJson(path, { method: "GET" }, options.signal);
+    if (!response.ok) return response;
+    const envelope = envelopeError(response.data.value, response.data.status);
+    if (envelope) return envelope;
+    const value = response.data.value;
+    if (!isRecord2(value) || !Array.isArray(value.comments)) {
+      return errorResult("invalid-response", response.data.status, "Invalid comment response");
+    }
+    if (!validOptionalNumber(value.count, { integer: true, nonNegative: true }) || !validOptionalNumber(value.videoDuration, { nonNegative: true })) {
+      return errorResult("invalid-response", response.data.status, "Comment response contains invalid numeric metadata");
+    }
+    const comments = value.comments.map(parseComment).filter((item) => item !== null);
+    if (comments.length !== value.comments.length) {
+      return errorResult("invalid-response", response.data.status, "Comment response contains invalid items");
+    }
+    const count = nullableNumber(value.count) ?? comments.length;
+    const videoDuration = nullableNumber(value.videoDuration);
+    return { ok: true, status: response.data.status, data: { count, comments, videoDuration } };
+  }
+  async requestJson(path, init, externalSignal) {
+    const controller = new AbortController();
+    let didTimeout = false;
+    let rejectExternalAbort;
+    const externalAbort = new Promise((_resolve, reject) => {
+      rejectExternalAbort = reject;
+    });
+    const abortFromExternal = () => {
+      controller.abort(externalSignal?.reason);
+      rejectExternalAbort?.(new DanmuAbortError("danmu_api request was aborted"));
+    };
+    if (externalSignal?.aborted) abortFromExternal();
+    else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+    const headers = new Headers(this.headers);
+    new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+    let timeoutId;
+    try {
+      const timeout = new Promise((_resolve, reject) => {
+        timeoutId = setTimeout(() => {
+          didTimeout = true;
+          controller.abort();
+          reject(new DanmuTimeoutError(`danmu_api request timed out after ${this.timeoutMs}ms`));
+        }, this.timeoutMs);
+      });
+      const response = await Promise.race([
+        this.fetchImpl(`${this.baseUrl}${path}`, { ...init, headers, signal: controller.signal }),
+        timeout,
+        externalAbort
+      ]);
+      if (!response.ok) {
+        const kind = response.status === 429 ? "rate-limited" : response.status >= 500 ? "server-error" : "client-error";
+        return errorResult(kind, response.status, `danmu_api returned HTTP ${response.status}`, retryAfterMs(response.headers));
+      }
+      const text = await Promise.race([response.text(), timeout, externalAbort]);
+      if (!text.trim()) return errorResult("invalid-response", response.status, "danmu_api returned an empty response");
+      let value;
+      try {
+        value = JSON.parse(text);
+      } catch {
+        return errorResult("invalid-response", response.status, "danmu_api returned invalid JSON");
+      }
+      return { ok: true, status: response.status, data: { status: response.status, headers: response.headers, value } };
+    } catch (error) {
+      if (didTimeout || error instanceof DanmuTimeoutError) {
+        return errorResult("timeout", null, error instanceof Error ? error.message : "danmu_api request timed out");
+      }
+      if (externalSignal?.aborted || error instanceof DanmuAbortError) {
+        return errorResult("aborted", null, "danmu_api request was aborted");
+      }
+      return errorResult("network-error", null, error instanceof Error ? error.message : "danmu_api network request failed");
+    } finally {
+      if (timeoutId !== void 0) clearTimeout(timeoutId);
+      externalSignal?.removeEventListener("abort", abortFromExternal);
+    }
+  }
+};
+
+// src/core/danmaku/danmu-candidate-resolver.ts
+function uniqueStrings2(values) {
+  const result = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const value of values) {
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+function aliasesFromRawData(rawData) {
+  const values = [];
+  for (const field of ["aliases", "titles"]) {
+    const rawAliases = rawData[field];
+    if (Array.isArray(rawAliases)) {
+      values.push(...rawAliases.filter((value) => typeof value === "string"));
+    }
+  }
+  return uniqueStrings2(values);
+}
+function yearFromDate(value) {
+  const match = /(?:^|[^\d])((?:19|20)\d{2})(?:[^\d]|$)/u.exec(value);
+  return match?.[1] ? Number(match[1]) : null;
+}
+function mediaTypeFromDanmu(type, typeDescription) {
+  const value = `${type} ${typeDescription}`.normalize("NFKC").toLocaleLowerCase("zh-CN");
+  const types = /* @__PURE__ */ new Set();
+  if (/(?:日番|番剧|动漫|动画|\banime\b|\banimation\b)/iu.test(value)) types.add("anime");
+  if (/(?:电影|剧场版|\bmovie\b|\bfilm\b)/iu.test(value)) types.add("movie");
+  if (/(?:电视剧|连续剧|韩剧|日剧|美剧|国产剧|\bseries\b|\bdrama\b)/iu.test(value)) {
+    types.add("series");
+  }
+  if (/(?:综艺|\bvariety\b)/iu.test(value)) types.add("variety");
+  if (/(?:纪录片|记录片|\bdocumentary\b)/iu.test(value)) types.add("documentary");
+  return types.size === 1 ? [...types][0] : void 0;
+}
+function adaptDanmuMatchCandidate(candidate) {
+  return {
+    animeId: candidate.animeId,
+    animeTitle: candidate.animeTitle,
+    aliases: aliasesFromRawData(candidate.rawData),
+    mediaType: mediaTypeFromDanmu(candidate.type, candidate.typeDescription),
+    source: "match",
+    rawData: candidate.rawData
+  };
+}
+function adaptDanmuSearchAnime(candidate) {
+  return {
+    animeId: candidate.animeId,
+    animeTitle: candidate.animeTitle,
+    aliases: aliasesFromRawData(candidate.rawData),
+    year: yearFromDate(candidate.startDate),
+    mediaType: mediaTypeFromDanmu(candidate.type, candidate.typeDescription),
+    source: candidate.source || "search",
+    rawData: candidate.rawData
+  };
+}
+function adaptDanmakuCandidate(candidate) {
+  const parsedTitle = parseTitle(candidate.animeTitle);
+  return {
+    recordId: `danmu:${candidate.animeId}`,
+    rawTitle: candidate.animeTitle,
+    parsedTitle,
+    aliases: uniqueStrings2([...parsedTitle.aliases, ...candidate.aliases ?? []]),
+    year: candidate.year ?? parsedTitle.year,
+    season: candidate.season ?? parsedTitle.season,
+    mediaType: candidate.mediaType,
+    directors: candidate.directors,
+    actors: candidate.actors,
+    areas: candidate.areas,
+    languages: candidate.languages,
+    externalIds: {
+      ...candidate.externalIds,
+      danmu: candidate.animeId
+    }
+  };
+}
+function adaptCanonicalMedia(media) {
+  return {
+    recordId: media.mediaId,
+    rawTitle: media.canonicalTitle,
+    parsedTitle: parseTitle(media.canonicalTitle),
+    aliases: media.aliases,
+    year: media.releaseYear,
+    season: media.season,
+    mediaType: media.mediaType,
+    directors: media.directors,
+    actors: media.actors,
+    externalIds: media.externalIds,
+    titleAuthority: "confirmed"
+  };
+}
+function uniqueCandidates(candidates) {
+  const seen = /* @__PURE__ */ new Set();
+  return candidates.filter((candidate) => {
+    const key = candidate.animeId.trim();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+var DanmuCandidateResolver = class {
+  constructor(entityResolver = new EntityResolver()) {
+    __publicField(this, "entityResolver", entityResolver);
+  }
+  resolve(media, candidates, options = {}) {
+    const canonicalIdentity = adaptCanonicalMedia(media);
+    const unique = uniqueCandidates(candidates);
+    const evaluations = unique.map((candidate) => ({
+      candidate,
+      identity: this.entityResolver.resolve(canonicalIdentity, adaptDanmakuCandidate(candidate))
+    }));
+    if (options.manualAnimeId !== void 0) {
+      const manualAnimeId = options.manualAnimeId.trim();
+      const manual = evaluations.find(({ candidate }) => candidate.animeId === manualAnimeId);
+      if (!manual) {
+        return {
+          state: "not_found",
+          selected: null,
+          selectedBy: null,
+          evaluations,
+          reason: `The manually selected animeId ${manualAnimeId || "(empty)"} is not present`
+        };
+      }
+      if (manual.identity.decision === "rejected") {
+        return {
+          state: "conflicting",
+          selected: null,
+          selectedBy: null,
+          evaluations,
+          reason: `The manually selected work conflicts with canonical identity: ${manual.identity.reason}`
+        };
+      }
+      return {
+        state: manual.identity.decision === "confirmed" ? "verified" : "supported",
+        selected: manual.candidate,
+        selectedBy: "manual",
+        evaluations,
+        reason: manual.identity.decision === "confirmed" ? "The manual choice also has a verified external identity" : "The user selected this work; its episode still requires independent resolution"
+      };
+    }
+    if (evaluations.length === 0) {
+      return {
+        state: "not_found",
+        selected: null,
+        selectedBy: null,
+        evaluations,
+        reason: "danmu_api returned no work candidates"
+      };
+    }
+    const viable = evaluations.filter(({ identity }) => identity.decision !== "rejected");
+    if (viable.length === 0) {
+      return {
+        state: "conflicting",
+        selected: null,
+        selectedBy: null,
+        evaluations,
+        reason: "Every danmu candidate has explicit identity conflicts"
+      };
+    }
+    const confirmed = viable.filter(({ identity }) => identity.decision === "confirmed");
+    if (confirmed.length === 1) {
+      return {
+        state: "verified",
+        selected: confirmed[0]?.candidate ?? null,
+        selectedBy: "automatic",
+        evaluations,
+        reason: confirmed[0]?.identity.reason ?? "A verified external identity selected the work"
+      };
+    }
+    if (viable.length > 1) {
+      return {
+        state: "uncertain",
+        selected: null,
+        selectedBy: null,
+        evaluations,
+        reason: "Multiple non-rejected danmu candidates remain distinguishable only by missing evidence"
+      };
+    }
+    const only = viable[0];
+    if (!only || only.identity.decision === "uncertain") {
+      return {
+        state: "uncertain",
+        selected: null,
+        selectedBy: null,
+        evaluations,
+        reason: only?.identity.reason ?? "No candidate has enough evidence for automatic selection"
+      };
+    }
+    return {
+      state: only.identity.decision === "confirmed" ? "verified" : "supported",
+      selected: only.candidate,
+      selectedBy: "automatic",
+      evaluations,
+      reason: only.identity.reason
+    };
+  }
+};
+function resolveDanmakuCandidate(media, candidates, options = {}) {
+  return new DanmuCandidateResolver().resolve(media, candidates, options);
+}
+
+// src/core/danmaku/danmu-episode-resolver.ts
+function parsedCanonicalEpisode(episode, media) {
+  const parsedTitle = parseEpisode(episode.episodeTitle ?? "", { mediaType: media.mediaType });
+  const contentType = episode.contentType === "unknown" ? parsedTitle.contentType : episode.contentType;
+  const seasonNumber = episode.seasonNumber ?? parsedTitle.seasonNumber;
+  const episodeNumber = episode.episodeNumber ?? parsedTitle.episodeNumber;
+  const absoluteNumber = episode.absoluteNumber ?? parsedTitle.absoluteNumber;
+  const airDate = episode.airDate ?? parsedTitle.airDate;
+  const part = episode.part ?? parsedTitle.part;
+  const hasNumber = episodeNumber !== null || absoluteNumber !== null;
+  const isSpecial = contentType === "special";
+  return {
+    ...parsedTitle,
+    rawName: episode.episodeTitle ?? episode.canonicalEpisodeId,
+    contentType,
+    seasonNumber,
+    episodeNumber,
+    absoluteNumber,
+    specialNumber: isSpecial ? parsedTitle.specialNumber ?? episodeNumber ?? absoluteNumber : null,
+    specialKind: isSpecial ? parsedTitle.specialKind ?? "special" : null,
+    airDate,
+    episodeTitle: episode.episodeTitle ?? parsedTitle.episodeTitle,
+    part,
+    numberKind: airDate !== null ? "date" : isSpecial ? "special" : parsedTitle.numberKind !== "none" ? parsedTitle.numberKind : hasNumber ? "episode" : "none",
+    confidence: parsedTitle.confidence !== "none" || hasNumber || isSpecial ? "high" : "none"
+  };
+}
+function canonicalSourceEpisode(episode, media, coordinate) {
+  const rawEpisodeName = episode.episodeTitle ?? episode.canonicalEpisodeId;
+  return {
+    sourceKey: `canonical:${media.mediaId}`,
+    vodId: media.mediaId,
+    playGroup: "canonical",
+    playGroupIndex: 0,
+    // This is only a coordinate used to prove sequence membership. It is never
+    // copied into ParsedEpisodeInfo or treated as an episode number.
+    rawIndex: coordinate,
+    rawEpisodeName,
+    displayName: rawEpisodeName,
+    rawEntry: episode.canonicalEpisodeId,
+    playUrl: "",
+    parsedEpisodeInfo: parsedCanonicalEpisode(episode, media),
+    canonicalEpisodeId: episode.canonicalEpisodeId,
+    mappingState: "mapped",
+    mappingEvidence: ["Canonical episode supplied by Danmaku Core"]
+  };
+}
+function adaptDanmuEpisode(episode, media, coordinate) {
+  const parsed = parseEpisode(episode.episodeTitle, { mediaType: media.mediaType });
+  const parsedAirDate = episode.airDate === null ? null : parseEpisode(episode.airDate, { mediaType: media.mediaType });
+  const semanticAirDate = parsed.airDate ?? (parsedAirDate?.numberKind === "date" ? parsedAirDate.airDate : null);
+  const rawTitle = episode.episodeTitle.trim();
+  const canonical = {
+    canonicalEpisodeId: `danmu:${episode.animeId}:${episode.episodeId}:${coordinate}`,
+    mediaId: media.mediaId,
+    contentType: parsed.contentType,
+    seasonNumber: parsed.seasonNumber,
+    episodeNumber: parsed.episodeNumber,
+    absoluteNumber: parsed.absoluteNumber,
+    airDate: semanticAirDate,
+    // Preserve the raw upstream title so the shared resolver can parse special
+    // identities such as SP/OVA, whose number has no dedicated canonical field.
+    episodeTitle: rawTitle || null,
+    part: parsed.part,
+    identityState: parsed.confidence === "none" && semanticAirDate === null ? "uncertain" : "supported",
+    evidence: []
+  };
+  return { source: episode, canonical };
+}
+function rejected(reason) {
+  return {
+    state: "rejected",
+    selected: null,
+    candidates: [],
+    evidence: [],
+    rejectionReasons: [reason],
+    reason
+  };
+}
+function resolveDanmakuEpisode(input) {
+  if (input.targetEpisode.mediaId !== input.media.mediaId) {
+    return rejected(
+      `Target episode belongs to media ${input.targetEpisode.mediaId}, not ${input.media.mediaId}`
+    );
+  }
+  const foreignCanonicalEpisode = input.canonicalEpisodes.find(
+    (episode) => episode.mediaId !== input.media.mediaId
+  );
+  if (foreignCanonicalEpisode) {
+    return rejected(
+      `Canonical episode ${foreignCanonicalEpisode.canonicalEpisodeId} belongs to another media`
+    );
+  }
+  const targetCoordinates = input.canonicalEpisodes.flatMap((episode, index) => episode.canonicalEpisodeId === input.targetEpisode.canonicalEpisodeId ? [index] : []);
+  if (targetCoordinates.length !== 1) {
+    return rejected("The target episode must occur exactly once in the canonical sequence");
+  }
+  const targetCoordinate = targetCoordinates[0] ?? -1;
+  const sourceSequence = input.canonicalEpisodes.map((episode, index) => canonicalSourceEpisode(episode, input.media, index));
+  const sourceEpisode = canonicalSourceEpisode(
+    input.targetEpisode,
+    input.media,
+    targetCoordinate ?? -1
+  );
+  const adaptedDanmuEpisodes = input.danmuEpisodes.map((episode, index) => adaptDanmuEpisode(episode, input.media, index));
+  const episodeByCanonicalId = new Map(
+    adaptedDanmuEpisodes.map(({ source, canonical }) => [canonical.canonicalEpisodeId, source])
+  );
+  const isolatedSourceEpisode = canonicalSourceEpisode(input.targetEpisode, input.media, 0);
+  const isolatedResolution = resolveEpisode({
+    sourceEpisode: isolatedSourceEpisode,
+    sourceSequence: [isolatedSourceEpisode],
+    canonicalMedia: input.media,
+    candidateEpisodes: adaptedDanmuEpisodes.map(({ canonical }) => canonical)
+  });
+  const isolatedIsDecisive = isolatedResolution.state === "verified" || isolatedResolution.state === "supported" || isolatedResolution.state === "rejected" || isolatedResolution.candidates.length > 1 && isolatedResolution.evidence.some(({ code }) => code === "ambiguous_candidates");
+  const resolution = isolatedIsDecisive ? isolatedResolution : resolveEpisode({
+    sourceEpisode,
+    sourceSequence,
+    canonicalMedia: input.media,
+    candidateEpisodes: adaptedDanmuEpisodes.map(({ canonical }) => canonical)
+  });
+  const candidates = resolution.candidates.flatMap(({ episode }) => {
+    const original = episodeByCanonicalId.get(episode.canonicalEpisodeId);
+    return original ? [original] : [];
+  });
+  const selected = resolution.selectedEpisode === null ? null : episodeByCanonicalId.get(resolution.selectedEpisode.canonicalEpisodeId) ?? null;
+  return {
+    state: resolution.state,
+    selected,
+    candidates,
+    evidence: resolution.evidence,
+    rejectionReasons: resolution.rejectionReasons,
+    reason: resolution.reason
+  };
+}
+var DanmuEpisodeResolver = class {
+  resolve(input) {
+    return resolveDanmakuEpisode(input);
+  }
+};
+
+// src/core/danmaku/danmu-service.ts
+function emptyResult(state, reason, options = {}) {
+  return {
+    state,
+    binding: options.binding ?? null,
+    comments: [],
+    candidateResolution: options.candidateResolution ?? null,
+    episodeResolution: options.episodeResolution ?? null,
+    error: options.error ?? null,
+    reason
+  };
+}
+function clientErrorState(error) {
+  switch (error.kind) {
+    case "rate-limited":
+    case "client-error":
+    case "server-error":
+    case "network-error":
+    case "timeout":
+    case "aborted":
+    case "invalid-response":
+      return error.kind;
+  }
+}
+function padEpisodeNumber(value) {
+  return String(value).padStart(2, "0");
+}
+function reliableMatchFileName(input) {
+  const season = input.media.season;
+  const episode = input.episode.episodeNumber;
+  if (input.episode.contentType !== "regular" || input.media.mediaType !== "series" && input.media.mediaType !== "anime") {
+    return null;
+  }
+  if (season === null || episode === null || season <= 0 || episode <= 0) return null;
+  if (input.episode.seasonNumber !== null && input.episode.seasonNumber !== season) return null;
+  return `${input.media.canonicalTitle.trim()} S${padEpisodeNumber(season)}E${padEpisodeNumber(episode)}`;
+}
+function hasReliableEpisodeIdentity(input) {
+  const episode = input.episode;
+  if (episode.identityState !== "confirmed" && episode.identityState !== "supported") {
+    return false;
+  }
+  if (episode.episodeNumber !== null || episode.absoluteNumber !== null || episode.airDate !== null) {
+    return true;
+  }
+  const parsed = parseEpisode(episode.episodeTitle ?? "", {
+    mediaType: input.media.mediaType
+  });
+  return parsed.confidence === "high" && (parsed.numberKind !== "none" || parsed.contentType === "movie");
+}
+function mediaCanResolve(input) {
+  return input.media.canonicalTitle.trim() !== "" && (input.media.identityState === "confirmed" || input.media.identityState === "supported");
+}
+function episodeInputIssue(input) {
+  if (input.episode.mediaId !== input.media.mediaId) {
+    return {
+      state: "episode-rejected",
+      reason: "The target episode belongs to another canonical media"
+    };
+  }
+  const occurrences = input.mediaEpisodes.filter(
+    (episode) => episode.canonicalEpisodeId === input.episode.canonicalEpisodeId
+  );
+  if (occurrences.length !== 1) {
+    return {
+      state: "episode-rejected",
+      reason: "The target episode must occur exactly once in the canonical sequence"
+    };
+  }
+  if (input.sourceEpisode.mappingState !== "mapped" || input.sourceEpisode.canonicalEpisodeId === null) {
+    return input.sourceEpisode.mappingState === "conflicting" ? {
+      state: "episode-rejected",
+      reason: "The source episode has a conflicting canonical mapping"
+    } : {
+      state: "episode-uncertain",
+      reason: "The source episode has not been mapped to a canonical episode"
+    };
+  }
+  if (input.sourceEpisode.canonicalEpisodeId !== input.episode.canonicalEpisodeId) {
+    return {
+      state: "episode-rejected",
+      reason: "The source episode is mapped to a different canonical episode"
+    };
+  }
+  if (input.media.season !== null && input.episode.seasonNumber !== null && input.media.season !== input.episode.seasonNumber) {
+    return {
+      state: "episode-rejected",
+      reason: "The canonical media and target episode have conflicting seasons"
+    };
+  }
+  return null;
+}
+function candidateState(resolution) {
+  switch (resolution.state) {
+    case "not_found":
+      return "candidate-not-found";
+    case "conflicting":
+      return "candidate-conflict";
+    case "uncertain":
+      return "candidate-uncertain";
+    case "supported":
+    case "verified":
+      return null;
+  }
+}
+function episodeState(resolution) {
+  switch (resolution.state) {
+    case "not_found":
+      return "episode-not-found";
+    case "uncertain":
+      return "episode-uncertain";
+    case "rejected":
+      return "episode-rejected";
+    case "supported":
+    case "verified":
+      return null;
+  }
+}
+var DanmuService = class {
+  constructor(dependencies) {
+    __publicField(this, "client");
+    __publicField(this, "candidateResolver");
+    __publicField(this, "episodeResolver");
+    this.client = dependencies.client;
+    this.candidateResolver = dependencies.candidateResolver ?? new DanmuCandidateResolver();
+    this.episodeResolver = dependencies.episodeResolver ?? new DanmuEpisodeResolver();
+  }
+  async resolve(input) {
+    const bindingResult = await this.resolveBinding(input);
+    if (bindingResult.binding === null) return bindingResult;
+    const comments = await this.client.getComments(bindingResult.binding.danmuEpisodeId, {
+      signal: input.signal
+    });
+    if (!comments.ok) {
+      return emptyResult(clientErrorState(comments.error), comments.error.message, {
+        binding: bindingResult.binding,
+        candidateResolution: bindingResult.candidateResolution,
+        episodeResolution: bindingResult.episodeResolution,
+        error: comments.error
+      });
+    }
+    if (comments.data.comments.length === 0) {
+      return emptyResult("comments-empty", "The resolved danmu episode has no comments", {
+        binding: bindingResult.binding,
+        candidateResolution: bindingResult.candidateResolution,
+        episodeResolution: bindingResult.episodeResolution
+      });
+    }
+    return {
+      state: "success",
+      binding: bindingResult.binding,
+      comments: comments.data.comments,
+      candidateResolution: bindingResult.candidateResolution,
+      episodeResolution: bindingResult.episodeResolution,
+      error: null,
+      reason: "The canonical episode was bound and its comments were loaded"
+    };
+  }
+  async resolveBinding(input) {
+    if (!mediaCanResolve(input)) {
+      return emptyResult("media-unresolved", "Canonical media identity is not supported or confirmed");
+    }
+    const originalInputIssue = episodeInputIssue(input);
+    if (originalInputIssue) return emptyResult(originalInputIssue.state, originalInputIssue.reason);
+    const canonicalEpisode = input.mediaEpisodes.find(
+      (episode) => episode.canonicalEpisodeId === input.episode.canonicalEpisodeId
+    );
+    if (canonicalEpisode === void 0) {
+      return emptyResult("episode-rejected", "The canonical target episode is missing");
+    }
+    const canonicalInput = { ...input, episode: canonicalEpisode };
+    if (!hasReliableEpisodeIdentity(canonicalInput)) {
+      return emptyResult("episode-uncertain", "The target episode has no reliable content identity");
+    }
+    const discovery = await this.discoverCandidates(canonicalInput);
+    if (!discovery.ok) {
+      return emptyResult(clientErrorState(discovery.error), discovery.error.message, {
+        error: discovery.error
+      });
+    }
+    const candidateResolution = this.candidateResolver.resolve(
+      input.media,
+      discovery.candidates,
+      input.manualCandidate === void 0 ? {} : { manualAnimeId: input.manualCandidate.animeId }
+    );
+    const unresolvedCandidateState = candidateState(candidateResolution);
+    if (unresolvedCandidateState) {
+      return emptyResult(unresolvedCandidateState, candidateResolution.reason, {
+        candidateResolution
+      });
+    }
+    const selectedCandidate = candidateResolution.selected;
+    if (selectedCandidate === null || candidateResolution.selectedBy === null) {
+      return emptyResult("candidate-uncertain", "Candidate resolution did not select one work", {
+        candidateResolution
+      });
+    }
+    const bangumi = await this.client.getBangumi(selectedCandidate.animeId, {
+      signal: canonicalInput.signal
+    });
+    if (!bangumi.ok) {
+      return emptyResult(clientErrorState(bangumi.error), bangumi.error.message, {
+        candidateResolution,
+        error: bangumi.error
+      });
+    }
+    if (bangumi.data.animeId !== selectedCandidate.animeId) {
+      const error = {
+        kind: "invalid-response",
+        status: bangumi.status,
+        message: "Bangumi response identity differs from the selected candidate"
+      };
+      return emptyResult("invalid-response", error.message, {
+        candidateResolution,
+        error
+      });
+    }
+    const episodeResolution = this.episodeResolver.resolve({
+      media: canonicalInput.media,
+      targetEpisode: canonicalInput.episode,
+      canonicalEpisodes: canonicalInput.mediaEpisodes,
+      danmuEpisodes: bangumi.data.episodes
+    });
+    const unresolvedEpisodeState = episodeState(episodeResolution);
+    if (unresolvedEpisodeState) {
+      return emptyResult(unresolvedEpisodeState, episodeResolution.reason, {
+        candidateResolution,
+        episodeResolution
+      });
+    }
+    const selectedEpisode = episodeResolution.selected;
+    if (selectedEpisode === null) {
+      return emptyResult("episode-uncertain", "Episode resolution did not select one episode", {
+        candidateResolution,
+        episodeResolution
+      });
+    }
+    const mappingState = candidateResolution.state === "verified" && episodeResolution.state === "verified" ? "verified" : "supported";
+    const binding = {
+      canonicalMediaId: canonicalInput.media.mediaId,
+      canonicalEpisodeId: canonicalInput.episode.canonicalEpisodeId,
+      danmuAnimeId: selectedCandidate.animeId,
+      danmuAnimeTitle: bangumi.data.animeTitle || selectedCandidate.animeTitle,
+      danmuEpisodeId: selectedEpisode.episodeId,
+      danmuEpisodeTitle: selectedEpisode.episodeTitle,
+      mappingState,
+      selectedBy: candidateResolution.selectedBy,
+      scope: "canonical_episode",
+      evidence: [
+        {
+          stage: "media",
+          reason: candidateResolution.reason,
+          identityEvidence: candidateResolution.evaluations.find(
+            ({ candidate }) => candidate.animeId === selectedCandidate.animeId
+          )?.identity.evidence
+        },
+        {
+          stage: "episode",
+          reason: episodeResolution.reason,
+          episodeEvidence: episodeResolution.evidence
+        },
+        ...candidateResolution.selectedBy === "manual" ? [{ stage: "manual", reason: "The user selected the work; the episode was resolved independently" }] : []
+      ]
+    };
+    return emptyResult(
+      mappingState === "verified" ? "binding-verified" : "binding-supported",
+      "A canonical-episode-scoped danmaku binding was established",
+      { binding, candidateResolution, episodeResolution }
+    );
+  }
+  async discoverCandidates(input) {
+    if (input.manualCandidate !== void 0) {
+      return { ok: true, candidates: [input.manualCandidate] };
+    }
+    const matchFileName = reliableMatchFileName(input);
+    if (matchFileName !== null) {
+      const response2 = await this.client.match(matchFileName, { signal: input.signal });
+      if (!response2.ok) return { ok: false, error: response2.error };
+      return {
+        ok: true,
+        candidates: response2.data.isMatched ? response2.data.matches.map(adaptDanmuMatchCandidate) : []
+      };
+    }
+    const response = await this.client.searchAnime(input.media.canonicalTitle, {
+      signal: input.signal
+    });
+    if (!response.ok) return { ok: false, error: response.error };
+    return { ok: true, candidates: response.data.animes.map(adaptDanmuSearchAnime) };
+  }
+};
+
 // src/core/index.ts
 var LibertyCore = Object.freeze({
   SourceError,
@@ -2021,7 +2945,14 @@ var LibertyCore = Object.freeze({
   SourceNormalizer,
   parseAppleCmsPlaySources,
   AppleCMSAdapter,
-  SourceManager
+  SourceManager,
+  DanmuClient,
+  DanmuCandidateResolver,
+  adaptDanmakuCandidate,
+  resolveDanmakuCandidate,
+  DanmuEpisodeResolver,
+  resolveDanmakuEpisode,
+  DanmuService
 });
 if (typeof window !== "undefined") {
   window.LibertyCore = LibertyCore;
@@ -2030,6 +2961,10 @@ export {
   AppleCMSAdapter,
   CandidateEvidenceCollector,
   DEFAULT_IDENTITY_POLICY,
+  DanmuCandidateResolver,
+  DanmuClient,
+  DanmuEpisodeResolver,
+  DanmuService,
   EntityResolver,
   EpisodeAligner,
   EpisodeParser,
@@ -2039,11 +2974,14 @@ export {
   SourceManager,
   SourceNormalizer,
   TitleParser,
+  adaptDanmakuCandidate,
   alignEpisodeSequences,
   collectCandidateEvidence,
   parseAppleCmsPlaySources,
   parseEpisode,
   parseTitle,
+  resolveDanmakuCandidate,
+  resolveDanmakuEpisode,
   resolveEntityIdentity,
   resolveEpisode
 };
