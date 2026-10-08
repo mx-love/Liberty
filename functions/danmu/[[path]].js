@@ -1,3 +1,5 @@
+import { proxyDanmuUpstream } from '../_lib/danmu-proxy.js';
+
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,HEAD,POST,OPTIONS',
@@ -42,21 +44,6 @@ async function validateAuth(request, env) {
   return true;
 }
 
-function buildUpstreamHeaders(request, base) {
-  const headers = new Headers();
-
-  headers.set('User-Agent', request.headers.get('User-Agent') || 'Mozilla/5.0');
-  headers.set('Accept', request.headers.get('Accept') || 'application/json,text/plain,*/*');
-  headers.set('Referer', new URL(base).origin);
-
-  const contentType = request.headers.get('Content-Type');
-  if (contentType) {
-    headers.set('Content-Type', contentType);
-  }
-
-  return headers;
-}
-
 export async function onRequest(context) {
   const { request, env } = context;
 
@@ -68,40 +55,15 @@ export async function onRequest(context) {
     return json({ success: false, error: 'danmu unauthorized' }, 401);
   }
 
-  const base = (env.DANMU_API_BASE || '').replace(/\/+$/, '');
-  if (!base) {
-    return json({ success: false, error: 'DANMU_API_BASE is not set' }, 500);
-  }
-
   const url = new URL(request.url);
   const apiPath = url.pathname.replace(/^\/danmu\/?/, '');
 
   url.searchParams.delete('auth');
   url.searchParams.delete('t');
-
-  const targetUrl = `${base}/${apiPath}${url.search}`;
-
-  try {
-    const method = request.method.toUpperCase();
-    const hasBody = !['GET', 'HEAD'].includes(method);
-
-    const upstream = await fetch(targetUrl, {
-      method,
-      headers: buildUpstreamHeaders(request, base),
-      body: hasBody ? request.body : undefined,
-      redirect: 'follow',
-    });
-
-    const contentType = upstream.headers.get('Content-Type') || 'application/json; charset=utf-8';
-
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: corsHeaders({
-        'Content-Type': contentType,
-        'Cache-Control': method === 'GET' ? 'public, max-age=300' : 'no-store',
-      }),
-    });
-  } catch (err) {
-    return json({ success: false, error: err.message || 'danmu proxy failed' }, 502);
-  }
+  return proxyDanmuUpstream({
+    request: new Request(url, request),
+    env,
+    path: apiPath,
+    allowedMethods: ['GET', 'HEAD', 'POST'],
+  });
 }

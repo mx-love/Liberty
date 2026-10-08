@@ -22,4 +22,7 @@ coverage
 *.njsproj
 *.sln
 *.sw?
-.env
+.env*
+!.env.example
+.dev.vars*
+version.json

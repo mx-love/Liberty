@@ -10,7 +10,8 @@
     "dev": "nodemon server.mjs",
     "start": "node server.mjs",
     "build": "npm run build:core",
-    "build:core": "esbuild src/core/index.ts --bundle --format=esm --platform=browser --target=es2020 --sourcemap --outfile=js/liberty-core.js",
+    "build:core": "esbuild src/core/index.ts --bundle --format=esm --platform=browser --target=es2020 --sourcemap --outfile=js/liberty-core.js && node scripts/generate-version.mjs",
+    "generate:version": "node scripts/generate-version.mjs",
     "typecheck": "tsc --noEmit",
     "test:core": "npm run build:core && node --test test/core/*.test.js",
     "test": "npm run build:core && node --test"
