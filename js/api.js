@@ -20,17 +20,22 @@ function parseEpisodeEntry(entry, index) {
 
     const dollarIndex = raw.indexOf('$');
     const fallbackName = `第${index + 1}集`;
-    let name = fallbackName;
+    let rawEpisodeName = '';
     let url = raw;
 
     if (dollarIndex !== -1) {
-        name = cleanEpisodeName(raw.slice(0, dollarIndex), fallbackName);
+        rawEpisodeName = cleanEpisodeName(raw.slice(0, dollarIndex), '');
         url = raw.slice(dollarIndex + 1).trim();
     }
 
     if (!isPlayableUrl(url)) return null;
 
-    return { name, url };
+    return {
+        rawEpisodeName,
+        name: rawEpisodeName || fallbackName,
+        url,
+        rawEntry: raw
+    };
 }
 
 function parseVodPlaySources(vodPlayFrom = '', vodPlayUrl = '') {
@@ -145,8 +150,10 @@ function buildSinglePlaySourceFromUrls(urls, sourceName = '播放源 1') {
         if (!isPlayableUrl(cleanUrl) || seen.has(cleanUrl)) return;
         seen.add(cleanUrl);
         episodes.push({
+            rawEpisodeName: '',
             name: `第${episodes.length + 1}集`,
-            url: cleanUrl
+            url: cleanUrl,
+            rawEntry: cleanUrl
         });
     });
 
@@ -164,8 +171,13 @@ function parseHtmlPlaySources(html, sourceName = '播放源 1') {
         if (!isPlayableUrl(url) || seen.has(url)) continue;
 
         seen.add(url);
-        const name = cleanEpisodeName(match[1], `第${episodes.length + 1}集`);
-        episodes.push({ name, url });
+        const rawEpisodeName = cleanEpisodeName(match[1], '');
+        episodes.push({
+            rawEpisodeName,
+            name: rawEpisodeName || `第${episodes.length + 1}集`,
+            url,
+            rawEntry: match[0]
+        });
     }
 
     if (episodes.length > 0) {

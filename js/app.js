@@ -36,6 +36,7 @@ let currentPlaySourceIndex = 0;
 // 添加当前视频的标题
 let currentVideoTitle = '';
 let currentVideoYear = ''; // 新增
+let currentVideoMetadata = {};
 // 全局变量用于倒序状态
 let episodesReversed = false;
 const SEARCH_PAGE_SIZE = 40;
@@ -1721,15 +1722,28 @@ function normalizeEpisodeList(episodes) {
     return episodes.map((episode, index) => {
         if (typeof episode === 'string') {
             return {
+                // This label is for the episode grid only. An URL-only item has
+                // no trustworthy episode identity for Core V2 to parse.
+                rawEpisodeName: '',
                 name: `第${index + 1}集`,
-                url: episode
+                url: episode,
+                rawEntry: episode
             };
         }
 
         if (episode && typeof episode === 'object') {
+            const rawEpisodeName = episode.rawEpisodeName
+                ?? episode.name
+                ?? episode.title
+                ?? '';
+            const url = episode.url || '';
             return {
-                name: episode.name || `第${index + 1}集`,
-                url: episode.url || ''
+                ...episode,
+                rawEpisodeName: String(rawEpisodeName),
+                name: String(rawEpisodeName) || `第${index + 1}集`,
+                url,
+                rawEntry: episode.rawEntry
+                    ?? (rawEpisodeName ? `${rawEpisodeName}$${url}` : url)
             };
         }
 
@@ -1952,6 +1966,17 @@ async function showDetails(id, vod_name, sourceCode) {
         modalTitle.innerHTML = `<span class="break-words">${escapeHtml(vod_name || '未知视频')}</span>${sourceName}`;
         currentVideoTitle = vod_name || '未知视频';
 		currentVideoYear = (data.videoInfo && data.videoInfo.year) ? String(data.videoInfo.year) : ''; // 新增
+        const rawVideoInfo = data.videoInfo || {};
+        currentVideoMetadata = {
+            category: rawVideoInfo.category || '',
+            type: rawVideoInfo.type || '',
+            remarks: rawVideoInfo.remarks || '',
+            director: rawVideoInfo.director || '',
+            actors: rawVideoInfo.actors || rawVideoInfo.actor || '',
+            area: rawVideoInfo.area || '',
+            language: rawVideoInfo.language || rawVideoInfo.lang || '',
+            sourceName: rawVideoInfo.source_name || ''
+        };
 
         currentPlaySources = normalizePlaySources(data.playSources, data.episodes);
         const preferredSourceIndex = Number.isInteger(data.selectedPlaySourceIndex)
@@ -2099,15 +2124,25 @@ function playVideo(url, vod_name, sourceCode, episodeIndex = 0, vodId = '') {
             playbackState.writePlaybackSession({
                 title: vod_name || '未知视频',
                 year: currentVideoYear,
+                ...currentVideoMetadata,
                 sourceCode: sourceCode || '',
                 vodId: vodId || '',
                 episodeIndex,
-                episodes: getCurrentEpisodeUrls()
+                episodes: currentEpisodes
             });
         } else {
             localStorage.setItem('currentVideoTitle', vod_name || '未知视频');
             localStorage.setItem('currentVideoYear', currentVideoYear);
+            localStorage.setItem('currentVideoCategory', String(currentVideoMetadata.category || ''));
+            localStorage.setItem('currentVideoType', String(currentVideoMetadata.type || ''));
+            localStorage.setItem('currentVideoRemarks', String(currentVideoMetadata.remarks || ''));
+            localStorage.setItem('currentVideoDirector', String(currentVideoMetadata.director || ''));
+            localStorage.setItem('currentVideoActors', String(currentVideoMetadata.actors || ''));
+            localStorage.setItem('currentVideoArea', String(currentVideoMetadata.area || ''));
+            localStorage.setItem('currentVideoLanguage', String(currentVideoMetadata.language || ''));
+            localStorage.setItem('currentSourceName', String(currentVideoMetadata.sourceName || ''));
             localStorage.setItem('currentEpisodes', JSON.stringify(getCurrentEpisodeUrls()));
+            localStorage.setItem('currentEpisodeEntries', JSON.stringify(currentEpisodes));
             localStorage.setItem('currentEpisodeIndex', episodeIndex);
             localStorage.setItem('currentSourceCode', sourceCode || '');
         }

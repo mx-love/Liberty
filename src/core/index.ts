@@ -103,6 +103,12 @@ export type {
 export type { DanmuCandidateResolutionOptions } from './danmaku/danmu-candidate-resolver.js';
 export type { DanmakuEpisodeResolutionInput } from './danmaku/danmu-episode-resolver.js';
 export type { DanmuServiceDependencies } from './danmaku/danmu-service.js';
+export type {
+    DanmakuPlaybackContext,
+    DanmakuPlaybackContextState,
+    DanmakuPlaybackEpisodeInput,
+    DanmakuPlaybackInput,
+} from './danmaku/danmu-playback-adapter.js';
 
 export { SourceError } from './types/source.js';
 export { TitleParser, parseTitle } from './identity/title-parser.js';
@@ -122,6 +128,7 @@ export { DanmuClient } from './danmaku/danmu-client.js';
 export {
     DanmuCandidateResolver,
     adaptDanmakuCandidate,
+    adaptDanmuSearchAnime,
     resolveDanmakuCandidate,
 } from './danmaku/danmu-candidate-resolver.js';
 export {
@@ -129,6 +136,7 @@ export {
     resolveDanmakuEpisode,
 } from './danmaku/danmu-episode-resolver.js';
 export { DanmuService } from './danmaku/danmu-service.js';
+export { createDanmakuPlaybackContext } from './danmaku/danmu-playback-adapter.js';
 
 import { SourceError } from './types/source.js';
 import { TitleParser, parseTitle } from './identity/title-parser.js';
@@ -148,6 +156,7 @@ import { DanmuClient } from './danmaku/danmu-client.js';
 import {
     DanmuCandidateResolver,
     adaptDanmakuCandidate,
+    adaptDanmuSearchAnime,
     resolveDanmakuCandidate,
 } from './danmaku/danmu-candidate-resolver.js';
 import {
@@ -155,6 +164,7 @@ import {
     resolveDanmakuEpisode,
 } from './danmaku/danmu-episode-resolver.js';
 import { DanmuService } from './danmaku/danmu-service.js';
+import { createDanmakuPlaybackContext } from './danmaku/danmu-playback-adapter.js';
 
 /**
  * Transitional browser boundary for Core V2.
@@ -184,10 +194,12 @@ export const LibertyCore = Object.freeze({
     DanmuClient,
     DanmuCandidateResolver,
     adaptDanmakuCandidate,
+    adaptDanmuSearchAnime,
     resolveDanmakuCandidate,
     DanmuEpisodeResolver,
     resolveDanmakuEpisode,
     DanmuService,
+    createDanmakuPlaybackContext,
 });
 
 declare global {

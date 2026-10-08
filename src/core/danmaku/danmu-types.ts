@@ -193,19 +193,37 @@ export type DanmakuServiceState =
   | 'invalid-response'
   | 'success';
 
-export interface DanmakuResolveInput {
+interface DanmakuResolveInputBase {
   readonly media: CanonicalMedia;
   readonly episode: CanonicalEpisode;
   readonly mediaEpisodes: readonly CanonicalEpisode[];
   readonly sourceEpisode: SourceEpisode;
-  readonly manualCandidate?: DanmakuMediaCandidate;
   readonly signal?: AbortSignal;
 }
+
+export type DanmakuResolveInput = DanmakuResolveInputBase & (
+  | {
+      readonly manualCandidate?: undefined;
+      readonly manualEpisodeId?: never;
+    }
+  | {
+      /** An explicit work choice. It never confirms an episode by itself. */
+      readonly manualCandidate: DanmakuMediaCandidate;
+      /**
+       * An explicit episode choice made after selecting a work. The service
+       * accepts it only when the resolver has already identified this episode
+       * as an identity-compatible candidate.
+       */
+      readonly manualEpisodeId?: string;
+    }
+);
 
 export interface DanmakuServiceResult {
   readonly state: DanmakuServiceState;
   readonly binding: DanmakuBinding | null;
   readonly comments: readonly DanmuComment[];
+  /** Duration reported by the resolved danmu episode, when the API supplies it. */
+  readonly videoDuration: number | null;
   readonly candidateResolution: DanmakuCandidateResolution | null;
   readonly episodeResolution: DanmakuEpisodeResolution | null;
   readonly error: DanmuClientError | null;

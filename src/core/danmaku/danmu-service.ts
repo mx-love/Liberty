@@ -15,6 +15,7 @@ import type {
   DanmakuServiceResult,
   DanmakuServiceState,
   DanmuClientError,
+  DanmuEpisode,
 } from './danmu-types.js';
 
 export interface DanmuServiceDependencies {
@@ -43,12 +44,14 @@ function emptyResult(
     readonly candidateResolution?: DanmakuCandidateResolution | null;
     readonly episodeResolution?: DanmakuEpisodeResolution | null;
     readonly error?: DanmuClientError | null;
+    readonly videoDuration?: number | null;
   } = {},
 ): DanmakuServiceResult {
   return {
     state,
     binding: options.binding ?? null,
     comments: [],
+    videoDuration: options.videoDuration ?? null,
     candidateResolution: options.candidateResolution ?? null,
     episodeResolution: options.episodeResolution ?? null,
     error: options.error ?? null,
@@ -121,6 +124,20 @@ interface EpisodeInputIssue {
   readonly reason: string;
 }
 
+interface ManualEpisodeSelectionSuccess {
+  readonly ok: true;
+  readonly resolution: DanmakuEpisodeResolution;
+}
+
+interface ManualEpisodeSelectionFailure {
+  readonly ok: false;
+  readonly reason: string;
+}
+
+type ManualEpisodeSelectionResult =
+  | ManualEpisodeSelectionSuccess
+  | ManualEpisodeSelectionFailure;
+
 function episodeInputIssue(input: DanmakuResolveInput): EpisodeInputIssue | null {
   if (input.episode.mediaId !== input.media.mediaId) {
     return {
@@ -165,6 +182,72 @@ function episodeInputIssue(input: DanmakuResolveInput): EpisodeInputIssue | null
     };
   }
   return null;
+}
+
+function manualEpisodeInputIssue(input: DanmakuResolveInput): EpisodeInputIssue | null {
+  if (input.manualEpisodeId === undefined) return null;
+  if (input.manualCandidate === undefined) {
+    return {
+      state: 'episode-rejected',
+      reason: 'A manual episode choice requires an explicitly selected danmu work',
+    };
+  }
+  if (input.manualEpisodeId.trim() === '') {
+    return {
+      state: 'episode-rejected',
+      reason: 'The manually selected danmu episodeId must not be empty',
+    };
+  }
+  return null;
+}
+
+function applyManualEpisodeSelection(
+  resolution: DanmakuEpisodeResolution,
+  episodes: readonly DanmuEpisode[],
+  manualEpisodeId: string,
+): ManualEpisodeSelectionResult {
+  if (resolution.state === 'rejected') {
+    return {
+      ok: false,
+      reason: `The manual episode choice cannot override an identity conflict: ${resolution.reason}`,
+    };
+  }
+
+  const episodeId = manualEpisodeId.trim();
+  const upstreamMatches = episodes.filter((episode) => episode.episodeId === episodeId);
+  if (upstreamMatches.length !== 1) {
+    return {
+      ok: false,
+      reason: upstreamMatches.length === 0
+        ? `The manually selected episodeId ${episodeId} is not present in the selected work`
+        : `The manually selected episodeId ${episodeId} is not unique in the selected work`,
+    };
+  }
+
+  const selected = upstreamMatches[0];
+  if (selected === undefined) {
+    return {
+      ok: false,
+      reason: `The manually selected episodeId ${episodeId} is not present in the selected work`,
+    };
+  }
+  const compatibleMatches = resolution.candidates.filter((candidate) => candidate === selected);
+  if (compatibleMatches.length !== 1) {
+    return {
+      ok: false,
+      reason: `The manually selected episodeId ${episodeId} is not an identity-compatible candidate`,
+    };
+  }
+
+  return {
+    ok: true,
+    resolution: {
+      ...resolution,
+      state: resolution.state === 'verified' ? 'verified' : 'supported',
+      selected,
+      reason: `The user confirmed identity-compatible danmu episode ${episodeId}`,
+    },
+  };
 }
 
 function candidateState(
@@ -229,6 +312,7 @@ export class DanmuService {
         binding: bindingResult.binding,
         candidateResolution: bindingResult.candidateResolution,
         episodeResolution: bindingResult.episodeResolution,
+        videoDuration: comments.data.videoDuration,
       });
     }
 
@@ -236,6 +320,7 @@ export class DanmuService {
       state: 'success',
       binding: bindingResult.binding,
       comments: comments.data.comments,
+      videoDuration: comments.data.videoDuration,
       candidateResolution: bindingResult.candidateResolution,
       episodeResolution: bindingResult.episodeResolution,
       error: null,
@@ -250,6 +335,8 @@ export class DanmuService {
 
     const originalInputIssue = episodeInputIssue(input);
     if (originalInputIssue) return emptyResult(originalInputIssue.state, originalInputIssue.reason);
+    const manualInputIssue = manualEpisodeInputIssue(input);
+    if (manualInputIssue) return emptyResult(manualInputIssue.state, manualInputIssue.reason);
     const canonicalEpisode = input.mediaEpisodes.find(
       (episode) => episode.canonicalEpisodeId === input.episode.canonicalEpisodeId,
     );
@@ -312,12 +399,26 @@ export class DanmuService {
       });
     }
 
-    const episodeResolution = this.episodeResolver.resolve({
+    let episodeResolution = this.episodeResolver.resolve({
       media: canonicalInput.media,
       targetEpisode: canonicalInput.episode,
       canonicalEpisodes: canonicalInput.mediaEpisodes,
       danmuEpisodes: bangumi.data.episodes,
     });
+    if (canonicalInput.manualEpisodeId !== undefined) {
+      const manualSelection = applyManualEpisodeSelection(
+        episodeResolution,
+        bangumi.data.episodes,
+        canonicalInput.manualEpisodeId,
+      );
+      if (!manualSelection.ok) {
+        return emptyResult('episode-rejected', manualSelection.reason, {
+          candidateResolution,
+          episodeResolution,
+        });
+      }
+      episodeResolution = manualSelection.resolution;
+    }
     const unresolvedEpisodeState = episodeState(episodeResolution);
     if (unresolvedEpisodeState) {
       return emptyResult(unresolvedEpisodeState, episodeResolution.reason, {
@@ -361,7 +462,12 @@ export class DanmuService {
           episodeEvidence: episodeResolution.evidence,
         },
         ...(candidateResolution.selectedBy === 'manual'
-          ? [{ stage: 'manual' as const, reason: 'The user selected the work; the episode was resolved independently' }]
+          ? [{
+              stage: 'manual' as const,
+              reason: canonicalInput.manualEpisodeId === undefined
+                ? 'The user selected the work; the episode was resolved independently'
+                : 'The user selected the work and confirmed one identity-compatible danmu episode',
+            }]
           : []),
       ],
     };

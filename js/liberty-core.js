@@ -2641,6 +2641,7 @@ function emptyResult(state, reason, options = {}) {
     state,
     binding: options.binding ?? null,
     comments: [],
+    videoDuration: options.videoDuration ?? null,
     candidateResolution: options.candidateResolution ?? null,
     episodeResolution: options.episodeResolution ?? null,
     error: options.error ?? null,
@@ -2727,6 +2728,61 @@ function episodeInputIssue(input) {
   }
   return null;
 }
+function manualEpisodeInputIssue(input) {
+  if (input.manualEpisodeId === void 0) return null;
+  if (input.manualCandidate === void 0) {
+    return {
+      state: "episode-rejected",
+      reason: "A manual episode choice requires an explicitly selected danmu work"
+    };
+  }
+  if (input.manualEpisodeId.trim() === "") {
+    return {
+      state: "episode-rejected",
+      reason: "The manually selected danmu episodeId must not be empty"
+    };
+  }
+  return null;
+}
+function applyManualEpisodeSelection(resolution, episodes, manualEpisodeId) {
+  if (resolution.state === "rejected") {
+    return {
+      ok: false,
+      reason: `The manual episode choice cannot override an identity conflict: ${resolution.reason}`
+    };
+  }
+  const episodeId = manualEpisodeId.trim();
+  const upstreamMatches = episodes.filter((episode) => episode.episodeId === episodeId);
+  if (upstreamMatches.length !== 1) {
+    return {
+      ok: false,
+      reason: upstreamMatches.length === 0 ? `The manually selected episodeId ${episodeId} is not present in the selected work` : `The manually selected episodeId ${episodeId} is not unique in the selected work`
+    };
+  }
+  const selected = upstreamMatches[0];
+  if (selected === void 0) {
+    return {
+      ok: false,
+      reason: `The manually selected episodeId ${episodeId} is not present in the selected work`
+    };
+  }
+  const compatibleMatches = resolution.candidates.filter((candidate) => candidate === selected);
+  if (compatibleMatches.length !== 1) {
+    return {
+      ok: false,
+      reason: `The manually selected episodeId ${episodeId} is not an identity-compatible candidate`
+    };
+  }
+  return {
+    ok: true,
+    resolution: {
+      ...resolution,
+      state: resolution.state === "verified" ? "verified" : "supported",
+      selected,
+      reason: `The user confirmed identity-compatible danmu episode ${episodeId}`
+    }
+  };
+}
 function candidateState(resolution) {
   switch (resolution.state) {
     case "not_found":
@@ -2780,13 +2836,15 @@ var DanmuService = class {
       return emptyResult("comments-empty", "The resolved danmu episode has no comments", {
         binding: bindingResult.binding,
         candidateResolution: bindingResult.candidateResolution,
-        episodeResolution: bindingResult.episodeResolution
+        episodeResolution: bindingResult.episodeResolution,
+        videoDuration: comments.data.videoDuration
       });
     }
     return {
       state: "success",
       binding: bindingResult.binding,
       comments: comments.data.comments,
+      videoDuration: comments.data.videoDuration,
       candidateResolution: bindingResult.candidateResolution,
       episodeResolution: bindingResult.episodeResolution,
       error: null,
@@ -2799,6 +2857,8 @@ var DanmuService = class {
     }
     const originalInputIssue = episodeInputIssue(input);
     if (originalInputIssue) return emptyResult(originalInputIssue.state, originalInputIssue.reason);
+    const manualInputIssue = manualEpisodeInputIssue(input);
+    if (manualInputIssue) return emptyResult(manualInputIssue.state, manualInputIssue.reason);
     const canonicalEpisode = input.mediaEpisodes.find(
       (episode) => episode.canonicalEpisodeId === input.episode.canonicalEpisodeId
     );
@@ -2852,12 +2912,26 @@ var DanmuService = class {
         error
       });
     }
-    const episodeResolution = this.episodeResolver.resolve({
+    let episodeResolution = this.episodeResolver.resolve({
       media: canonicalInput.media,
       targetEpisode: canonicalInput.episode,
       canonicalEpisodes: canonicalInput.mediaEpisodes,
       danmuEpisodes: bangumi.data.episodes
     });
+    if (canonicalInput.manualEpisodeId !== void 0) {
+      const manualSelection = applyManualEpisodeSelection(
+        episodeResolution,
+        bangumi.data.episodes,
+        canonicalInput.manualEpisodeId
+      );
+      if (!manualSelection.ok) {
+        return emptyResult("episode-rejected", manualSelection.reason, {
+          candidateResolution,
+          episodeResolution
+        });
+      }
+      episodeResolution = manualSelection.resolution;
+    }
     const unresolvedEpisodeState = episodeState(episodeResolution);
     if (unresolvedEpisodeState) {
       return emptyResult(unresolvedEpisodeState, episodeResolution.reason, {
@@ -2896,7 +2970,10 @@ var DanmuService = class {
           reason: episodeResolution.reason,
           episodeEvidence: episodeResolution.evidence
         },
-        ...candidateResolution.selectedBy === "manual" ? [{ stage: "manual", reason: "The user selected the work; the episode was resolved independently" }] : []
+        ...candidateResolution.selectedBy === "manual" ? [{
+          stage: "manual",
+          reason: canonicalInput.manualEpisodeId === void 0 ? "The user selected the work; the episode was resolved independently" : "The user selected the work and confirmed one identity-compatible danmu episode"
+        }] : []
       ]
     };
     return emptyResult(
@@ -2926,6 +3003,275 @@ var DanmuService = class {
   }
 };
 
+// src/core/danmaku/danmu-playback-adapter.ts
+function stringValue3(value) {
+  return value === null || value === void 0 ? "" : String(value);
+}
+function stableHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function mediaScopeId(input) {
+  return `playback-media:${stableHash(`${input.sourceKey}\0${input.vodId}\0${input.rawTitle}`)}`;
+}
+function partKey(value) {
+  return value === null ? "-" : String(value);
+}
+function reliableSemanticKey(parsed, mediaSeason) {
+  if (parsed.confidence !== "high" || parsed.ambiguous) return null;
+  if (parsed.airDate !== null) {
+    return `date:${parsed.airDate}:part:${partKey(parsed.part)}`;
+  }
+  if (parsed.contentType === "regular" && parsed.episodeNumber !== null) {
+    const season = parsed.seasonNumber ?? mediaSeason;
+    return [
+      parsed.numberKind,
+      `season:${season ?? "-"}`,
+      `episode:${parsed.episodeNumber}`,
+      `absolute:${parsed.absoluteNumber ?? "-"}`,
+      `part:${partKey(parsed.part)}`
+    ].join(":");
+  }
+  if (parsed.contentType === "special" && parsed.specialKind !== null && parsed.specialNumber !== null) {
+    return `special:${parsed.specialKind}:${parsed.specialNumber}:part:${partKey(parsed.part)}`;
+  }
+  if (parsed.contentType === "movie") return "movie:main-feature";
+  return null;
+}
+function mediaEvidence(rawTitle, canonicalTitle, releaseYear, season) {
+  const evidence = [{
+    field: "title",
+    state: canonicalTitle ? "supporting" : "unknown",
+    reason: canonicalTitle ? "The current playback title defines the local canonical media scope" : "The current playback item has no usable title",
+    leftValue: rawTitle,
+    rightValue: canonicalTitle || null,
+    source: "danmaku-playback-adapter"
+  }];
+  if (releaseYear !== null) {
+    evidence.push({
+      field: "year",
+      state: "supporting",
+      reason: "The source supplied an explicit release year",
+      leftValue: releaseYear,
+      rightValue: releaseYear,
+      source: "danmaku-playback-adapter"
+    });
+  }
+  if (season !== null) {
+    evidence.push({
+      field: "season",
+      state: "supporting",
+      reason: "The shared title parser found an explicit season marker",
+      leftValue: season,
+      rightValue: season,
+      source: "danmaku-playback-adapter"
+    });
+  }
+  return evidence;
+}
+function rawRecord(input) {
+  const rawPlayFrom = input.playGroup ?? input.sourceName ?? input.sourceKey;
+  const rawPlayUrl = input.episodes.map((episode) => episode.rawEntry ?? `${episode.name}$${episode.url}`).join("#");
+  return {
+    ...input.rawData ?? {},
+    vod_id: input.vodId,
+    vod_name: input.rawTitle,
+    vod_year: stringValue3(input.rawYear),
+    vod_remarks: stringValue3(input.rawRemarks),
+    type_name: stringValue3(input.rawCategory),
+    vod_director: stringValue3(input.rawDirector),
+    vod_actor: stringValue3(input.rawActors),
+    vod_area: stringValue3(input.rawArea),
+    vod_lang: stringValue3(input.rawLanguage),
+    vod_content: stringValue3(input.rawDescription),
+    vod_pic: stringValue3(input.rawCover),
+    vod_play_from: rawPlayFrom,
+    vod_play_url: rawPlayUrl
+  };
+}
+function unresolvedEpisodeId(mediaId, rawName, occurrence) {
+  return `${mediaId}:unresolved:${stableHash(rawName)}:${occurrence}`;
+}
+function createDanmakuPlaybackContext(input) {
+  const normalized = SourceNormalizer.normalize(rawRecord(input), {
+    sourceKey: input.sourceKey,
+    sourceName: input.sourceName,
+    fetchedAt: input.fetchedAt
+  });
+  const parsedTitle = parseTitle(normalized.rawTitle);
+  const canonicalTitle = parsedTitle.baseTitle.trim();
+  const releaseYear = normalized.parsedYear ?? parsedTitle.year;
+  const mediaSeason = normalized.parsedSeason;
+  const mediaId = mediaScopeId(input);
+  const playGroupIndex = input.playGroupIndex ?? 0;
+  const playGroup = input.playGroup ?? input.sourceName ?? input.sourceKey;
+  const drafts = input.episodes.map((episode2) => {
+    const parsed = parseEpisode(episode2.name, { mediaType: normalized.mediaType });
+    return {
+      input: episode2,
+      parsed,
+      semanticKey: reliableSemanticKey(parsed, mediaSeason),
+      seasonConflict: mediaSeason !== null && parsed.seasonNumber !== null && mediaSeason !== parsed.seasonNumber
+    };
+  });
+  const semanticCounts = /* @__PURE__ */ new Map();
+  for (const draft of drafts) {
+    if (draft.semanticKey !== null) {
+      semanticCounts.set(draft.semanticKey, (semanticCounts.get(draft.semanticKey) ?? 0) + 1);
+    }
+  }
+  const unresolvedOccurrences = /* @__PURE__ */ new Map();
+  const canonicalEpisodes = [];
+  const sourceEpisodes = [];
+  for (const draft of drafts) {
+    const duplicateIdentity = draft.semanticKey !== null && (semanticCounts.get(draft.semanticKey) ?? 0) > 1;
+    const mapped = draft.semanticKey !== null && !draft.seasonConflict && !duplicateIdentity;
+    const rawName = String(draft.input.name ?? "");
+    const occurrence = unresolvedOccurrences.get(rawName) ?? 0;
+    unresolvedOccurrences.set(rawName, occurrence + 1);
+    const canonicalEpisodeId = draft.semanticKey === null ? unresolvedEpisodeId(mediaId, rawName, occurrence) : `${mediaId}:episode:${encodeURIComponent(draft.semanticKey)}`;
+    const canonicalSeason = draft.parsed.seasonNumber ?? (draft.parsed.contentType === "regular" ? mediaSeason : null);
+    const rawEntry = draft.input.rawEntry ?? `${rawName}$${draft.input.url}`;
+    canonicalEpisodes.push({
+      canonicalEpisodeId,
+      mediaId,
+      contentType: draft.parsed.contentType,
+      seasonNumber: canonicalSeason,
+      episodeNumber: draft.parsed.episodeNumber,
+      absoluteNumber: draft.parsed.absoluteNumber,
+      airDate: draft.parsed.airDate,
+      episodeTitle: rawName.trim() || null,
+      part: draft.parsed.part,
+      identityState: mapped ? "supported" : "uncertain",
+      evidence: []
+    });
+    let mappingState = "unmapped";
+    let mappingEvidence = [
+      "No reliable semantic episode identity was parsed; rawIndex was not used as a fallback"
+    ];
+    if (draft.seasonConflict) {
+      mappingState = "conflicting";
+      mappingEvidence = [
+        `Explicit episode season ${draft.parsed.seasonNumber} conflicts with media season ${mediaSeason}`
+      ];
+    } else if (duplicateIdentity) {
+      mappingState = "conflicting";
+      mappingEvidence = [
+        "The same semantic episode identity occurs more than once in this playback list"
+      ];
+    } else if (mapped) {
+      mappingState = "mapped";
+      mappingEvidence = [
+        `Mapped from reliable parsed episode identity ${draft.semanticKey}`
+      ];
+    }
+    sourceEpisodes.push({
+      sourceKey: input.sourceKey,
+      vodId: input.vodId,
+      playGroup,
+      playGroupIndex,
+      rawIndex: draft.input.rawIndex,
+      rawEpisodeName: rawName,
+      displayName: rawName.trim() || "\u672A\u547D\u540D\u64AD\u653E\u9879",
+      rawEntry,
+      playUrl: draft.input.url,
+      parsedEpisodeInfo: draft.parsed,
+      canonicalEpisodeId: mapped ? canonicalEpisodeId : null,
+      mappingState,
+      mappingEvidence
+    });
+  }
+  const sourcePlayGroup = {
+    sourceKey: input.sourceKey,
+    vodId: input.vodId,
+    rawIndex: playGroupIndex,
+    rawName: playGroup,
+    displayName: playGroup,
+    rawValue: input.episodes.map((episode2) => episode2.rawEntry ?? `${episode2.name}$${episode2.url}`).join("#"),
+    episodes: sourceEpisodes
+  };
+  const sourceRecord = {
+    ...normalized,
+    playGroups: sourceEpisodes.length > 0 ? [sourcePlayGroup] : []
+  };
+  const media = {
+    mediaId,
+    mediaType: normalized.mediaType,
+    canonicalTitle,
+    aliases: parsedTitle.aliases,
+    releaseYear,
+    season: mediaSeason,
+    directors: normalized.normalizedDirector,
+    actors: normalized.normalizedActors,
+    externalIds: {},
+    evidence: mediaEvidence(normalized.rawTitle, canonicalTitle, releaseYear, mediaSeason),
+    identityState: canonicalTitle ? "supported" : "uncertain",
+    episodes: canonicalEpisodes
+  };
+  const currentMatches = [];
+  sourceEpisodes.forEach((episode2, index) => {
+    if (episode2.rawIndex === input.currentEpisodeIndex) currentMatches.push(index);
+  });
+  if (currentMatches.length !== 1) {
+    return {
+      state: "invalid",
+      reason: currentMatches.length === 0 ? "The current raw playback coordinate is absent from the source sequence" : "The current raw playback coordinate occurs more than once in the source sequence",
+      sourceRecord,
+      media,
+      mediaEpisodes: canonicalEpisodes,
+      sourceEpisodes,
+      episode: null,
+      sourceEpisode: null,
+      currentEpisodeIndex: input.currentEpisodeIndex
+    };
+  }
+  const currentPosition = currentMatches[0];
+  if (currentPosition === void 0) {
+    return {
+      state: "invalid",
+      reason: "The current raw playback coordinate could not be selected",
+      sourceRecord,
+      media,
+      mediaEpisodes: canonicalEpisodes,
+      sourceEpisodes,
+      episode: null,
+      sourceEpisode: null,
+      currentEpisodeIndex: input.currentEpisodeIndex
+    };
+  }
+  const sourceEpisode = sourceEpisodes[currentPosition] ?? null;
+  const episode = canonicalEpisodes[currentPosition] ?? null;
+  if (sourceEpisode === null || episode === null) {
+    return {
+      state: "invalid",
+      reason: "The selected source and canonical episode sequences are inconsistent",
+      sourceRecord,
+      media,
+      mediaEpisodes: canonicalEpisodes,
+      sourceEpisodes,
+      episode: null,
+      sourceEpisode: null,
+      currentEpisodeIndex: input.currentEpisodeIndex
+    };
+  }
+  const ready = media.identityState === "supported" && sourceEpisode.mappingState === "mapped" && episode.identityState === "supported";
+  return {
+    state: ready ? "ready" : "uncertain",
+    reason: ready ? "The playback work and current episode have reliable Core V2 identities" : sourceEpisode.mappingEvidence.join("; "),
+    sourceRecord,
+    media,
+    mediaEpisodes: canonicalEpisodes,
+    sourceEpisodes,
+    episode,
+    sourceEpisode,
+    currentEpisodeIndex: input.currentEpisodeIndex
+  };
+}
+
 // src/core/index.ts
 var LibertyCore = Object.freeze({
   SourceError,
@@ -2949,10 +3295,12 @@ var LibertyCore = Object.freeze({
   DanmuClient,
   DanmuCandidateResolver,
   adaptDanmakuCandidate,
+  adaptDanmuSearchAnime,
   resolveDanmakuCandidate,
   DanmuEpisodeResolver,
   resolveDanmakuEpisode,
-  DanmuService
+  DanmuService,
+  createDanmakuPlaybackContext
 });
 if (typeof window !== "undefined") {
   window.LibertyCore = LibertyCore;
@@ -2975,8 +3323,10 @@ export {
   SourceNormalizer,
   TitleParser,
   adaptDanmakuCandidate,
+  adaptDanmuSearchAnime,
   alignEpisodeSequences,
   collectCandidateEvidence,
+  createDanmakuPlaybackContext,
   parseAppleCmsPlaySources,
   parseEpisode,
   parseTitle,

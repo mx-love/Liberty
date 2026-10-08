@@ -111,6 +111,9 @@ function resolveInput(options = {}) {
             options.rawEpisodeName ?? episode.episodeTitle,
         ),
         ...(options.manualCandidate ? { manualCandidate: options.manualCandidate } : {}),
+        ...(Object.hasOwn(options, 'manualEpisodeId')
+            ? { manualEpisodeId: options.manualEpisodeId }
+            : {}),
     };
 }
 
@@ -184,8 +187,11 @@ function bangumiResponse(animeId, animeTitle, episodes) {
     });
 }
 
-function commentsResponse(comments = [{ p: '1,1,16777215,user', m: 'fixture comment' }]) {
-    return jsonResponse({ count: comments.length, comments, videoDuration: 1200 });
+function commentsResponse(
+    comments = [{ p: '1,1,16777215,user', m: 'fixture comment' }],
+    videoDuration = 1200,
+) {
+    return jsonResponse({ count: comments.length, comments, videoDuration });
 }
 
 test('the formal Stage D fixture enumerates regression cases A through R', () => {
@@ -207,6 +213,7 @@ test('known season E12 uses one reliable match query and ignores rawIndex/API li
 
     assert.equal(result.state, 'success');
     assert.equal(result.binding?.danmuEpisodeId, caseB.expectedEpisodeId);
+    assert.equal(result.videoDuration, 1200);
     assert.equal(result.binding?.canonicalEpisodeId, result.episodeResolution === null
         ? null
         : resolveInput().episode.canonicalEpisodeId);
@@ -453,6 +460,134 @@ test('manual work selection remains a canonical-episode-scoped binding', async (
     assert.match(calls[0].url, /\/api\/v2\/bangumi\/manual-anime$/u);
 });
 
+test('manual episode confirmation can only narrow identity-compatible candidates', async (t) => {
+    const manualCandidate = {
+        animeId: 'manual-duplicate-work',
+        animeTitle: 'Orbital Patrol S01',
+    };
+
+    await t.test('duplicate E12 remains uncertain until one concrete episode is confirmed', async () => {
+        const { service, calls } = recordingService([
+            bangumiResponse(manualCandidate.animeId, manualCandidate.animeTitle, [
+                { episodeId: 'duplicate-e12-a', episodeTitle: 'E12' },
+                { episodeId: 'duplicate-e12-b', episodeTitle: '第12集' },
+            ]),
+        ]);
+
+        const result = await service.resolve(resolveInput({ manualCandidate }));
+
+        assert.equal(result.state, 'episode-uncertain');
+        assert.equal(result.binding, null);
+        assert.deepEqual(
+            result.episodeResolution?.candidates.map(({ episodeId }) => episodeId),
+            ['duplicate-e12-a', 'duplicate-e12-b'],
+        );
+        assert.equal(calls.length, 1, 'uncertain episode resolution must not probe comments');
+    });
+
+    await t.test('an explicit compatible episode selects exactly that opaque ID', async () => {
+        const { service, calls } = recordingService([
+            bangumiResponse(manualCandidate.animeId, manualCandidate.animeTitle, [
+                { episodeId: 'duplicate-e12-a', episodeTitle: 'E12' },
+                { episodeId: 'duplicate-e12-b', episodeTitle: '第12集' },
+            ]),
+            commentsResponse(),
+        ]);
+
+        const result = await service.resolve(resolveInput({
+            manualCandidate,
+            manualEpisodeId: 'duplicate-e12-b',
+        }));
+
+        assert.equal(result.state, 'success');
+        assert.equal(result.binding?.danmuEpisodeId, 'duplicate-e12-b');
+        assert.equal(result.binding?.selectedBy, 'manual');
+        assert.equal(result.episodeResolution?.state, 'supported');
+        assert.equal(result.episodeResolution?.selected?.episodeId, 'duplicate-e12-b');
+        assert.match(calls[1].url, /\/api\/v2\/comment\/duplicate-e12-b\?/u);
+        assert.ok(calls.every(({ url }) => !url.includes('duplicate-e12-a?')));
+    });
+
+    await t.test('manual episode without a manual work is rejected before HTTP', async () => {
+        const { service, calls } = recordingService([]);
+
+        const result = await service.resolve(resolveInput({
+            manualEpisodeId: 'duplicate-e12-a',
+        }));
+
+        assert.equal(result.state, 'episode-rejected');
+        assert.equal(result.binding, null);
+        assert.match(result.reason, /requires an explicitly selected danmu work/iu);
+        assert.equal(calls.length, 0);
+    });
+
+    await t.test('an episode ID absent from the selected work is rejected before comments', async () => {
+        const { service, calls } = recordingService([
+            bangumiResponse(manualCandidate.animeId, manualCandidate.animeTitle, [
+                { episodeId: 'real-e12', episodeTitle: 'E12' },
+            ]),
+        ]);
+
+        const result = await service.resolve(resolveInput({
+            manualCandidate,
+            manualEpisodeId: 'not-in-bangumi',
+        }));
+
+        assert.equal(result.state, 'episode-rejected');
+        assert.equal(result.binding, null);
+        assert.match(result.reason, /not present in the selected work/iu);
+        assert.equal(calls.length, 1);
+    });
+
+    await t.test('a present but identity-incompatible episode cannot be forced', async () => {
+        const { service, calls } = recordingService([
+            bangumiResponse(manualCandidate.animeId, manualCandidate.animeTitle, [
+                { episodeId: 'wrong-e11', episodeTitle: 'E11' },
+                { episodeId: 'right-e12', episodeTitle: 'E12' },
+            ]),
+        ]);
+
+        const result = await service.resolve(resolveInput({
+            manualCandidate,
+            manualEpisodeId: 'wrong-e11',
+        }));
+
+        assert.equal(result.state, 'episode-rejected');
+        assert.equal(result.binding, null);
+        assert.match(result.reason, /not an identity-compatible candidate/iu);
+        assert.equal(calls.length, 1);
+    });
+
+    await t.test('manual confirmation cannot override an explicit season conflict', async () => {
+        const media = canonicalMedia({ season: 2 });
+        const episodes = [canonicalEpisode(media.mediaId, 'S02E12', 0)];
+        const seasonTwoCandidate = {
+            animeId: 'manual-season-two',
+            animeTitle: 'Orbital Patrol S02',
+        };
+        const { service, calls } = recordingService([
+            bangumiResponse(seasonTwoCandidate.animeId, seasonTwoCandidate.animeTitle, [
+                { episodeId: 'wrong-season-e12', episodeTitle: 'S01E12' },
+            ]),
+        ]);
+
+        const result = await service.resolve(resolveInput({
+            media,
+            episodes,
+            episode: episodes[0],
+            targetIndex: 0,
+            manualCandidate: seasonTwoCandidate,
+            manualEpisodeId: 'wrong-season-e12',
+        }));
+
+        assert.equal(result.state, 'episode-rejected');
+        assert.equal(result.binding, null);
+        assert.match(result.reason, /cannot override an identity conflict/iu);
+        assert.equal(result.episodeResolution?.state, 'rejected');
+        assert.equal(calls.length, 1);
+    });
+});
+
 test('binding resolution is observable before comments and does not probe comments for correctness', async () => {
     const { service, calls } = recordingService([
         matchResponse(),
@@ -483,7 +618,41 @@ test('empty comments preserve the binding and return comments-empty', async () =
     assert.equal(result.state, fixture.cases.K.expectedState);
     assert.equal(result.binding?.danmuEpisodeId, 'dm-e12');
     assert.deepEqual(result.comments, []);
+    assert.equal(result.videoDuration, 1200);
     assert.equal(result.error, null);
+});
+
+test('comment duration remains optional while valid values cross the Service boundary', async (t) => {
+    const resolveWithCommentPayload = async (payload) => {
+        const { service } = recordingService([
+            matchResponse(),
+            bangumiResponse('anime-orbital-s1', 'Orbital Patrol S01', [
+                { episodeId: 'dm-e12', episodeTitle: 'E12' },
+            ]),
+            payload,
+        ]);
+        return service.resolve(resolveInput());
+    };
+
+    await t.test('missing duration stays unknown', async () => {
+        const result = await resolveWithCommentPayload(jsonResponse({
+            count: 1,
+            comments: [{ p: '1,1,16777215,user', m: 'fixture comment' }],
+        }));
+        assert.equal(result.state, 'success');
+        assert.equal(result.videoDuration, null);
+    });
+
+    await t.test('invalid duration is rejected by the Client boundary', async () => {
+        const result = await resolveWithCommentPayload(jsonResponse({
+            count: 1,
+            videoDuration: [],
+            comments: [{ p: '1,1,16777215,user', m: 'fixture comment' }],
+        }));
+        assert.equal(result.state, 'invalid-response');
+        assert.equal(result.videoDuration, null);
+        assert.equal(result.binding?.danmuEpisodeId, 'dm-e12');
+    });
 });
 
 test('comment transport failures preserve a valid binding and retain precise error states', async (t) => {
