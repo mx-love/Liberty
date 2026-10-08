@@ -1,27 +1,30 @@
 # Liberty Core V2 重构进度
 
 > 这是下一轮继续工作的唯一入口。每次主要阶段完成、接入或回退后必须更新。
-> 最后更新：2026-10-04
+> 最后更新：2026-10-09
 > 当前分支：`refactor/liberty-core-v2`
 > 重构基线：`105e76a`（`fix: correct danmaku episode matching`）
 > 阶段 D 实现提交：`452984d`（`refactor: add identity-aware danmaku core`）
-> 工作区状态：阶段 A～C COMPLETE；阶段 D CORE COMPLETE；生产迁移尚未开始。
+> 阶段 E 工程迁移提交：`31b3253`（`refactor: migrate production danmaku to Liberty Core V2`）
+> 工作区状态：阶段 A～C COMPLETE；阶段 D CORE COMPLETE；阶段 E ENGINEERING MIGRATION COMPLETE；**REAL API ACCEPTANCE PENDING**。
 
 ## 1. 一句话状态
 
-Core V2 的严格 TypeScript 骨架、Source Core、身份/剧集核心和独立 Danmaku Core 已完成构建、测试与真实 Edge bundle 验证；它们**尚未加载到现有生产页面，也尚未替换 `js/api.js`、`js/app.js`、`js/search.js` 或 `js/player.js` 的生产逻辑**。独立 Core 通过不等于正式网站的弹幕错配已经修复，也不代表真实环境准确率达到 98%。
+生产 `player.html` 已加载由当前 TypeScript 源码构建的 `js/liberty-core.js`，自动和手动弹幕流程均已切换到 Core V2 / `DanmuService`。旧 title/season/episode matcher、候选排序、宽松 fallback 和评论探测不再参与生产决策，生产调用数为 0。
+
+本地 fixture、完整仓库测试和实际 `msedge.exe` 受控自动化生产页面链均已通过；用户实际部署的 `danmu_api` 与真实影视库尚未验收。因此本状态只表示工程迁移完成，**不表示线上准确率达到 98%，也不表示真实线上弹幕问题已全部验收**。
 
 ## 2. 阶段状态
 
 | 阶段 | 状态 | 已完成边界 | 尚未完成边界 |
 |---|---|---|---|
-| A：基线与新架构 | **COMPLETE** | 当前系统审计、共享模型、strict tsconfig、esbuild/npm 脚本、显式公共 entry/bundle、架构决策与迁移清单均已验证 | 页面 bridge 未建立；生产 HTML 未加载 bundle |
+| A：基线与新架构 | **COMPLETE** | 当前系统审计、共享模型、strict tsconfig、esbuild/npm 脚本、显式公共 entry/bundle、架构决策与迁移清单均已验证 | 无需重做 |
 | B：Source Core | **COMPLETE** | AppleCMS adapter、normalizer、播放组解析、SourceManager、fixture/测试和集成链路已验证 | 尚未接 `API_SITES`/custom APIs；真实源抽样为 `network-unverified`；HTML detail fallback 未迁移；生产搜索/详情仍旧 |
 | C：身份与剧集 | **COMPLETE** | 共享 identity/episode types、TitleParser、CandidateEvidence、EntityResolver、EpisodeParser、EpisodeAligner/Resolver 及 fixtures/集成测试已验证 | 尚未接搜索、播放器、registry 或持久映射 |
-| D：Danmaku Core | **CORE COMPLETE** | DanmuClient、DanmuCandidateResolver、DanmuEpisodeResolver、DanmuService、A–V Service 场景及公共 bundle 已验证 | 真实 danmu_api 联网验证；生产 `player.js` 迁移 |
-| E：Production Danmaku Migration | **NOT STARTED** | 无 | 以薄 adapter 将已验证 Core 接入生产播放器，再受控移除旧匹配路径 |
+| D：Danmaku Core | **CORE COMPLETE** | DanmuClient、DanmuCandidateResolver、DanmuEpisodeResolver、DanmuService、A–V Service 场景及公共 bundle 已验证 | 真实 danmu_api 联网验证 |
+| E：Production Danmaku Migration | **ENGINEERING MIGRATION COMPLETE** | 生产 bundle、薄 playback adapter、自动/手动链、请求隔离、legacy 删除、生产集成与 Edge 验收 | 真实 API、真实影视样本和部署环境验收 |
 
-表中“CORE COMPLETE”不是“生产完成”。任何未运行的页面/Cloudflare 测试都不得写为通过。
+表中 Stage E 的“ENGINEERING MIGRATION COMPLETE”不等于真实 API/部署验收。任何未运行的真实 API、双浏览器房间或 Cloudflare 测试都不得写为通过。
 
 ## 3. 当前工作区代码清单
 
@@ -29,8 +32,8 @@ Core V2 的严格 TypeScript 骨架、Source Core、身份/剧集核心和独立
 
 - `package.json` / `package-lock.json`：加入 TypeScript、esbuild 及 core build/typecheck/test scripts；
 - `tsconfig.json`：strict、`noUncheckedIndexedAccess`、Bundler resolution、DOM/ES lib；
-- `src/core/index.ts`：唯一公开导出入口；只显式暴露阶段 A～D 的稳定 runtime/type API；ESM 与 `window.LibertyCore` 保持同一边界；
-- `js/liberty-core.js`：构建产物目标；不能手工编辑，也不表示页面已经引用。
+- `src/core/index.ts`：唯一公开导出入口；只显式暴露阶段 A～E 所需的稳定 runtime/type API；ESM 与 `window.LibertyCore` 保持同一边界；
+- `js/liberty-core.js`：由 TypeScript 源码构建的部署产物，不能手工编辑；`player.html` 已在 `js/player.js` 前加载它。
 
 ### Source Core
 
@@ -70,11 +73,13 @@ Core V2 的严格 TypeScript 骨架、Source Core、身份/剧集核心和独立
 - `src/core/danmaku/danmu-candidate-resolver.ts`
 - `src/core/danmaku/danmu-episode-resolver.ts`
 - `src/core/danmaku/danmu-service.ts`
+- `src/core/danmaku/danmu-playback-adapter.ts`
 - `test/core/danmu-candidate-resolver.test.js`
 - `test/core/danmu-client.test.js`
 - `test/core/danmu-episode-resolver.test.js`
 - `test/core/danmu-service.test.js`
 - `test/core/danmu-service-scenarios.test.js`
+- `test/core/danmu-playback-adapter.test.js`
 - `test/fixtures/danmaku/danmu-core-cases.json`
 
 实现边界：
@@ -86,27 +91,64 @@ Core V2 的严格 TypeScript 骨架、Source Core、身份/剧集核心和独立
 - DanmuService 只接受已映射到同一 CanonicalEpisode 的 SourceEpisode，并以 canonical sequence 成员作为查询事实来源。信息不足明确返回 uncertain，不从 `rawIndex` 猜集数；未知季、电影和综艺不制造 `S01`。
 - comments 只在作品和剧集 binding 已建立后请求；评论有无不参与候选正确性判断，空评论保留 binding 并返回 `comments-empty`。
 
+### Stage E 生产适配边界
+
+生产播放 metadata 现在保留 source-provided `rawEpisodeName`、`rawEntry`、`rawIndex`、播放组和 source locator。URL-only 播放项可生成 `第 N 集` 形式的 `displayName`，但该值只用于 UI；对应 `rawEpisodeName` 保持空值，不能成为 `episodeNumber` 或 CanonicalEpisode evidence。旧 URL 数组继续作为兼容接口，结构化 `currentEpisodeEntries` 与之并行保存。
+
+唯一自动生产链为：
+
+```text
+production playback data
+  -> createDanmakuPlaybackContext
+  -> DanmuService.resolve
+  -> existing comment conversion/timing
+  -> ArtPlayer danmaku render
+```
+
+唯一手动生产链为：
+
+```text
+existing danmaku modal
+  -> user selects work candidate
+  -> Core candidate validation
+  -> Core episode resolution
+  -> explicit episode confirmation when ambiguous
+  -> DanmuService.resolve(selectedBy=manual)
+  -> existing ArtPlayer render
+```
+
+选择一个 work 不等于确认整季。人工 episode 选择只按当前 `canonicalEpisodeId` 保存；人工 work 只在当时的 `canonicalMediaId` 范围内有效，切换 canonical media 后立即失效。
+
+自动与手动流程共用一个 `AbortController`/generation 生命周期。应用结果前同时验证 generation、canonical media identity、canonical episode identity 和 source locator（source、vod、播放组、组 index、raw index、raw entry、play URL）。因此同作品同 E12 从 source A 切到 source B 时，A 的旧结果也不能覆盖 B；关闭弹幕、销毁播放器和手动覆盖自动请求使用同一 guard。
+
+`videoDuration` 从 DanmuClient comment response 经 `DanmuServiceResult.videoDuration` 到达现有 player 时间缩放逻辑；缺失或非法值保持 `null`，`comments-empty` 仍保留正确 binding 和 duration 语义。
+
+Stage E 基线 `cca7f14` 的 `player.js` 为 7,794 行，当前为 5,815 行。它只保留 playback context adapter、Core invocation、request lifecycle、modal/UI、ArtPlayer comment conversion/render，以及既有 settings/player lifecycle/一起看公开接口；不再负责 title identity、season/episode guessing、candidate scoring 或 legacy fallback。
+
 ## 4. 已替换、已删除与生产接入
 
 ### 已替换旧函数
 
-**无。**
+生产自动和手动弹幕决策已由 Core V2 的 playback adapter、DanmuCandidateResolver、DanmuEpisodeResolver 和 DanmuService 替换。
 
 ### 已删除旧函数
 
-**无。**
+函数级 diff 与 `rg`/静态调用检查确认，旧 `advancedCleanTitle`、season/episode guessing、query builder、match validator、candidate ranking、episode-by-index mapping、automatic fallback、anime episode cache 和 comment probing 已从生产 `player.js` 删除。
+
+**LEGACY DANMAKU MATCHER PRODUCTION CALLS = 0**。
+
+剩余 `episodeIndex + 1` 只用于一起看缺失名称时的 UI fallback 和历史记录文案，不参与弹幕 identity。`comments=[]` 返回 `comments-empty`，不会尝试另一个错误 candidate。
 
 ### 已接入生产页面
 
-**无。** 现有 HTML 仍加载经典脚本；当前 bundle 未成为页面运行路径。
+`player.html` 已加载最终 Core V2 bundle；实际生产页自动和手动弹幕均走同一 Core V2 Service。`getDanmukuForVideo` 与 `switchDanmuSource` 名称作为 adapter/UI shell 保留，其中不再实现 identity/episode 决策。
 
 ### 仍由旧逻辑负责
 
 - `js/search.js::searchByAPIAndKeyWord` 与 `app.js` 搜索 fan-out；
 - `js/api.js` AppleCMS 解析、详情和全局 fetch 虚拟 API；
-- `app.js` 搜索排序/旧聚合、详情投影与播放 handoff；
-- `utils/media.js`、`utils/playback-state.js` 将 episode 压缩为 URL；
-- `player.js` 全部弹幕匹配、网络、缓存与 UI 适配；
+- `app.js` 搜索排序/旧聚合和详情投影；Stage E 只补充了结构化 playback metadata handoff；
+- `utils/media.js` 的旧兼容路径；`utils/playback-state.js` 现在双写 URL compatibility 与结构化 entries；
 - ArtPlayer/hls.js 生命周期和错误处理；
 - 一起看 Controller/PlayerAdapter/UI/Worker 协议。
 
@@ -114,7 +156,46 @@ Core V2 的严格 TypeScript 骨架、Source Core、身份/剧集核心和独立
 
 ## 5. 测试与验证记录
 
-### 阶段 D 最终本地验证
+### 阶段 E 最终本地验证
+
+```text
+JavaScript syntax                         PASS 10/10
+npm run typecheck                         PASS
+npm run build:core                        PASS (129.2 kB; map 253.4 kB)
+npm run test:core                         PASS 160/160
+Production Danmaku matrix                 PASS 25/25
+node --test (完整仓库)                    PASS 193/193
+git diff --check                          PASS
+```
+
+25 项生产矩阵直接加载实际 `js/player.js` 和构建后的浏览器 Core，覆盖普通 E1、`rawIndex=1/E12`、弹幕列表重排、重复 E12、季/年份冲突、source/danmu 缺特别篇、generated label 非身份、`videoDuration`、12→13→12、相同集号跨 media/source stale、auto→manual、关闭/销毁后的旧请求、空评论、429、network、500、非法响应、uncertain 禁止 legacy fallback、manual episode scope 和 manual work media scope。历史 `test/danmu-episode-number.test.js` 已迁移为生产行为测试，不再检查已删除函数是否存在。
+
+### 阶段 E 实际 Microsoft Edge 自动化
+
+最终代码使用本机实际 `msedge.exe` 运行真实生产页面链：
+
+```text
+index/app/api metadata
+  -> player.html
+  -> js/liberty-core.js
+  -> js/player.js
+  -> Core V2 / DanmuService
+  -> ArtPlayer adapter
+```
+
+danmu HTTP 使用受控同源 fixture，视频层使用本地/内存 HLS stub；没有访问公网 HLS。Core bundle、auto/manual Core V2、`rawIndex=1/E12`、generated-label 边界、`videoDuration` 和 stale/manual/disabled/destroy guard 均通过；`pageerror=0`、`console.error=0`、`unhandledrejection=0`、`unexpected external requests=0`。
+
+computer-use 可见浏览器环境返回 `apps=[]`、`browsers=[]`，因此没有把人工可见复核写成通过。这是验证工具表面不可用，不是自动化生产链失败。
+
+`.validation/verify-stage-e-production.mjs` 符合仓库已有 `.validation/.gitignore` 的 `*` 规则，作为 local-only 验证资产保留，未纳入正式提交。
+
+### 阶段 E 一起看回归范围
+
+Stage E 未修改一起看协议或实现文件。实际受控结果为：`test/playback-state.test.js` 4/4、相关 JavaScript syntax 6/6、单运行时 VM assertions 61/61（PlayerAdapter 15、Controller 16、snapshot helpers 13、`loadEpisodeFromWatchRoomSnapshot` 17）。覆盖 `window.LibertyPlayer`、`art`、play、pause、seek、episode switch、snapshot/state 访问和 host/viewer 权限行为。
+
+没有执行真实双浏览器 host/viewer WebSocket 房间；这里只能称为 protocol/API regression coverage passed，不能称为完整 live two-client acceptance。
+
+### 阶段 D 历史最终本地验证
 
 ```text
 node --test test/core/danmu-*.test.js          PASS 91/91
@@ -158,7 +239,7 @@ MiniflareCoreError [ERR_RUNTIME_FAILURE]: The Workers runtime failed to start.
 
 当次 `results`、`errors`、`warnings`、`navigations` 均为空。结论：这是当前机器上的本地 Workers runtime blocker；它发生在页面加载前，不能直接视为 Liberty 页面或播放器回归。同时，搜索、详情、播放器、弹幕和一起看的浏览器流程**没有执行，不能报告为通过**。
 
-### Edge 独立 core bundle 验证
+### 阶段 D 历史 Edge 独立 core bundle 验证
 
 不依赖 Miniflare 的真实 Edge harness 已通过：
 
@@ -169,13 +250,13 @@ MiniflareCoreError [ERR_RUNTIME_FAILURE]: The Workers runtime failed to start.
 - 未知季 E125 走作品搜索，没有生成或发送 `S01`；
 - page error 0，console error 0，外部浏览器请求 0。
 
-这是对最终浏览器 bundle 和独立 Core Service 调用链的真实验证，但 harness 没有让生产 HTML 加载 Core V2，也没有运行生产播放器、一起看或 Cloudflare Worker。因此它不能写成生产页面迁移通过。
+这是阶段 D 当时对独立 Core Service 的验证记录；其“尚未加载生产 HTML”限制已由上方阶段 E 实际 Edge 生产页面链验收取代。Cloudflare Worker 和真实双端一起看仍未因此得到验收。
 
 ### 真实 danmu_api 验证
 
-状态：**`network-unverified`**。
+状态：**REAL API ACCEPTANCE PENDING**（此前记录为 `network-unverified`）。
 
-仓库只保存相对代理配置（生产为 `/api/danmu`，上游由 Cloudflare 环境变量 `DANMU_API_BASE` 提供）。当前本地验收环境没有可安全使用的部署域名和上游配置，因此没有执行真实影片的线上 danmu_api 请求。受控 fixture、mock HTTP 契约和真实 Edge 执行均通过，但不得据此宣称线上影片匹配准确率达到 98%。
+仓库只保存相对代理配置（生产为 `/api/danmu`，上游由 Cloudflare 环境变量 `DANMU_API_BASE` 提供）。当前本地验收环境没有可安全使用的部署域名和上游配置，因此没有执行真实影片的线上 danmu_api 请求。受控 fixture、mock HTTP 契约和真实 Edge 生产链均通过，但不得据此宣称线上影片匹配准确率达到 98%。
 
 ### 真实 AppleCMS 低频抽样
 
@@ -203,35 +284,19 @@ MiniflareCoreError [ERR_RUNTIME_FAILURE]: The Workers runtime failed to start.
 1. `src/core/` 尚未接 `js/config.js::API_SITES` 和用户 `customAPIs`，不能声称现有所有源已经迁移。
 2. 当前 fixture 证明通用 AppleCMS 形态；真实抽样仅得到 timeout/403，兼容性仍为 `network-unverified`，不证明每个真实源今天返回兼容响应。
 3. 特殊 HTML detail fallback 尚未建真实 fixture，也不能提前删除。
-4. 首页到播放器仍会把 `{name,url}` 压成 URL；结构化 SourceEpisode 尚未贯穿生产。
-5. Canonical Media Registry、持久 mapping、VideoEdition 判定尚未实现。
-6. 新身份/episode/Danmaku Core 尚未用于生产搜索合并、弹幕或备用线路。
-7. **生产 `js/player.js` 尚未迁移，当前正式网站仍使用旧弹幕调用链。** 本阶段没有替换或删除任何旧生产函数。
-8. `index.html` / `player.html` 尚未加载 Core V2；独立 Core 的 Edge bundle 已验证，但生产页面与 Workers 尚未验收。
-9. 真实 danmu_api 为 `network-unverified`，自动匹配准确率/覆盖率没有足够独立标注样本，本轮不得声称达到 98%。
-10. 本阶段没有改动 ArtPlayer、HLS、Service Worker、一起看、Cloudflare Worker 或 UI。
+4. Stage E 已让结构化 episode metadata 进入生产弹幕链，但 Source Core 尚未接管全部生产搜索、详情与备用线路。
+5. Canonical Media Registry、持久 mapping、VideoEdition 判定尚未实现；当前 manual state 是 canonical media/episode scoped 的页面 session 状态。
+6. 真实 danmu_api 与真实影视库尚未验收，自动匹配准确率/覆盖率没有足够独立标注样本，不得声称达到 98%。
+7. 实际 Edge 生产页面链已通过；Cloudflare Pages/Functions 部署环境和真实双浏览器一起看仍未执行完整验收。
+8. Stage E 没有改动 ArtPlayer、HLS、Service Worker、一起看协议、Cloudflare Worker 或 UI 设计。
 
 ## 7. 下一轮准确起点
 
-阶段 A～C COMPLETE，阶段 D CORE COMPLETE。下一阶段是 **Stage E — Production Danmaku Migration**，不是重新设计 Core。开始前先确认：
+阶段 A～C COMPLETE、阶段 D CORE COMPLETE、阶段 E ENGINEERING MIGRATION COMPLETE。下一步不是继续重构，也不是启动 Stage F。
 
-```text
-git branch --show-current
-git log -5 --oneline
-git status --short
-npm run typecheck
-npm run test:core
-```
+下一步仅为：**真实 danmu_api + 真实影视验收**。开始前需要用户实际部署配置、可控真实样本和明确的联网验收窗口；本轮不启动该步骤。
 
-然后以 `src/core/danmaku/danmu-service.ts` 和 `src/core/index.ts` 的稳定 API 为唯一新入口，在 `player.js` 建立薄 adapter：
-
-1. 从现有播放数据构造 CanonicalMedia、CanonicalEpisode 和 SourceEpisode；
-2. 先以 shadow/debug 方式比较新旧结果；
-3. 保留现有 ArtPlayer、弹幕 UI 和用户手动选源行为；
-4. 只在生产浏览器验收覆盖自动匹配、手动选择、切集和请求取消后，逐步移除旧 identity/episode 匹配；
-5. 不允许新版 uncertain 自动落入旧宽松匹配并悄悄加载弹幕。
-
-阶段 D 到此停止，不提前开展 HLS、一起看跨源或其它阶段 E 之外的改造。
+验收期间保持 Core V2 为唯一生产弹幕决策链，不恢复 legacy fallback，不修改 ArtPlayer、HLS、一起看协议或 Cloudflare 部署架构。
 
 ## 8. 明确不在本轮恢复的位置
 
@@ -240,4 +305,4 @@ npm run test:core
 - 不建立 Cloudflare 视频中转或第三方媒体缓存；
 - 不升级 UI 框架；
 - 不删除任何内置或自定义采集站配置；
-- 不部署、不 push、不把未执行的浏览器测试写成通过。
+- 不部署、不 push、不把未执行的真实 API、可见人工浏览器或双端一起看测试写成通过。

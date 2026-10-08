@@ -1,6 +1,6 @@
 # Liberty Core V2 媒体模型
 
-> 状态：阶段 A 规范性模型；阶段 B/C 已在 `src/core/types/` 实现其当前所需子集。
+> 状态：阶段 A 规范性模型；阶段 B/C/D Core 已实现；阶段 E 已完成弹幕生产 transient integration，长期 registry 仍未实现。
 > 源码基线：`refactor/liberty-core-v2@105e76a`。
 > 本文定义身份边界和不变量；字段可因真实 fixture 补充，但不得重新混用这些身份。精确可编译字段名以 `src/core/types/` 为准，未实现的后续类型不得被描述为生产能力。
 
@@ -8,11 +8,11 @@
 
 | 模型 | 当前源码 | 状态 |
 |---|---|---|
-| `SourceRecord` / `SourcePlayGroup` / `SourceEpisode` | `src/core/types/source.ts` | 阶段 B 已实现，尚未贯穿页面 |
+| `SourceRecord` / `SourcePlayGroup` / `SourceEpisode` | `src/core/types/source.ts` | 阶段 B 已实现；阶段 E 已贯穿弹幕所需 metadata，完整 Source 生产迁移尚未完成 |
 | `ParsedTitle` / `CandidateEvidence` / identity result | `src/core/types/identity.ts` | 阶段 C 已实现，尚未进入 registry/搜索 |
-| `ParsedEpisodeInfo` / alignment/resolution | `src/core/types/episode.ts` | 阶段 C 已实现并有 fixture/集成测试，尚未进入播放器 |
+| `ParsedEpisodeInfo` / alignment/resolution | `src/core/types/episode.ts` | 阶段 C 已实现并有 fixture/集成测试；阶段 E 已进入生产弹幕 adapter |
 | `CanonicalMedia` / `CanonicalEpisode` / `VideoEdition` | `src/core/types/media.ts`、`episode.ts` | 结构已定义，registry 和持久映射未实现 |
-| `DanmakuBinding` | 本文第 10 节 | 阶段 D 目标，尚无生产实现 |
+| `DanmakuBinding` | `src/core/danmaku/danmu-types.ts`、本文第 10 节 | 阶段 D Core 与阶段 E transient production binding 已实现；持久 registry 尚未实现 |
 | `CanonicalRoomMedia` / participant choice | 本文第 14 节 | 后续协议目标，本轮不修改一起看 |
 
 阶段 B 的 `SourceEpisode.parsedEpisodeInfo` 已直接复用共享 `ParsedEpisodeInfo`，而不是维护 Source 专用的第二套集数类型。后续 adapter 也必须保持这一约束。
@@ -343,7 +343,7 @@ interface VideoEdition {
 
 初期可以全部是 `unknown`，但不能删掉这层。相同 canonical episode 可能有片头差异、删减、地区版、合并或拆分；这直接决定跨源换线和一起看能否继承时间点。
 
-## 10. DanmakuBinding（阶段 D 规范目标，尚未实现）
+## 10. DanmakuBinding（阶段 D Core / 阶段 E transient production 已实现）
 
 ```ts
 interface DanmakuBinding {
