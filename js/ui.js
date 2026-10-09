@@ -525,6 +525,8 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
         let episodesList = [];
         let historyItem = null; // To store the full history item
         let syncSuccessful = false;
+        let storedPlayGroup = '';
+        let storedPlayGroupIndex = null;
 
         // 检查viewingHistory，查找匹配的项
         const historyRaw = localStorage.getItem('viewingHistory');
@@ -536,8 +538,25 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
                 // console.log('[playFromHistory in ui.js] historyItem.vod_id:', historyItem.vod_id, 'historyItem.sourceName:', historyItem.sourceName); // Log 3
             }
 
-            if (historyItem && historyItem.episodes && Array.isArray(historyItem.episodes)) {
-                episodesList = historyItem.episodes; // Default to stored episodes
+            if (historyItem) {
+                const storedEpisodeEntries = Array.isArray(historyItem.episodeEntries)
+                    ? historyItem.episodeEntries
+                    : [];
+                const storedEpisodes = Array.isArray(historyItem.episodes)
+                    ? historyItem.episodes
+                    : [];
+                const storedEpisodeWithGroup = storedEpisodeEntries.find(entry => (
+                    entry && typeof entry === 'object' && (
+                        entry.playGroup || Number.isInteger(entry.playGroupIndex)
+                    )
+                ));
+                storedPlayGroup = String(storedEpisodeWithGroup?.playGroup || '');
+                storedPlayGroupIndex = Number.isInteger(storedEpisodeWithGroup?.playGroupIndex)
+                    ? storedEpisodeWithGroup.playGroupIndex
+                    : null;
+                episodesList = storedEpisodeEntries.length > 0
+                    ? storedEpisodeEntries
+                    : storedEpisodes;
                 // console.log(`从历史记录找到视频 "${title}" 的集数数据 (默认):`, episodesList.length);
             }
         }
@@ -569,9 +588,23 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
                 }
                 const videoDetails = await response.json();
 
-                if (videoDetails && videoDetails.episodes && videoDetails.episodes.length > 0) {
+                const detailPlaySources = Array.isArray(videoDetails?.playSources)
+                    ? videoDetails.playSources
+                    : [];
+                const matchingPlaySource = (
+                    (storedPlayGroup && detailPlaySources.find(source => source?.name === storedPlayGroup))
+                    || (storedPlayGroupIndex !== null && detailPlaySources.find((source, index) => (
+                        (Number.isInteger(source?.rawIndex) ? source.rawIndex : index) === storedPlayGroupIndex
+                    )))
+                    || null
+                );
+                const refreshedEpisodes = Array.isArray(matchingPlaySource?.episodes)
+                    ? matchingPlaySource.episodes
+                    : videoDetails?.episodes;
+
+                if (Array.isArray(refreshedEpisodes) && refreshedEpisodes.length > 0) {
                     const oldEpisodeCount = episodesList.length;
-                    episodesList = videoDetails.episodes;
+                    episodesList = refreshedEpisodes;
                     syncSuccessful = true;
 
                     // Show success message with episode count info
@@ -587,7 +620,13 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
                     // console.log(`成功获取 "${title}" 最新剧集列表:`, episodesList.length, "集");
                     // Update the history item in localStorage with the fresh episodes
                     if (historyItem) {
-                        historyItem.episodes = [...episodesList]; // Deep copy
+                        const normalizeEpisodeUrls = window.LibertyUtils?.media?.normalizeEpisodeUrls;
+                        historyItem.episodes = normalizeEpisodeUrls
+                            ? normalizeEpisodeUrls(episodesList)
+                            : episodesList.map(episode => (
+                                typeof episode === 'string' ? episode : episode?.url || ''
+                            )).filter(Boolean);
+                        historyItem.episodeEntries = [...episodesList];
                         historyItem.lastSyncTime = Date.now(); // Add sync timestamp
                         const history = JSON.parse(historyRaw); // Re-parse to ensure we have the latest version
                         const idx = history.findIndex(item => item.url === url);
@@ -630,7 +669,16 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
 
         // 将剧集列表保存到localStorage，播放器页面会读取它
         if (episodesList.length > 0) {
-            localStorage.setItem('currentEpisodes', JSON.stringify(episodesList));
+            const playbackState = window.LibertyUtils?.playbackState;
+            if (playbackState?.writeCurrentEpisodeEntries) {
+                playbackState.writeCurrentEpisodeEntries(episodesList);
+            } else {
+                const episodeUrls = episodesList.map(episode => (
+                    typeof episode === 'string' ? episode : episode?.url || ''
+                )).filter(Boolean);
+                localStorage.setItem('currentEpisodes', JSON.stringify(episodeUrls));
+                localStorage.setItem('currentEpisodeEntries', JSON.stringify(episodesList));
+            }
             // console.log(`已将剧集列表保存到localStorage，共 ${episodesList.length} 集`);
         }
 

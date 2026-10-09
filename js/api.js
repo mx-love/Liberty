@@ -30,9 +30,13 @@ function parseEpisodeEntry(entry, index) {
 
     if (!isPlayableUrl(url)) return null;
 
+    const displayEpisodeName = rawEpisodeName || fallbackName;
     return {
+        rawIndex: index,
         rawEpisodeName,
-        name: rawEpisodeName || fallbackName,
+        displayEpisodeName,
+        episodeNameSource: rawEpisodeName ? 'source' : 'generated',
+        name: displayEpisodeName,
         url,
         rawEntry: raw
     };
@@ -45,15 +49,23 @@ function parseVodPlaySources(vodPlayFrom = '', vodPlayUrl = '') {
     const sourceGroups = vodPlayUrl.split('$$$');
 
     return sourceGroups.map((group, groupIndex) => {
+        const sourceName = sourceNames[groupIndex] || `播放源 ${groupIndex + 1}`;
         const episodes = group
             .split('#')
             .map((entry, episodeIndex) => parseEpisodeEntry(entry, episodeIndex))
-            .filter(Boolean);
+            .filter(Boolean)
+            .map((episode, rawIndex) => ({
+                ...episode,
+                rawIndex,
+                playGroup: sourceName,
+                playGroupIndex: groupIndex
+            }));
 
         if (episodes.length === 0) return null;
 
         return {
-            name: sourceNames[groupIndex] || `播放源 ${groupIndex + 1}`,
+            rawIndex: groupIndex,
+            name: sourceName,
             episodes
         };
     }).filter(Boolean);
@@ -149,11 +161,18 @@ function buildSinglePlaySourceFromUrls(urls, sourceName = '播放源 1') {
         const cleanUrl = (url || '').toString().trim();
         if (!isPlayableUrl(cleanUrl) || seen.has(cleanUrl)) return;
         seen.add(cleanUrl);
+        const rawIndex = episodes.length;
+        const displayEpisodeName = `第${rawIndex + 1}集`;
         episodes.push({
+            rawIndex,
             rawEpisodeName: '',
-            name: `第${episodes.length + 1}集`,
+            displayEpisodeName,
+            episodeNameSource: 'generated',
+            name: displayEpisodeName,
             url: cleanUrl,
-            rawEntry: cleanUrl
+            rawEntry: cleanUrl,
+            playGroup: sourceName,
+            playGroupIndex: 0
         });
     });
 
@@ -172,11 +191,18 @@ function parseHtmlPlaySources(html, sourceName = '播放源 1') {
 
         seen.add(url);
         const rawEpisodeName = cleanEpisodeName(match[1], '');
+        const rawIndex = episodes.length;
+        const displayEpisodeName = rawEpisodeName || `第${rawIndex + 1}集`;
         episodes.push({
+            rawIndex,
             rawEpisodeName,
-            name: rawEpisodeName || `第${episodes.length + 1}集`,
+            displayEpisodeName,
+            episodeNameSource: rawEpisodeName ? 'source' : 'generated',
+            name: displayEpisodeName,
             url,
-            rawEntry: match[0]
+            rawEntry: match[0],
+            playGroup: sourceName,
+            playGroupIndex: 0
         });
     }
 

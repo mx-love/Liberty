@@ -1177,3 +1177,37 @@ test('25. a manual work choice is invalidated when canonical media identity chan
     assert.equal(harness.api.debug().lastDanmuMatchInfo.selectedBy, 'automatic');
     assert.equal(harness.api.sessionSource(), null);
 });
+
+test('26. source-provided 第01集 reaches Core identity and the production comment request', async () => {
+    const episodeNumbers = Array.from({ length: 10 }, (_, index) => index + 1);
+    const work = createWork({
+        title: '非自然死亡',
+        animeId: 'unnatural-2018',
+        animeTitle: '非自然死亡',
+        year: 2018,
+        episodes: regularEpisodes(episodeNumbers, 'unnatural-e'),
+    });
+    const harness = createHarness({ works: [work] });
+    setStandardPlayback(harness, {
+        title: '非自然死亡',
+        year: 2018,
+        sourceCode: 'subo',
+        sourceName: 'subo',
+        vodId: '8199',
+        episodes: playbackEpisodes([
+            '第01集', '第02集', '第03集', '第04集', '第05集',
+            '第06集', '第07集', '第08集', '第09集', '第10集完结',
+        ], { prefix: 'unnatural' }),
+        index: 0,
+    });
+
+    const context = harness.api.createContext();
+    const result = await harness.api.getDanmuku();
+
+    assert.equal(context.state, 'ready');
+    assert.equal(context.sourceEpisode?.rawEpisodeName, '第01集');
+    assert.equal(context.sourceEpisode?.parsedEpisodeInfo.episodeNumber, 1);
+    assert.equal(context.episode?.episodeNumber, 1);
+    assert.equal(result[0]?.text, 'unnatural-e1 comment');
+    assert.match(commentRequests(harness)[0].path, /\/unnatural-e1$/u);
+});

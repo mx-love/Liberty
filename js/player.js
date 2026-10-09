@@ -1547,7 +1547,16 @@ function getObservedDanmuEpisodes() {
         const structured = structuredEpisodes[index]
             || (playerEpisode && typeof playerEpisode === 'object' ? playerEpisode : null);
         let rawName = structured?.rawEpisodeName;
-        if (rawName === undefined) rawName = structured?.name ?? structured?.title ?? '';
+        const rawEntry = String(structured?.rawEntry || '');
+        if (rawName === undefined) {
+            const rawEntryDollarIndex = rawEntry.indexOf('$');
+            const rawEntryName = rawEntryDollarIndex > 0
+                ? rawEntry.slice(0, rawEntryDollarIndex).trim()
+                : '';
+            rawName = structured?.episodeNameSource === 'source'
+                ? (structured?.name ?? structured?.title ?? rawEntryName)
+                : rawEntryName;
+        }
         if (!rawName && typeof playerEpisode === 'string' && playerEpisode.includes('$')) {
             rawName = playerEpisode.slice(0, playerEpisode.indexOf('$'));
         }
@@ -1556,10 +1565,16 @@ function getObservedDanmuEpisodes() {
             || '';
 
         return {
-            rawIndex: index,
+            rawIndex: Number.isInteger(structured?.rawIndex) ? structured.rawIndex : index,
             name: String(rawName || ''),
+            displayEpisodeName: String(structured?.displayEpisodeName || structured?.name || ''),
+            episodeNameSource: rawName ? 'source' : 'generated',
+            playGroup: String(structured?.playGroup || ''),
+            playGroupIndex: Number.isInteger(structured?.playGroupIndex)
+                ? structured.playGroupIndex
+                : null,
             url,
-            rawEntry: structured?.rawEntry || (rawName ? `${rawName}$${url}` : url),
+            rawEntry: rawEntry || (rawName ? `${rawName}$${url}` : url),
         };
     });
 }
@@ -1581,6 +1596,8 @@ function createProductionDanmakuContext(title, episodeIndex) {
         || session.vodId
         || localStorage.getItem('currentVideoId')
         || '';
+    const observedEpisodes = getObservedDanmuEpisodes();
+    const currentObservedEpisode = observedEpisodes[episodeIndex] || null;
 
     return runtime.core.createDanmakuPlaybackContext({
         sourceKey: String(sourceKey),
@@ -1596,8 +1613,14 @@ function createProductionDanmakuContext(title, episodeIndex) {
         rawLanguage: session.language || '',
         rawDescription: session.description || '',
         rawCover: session.cover || '',
-        episodes: getObservedDanmuEpisodes(),
-        currentEpisodeIndex: episodeIndex,
+        playGroup: currentObservedEpisode?.playGroup || session.playGroup || undefined,
+        playGroupIndex: Number.isInteger(currentObservedEpisode?.playGroupIndex)
+            ? currentObservedEpisode.playGroupIndex
+            : undefined,
+        episodes: observedEpisodes,
+        currentEpisodeIndex: Number.isInteger(currentObservedEpisode?.rawIndex)
+            ? currentObservedEpisode.rawIndex
+            : episodeIndex,
     });
 }
 
@@ -4466,6 +4489,18 @@ function saveToHistory(forceImmediate = false) {
                 if (DEBUG_HISTORY) window.LibertyDebug.log(`[历史记录] 位置: ${currentPosition.toFixed(0)}s / ${videoDuration.toFixed(0)}s`);
             }
 
+            const historyEpisodeEntries = currentEpisodes.map((episode, index) => {
+                const url = getPlayerEpisodeUrlValue(episode);
+                const structured = currentEpisodeEntries?.[index];
+                if (
+                    structured
+                    && typeof structured === 'object'
+                    && (!getPlayerEpisodeUrlValue(structured) || getPlayerEpisodeUrlValue(structured) === url)
+                ) {
+                    return { ...structured, url };
+                }
+                return { url };
+            }).filter(episode => episode.url);
             const videoInfo = {
                 title: currentVideoTitle,
                 directVideoUrl: currentVideoUrl,
@@ -4477,7 +4512,8 @@ function saveToHistory(forceImmediate = false) {
                 timestamp: Date.now(),
                 playbackPosition: currentPosition,
                 duration: videoDuration,
-                episodes: currentEpisodes && currentEpisodes.length > 0 ? [...currentEpisodes] : []
+                episodes: currentEpisodes && currentEpisodes.length > 0 ? [...currentEpisodes] : [],
+                episodeEntries: historyEpisodeEntries
             };
 
             const history = JSON.parse(localStorage.getItem('viewingHistory') || '[]');
@@ -4498,6 +4534,7 @@ function saveToHistory(forceImmediate = false) {
 
                 if (videoInfo.episodes && videoInfo.episodes.length > 0) {
                     existingItem.episodes = [...videoInfo.episodes];
+                    existingItem.episodeEntries = [...videoInfo.episodeEntries];
                 }
 
                 const updatedItem = history.splice(existingIndex, 1)[0];

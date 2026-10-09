@@ -1721,29 +1721,53 @@ function normalizeEpisodeList(episodes) {
 
     return episodes.map((episode, index) => {
         if (typeof episode === 'string') {
+            const displayEpisodeName = `第${index + 1}集`;
             return {
                 // This label is for the episode grid only. An URL-only item has
                 // no trustworthy episode identity for Core V2 to parse.
+                rawIndex: index,
                 rawEpisodeName: '',
-                name: `第${index + 1}集`,
+                displayEpisodeName,
+                episodeNameSource: 'generated',
+                name: displayEpisodeName,
                 url: episode,
                 rawEntry: episode
             };
         }
 
         if (episode && typeof episode === 'object') {
-            const rawEpisodeName = episode.rawEpisodeName
+            const url = episode.url || '';
+            const rawEntry = episode.rawEntry ?? '';
+            const rawEntryDollarIndex = String(rawEntry).indexOf('$');
+            const rawEntryName = rawEntryDollarIndex > 0
+                ? String(rawEntry).slice(0, rawEntryDollarIndex).trim()
+                : '';
+            const hasRawEpisodeName = Object.prototype.hasOwnProperty.call(episode, 'rawEpisodeName');
+            const rawEpisodeNameValue = hasRawEpisodeName
+                ? episode.rawEpisodeName
+                : episode.episodeNameSource === 'source'
+                    ? (episode.name ?? episode.title ?? rawEntryName)
+                    : rawEntryName;
+            const rawEpisodeName = rawEpisodeNameValue == null
+                ? ''
+                : String(rawEpisodeNameValue).trim();
+            const displayEpisodeName = String(
+                episode.displayEpisodeName
                 ?? episode.name
                 ?? episode.title
-                ?? '';
-            const url = episode.url || '';
+                ?? rawEpisodeName
+                ?? `第${index + 1}集`
+            ) || `第${index + 1}集`;
             return {
                 ...episode,
-                rawEpisodeName: String(rawEpisodeName),
-                name: String(rawEpisodeName) || `第${index + 1}集`,
+                rawIndex: Number.isInteger(episode.rawIndex) ? episode.rawIndex : index,
+                rawEpisodeName,
+                displayEpisodeName,
+                episodeNameSource: rawEpisodeName ? 'source' : 'generated',
+                name: displayEpisodeName,
                 url,
-                rawEntry: episode.rawEntry
-                    ?? (rawEpisodeName ? `${rawEpisodeName}$${url}` : url)
+                rawEntry: rawEntry
+                    || (rawEpisodeName ? `${rawEpisodeName}$${url}` : url)
             };
         }
 
@@ -1754,18 +1778,32 @@ function normalizeEpisodeList(episodes) {
 function normalizePlaySources(playSources, fallbackEpisodes) {
     if (Array.isArray(playSources) && playSources.length > 0) {
         return playSources.map((source, index) => {
-            const episodes = normalizeEpisodeList(source.episodes);
+            const playGroup = source.name || `播放源 ${index + 1}`;
+            const playGroupIndex = Number.isInteger(source.rawIndex) ? source.rawIndex : index;
+            const episodes = normalizeEpisodeList(source.episodes).map(episode => ({
+                ...episode,
+                playGroup: episode.playGroup || playGroup,
+                playGroupIndex: Number.isInteger(episode.playGroupIndex)
+                    ? episode.playGroupIndex
+                    : playGroupIndex
+            }));
             if (episodes.length === 0) return null;
 
             return {
-                name: source.name || `播放源 ${index + 1}`,
+                ...source,
+                rawIndex: playGroupIndex,
+                name: playGroup,
                 episodes
             };
         }).filter(Boolean);
     }
 
-    const episodes = normalizeEpisodeList(fallbackEpisodes);
-    return episodes.length > 0 ? [{ name: '播放源 1', episodes }] : [];
+    const episodes = normalizeEpisodeList(fallbackEpisodes).map(episode => ({
+        ...episode,
+        playGroup: episode.playGroup || '播放源 1',
+        playGroupIndex: Number.isInteger(episode.playGroupIndex) ? episode.playGroupIndex : 0
+    }));
+    return episodes.length > 0 ? [{ rawIndex: 0, name: '播放源 1', episodes }] : [];
 }
 
 function hasPlayableEpisodes(episodes) {
