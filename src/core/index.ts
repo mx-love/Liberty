@@ -102,7 +102,10 @@ export type {
 } from './danmaku/danmu-client.js';
 export type { DanmuCandidateResolutionOptions } from './danmaku/danmu-candidate-resolver.js';
 export type { DanmakuEpisodeResolutionInput } from './danmaku/danmu-episode-resolver.js';
-export type { DanmuServiceDependencies } from './danmaku/danmu-service.js';
+export type {
+    DanmuProviderResolutionOptions,
+    DanmuServiceDependencies,
+} from './danmaku/danmu-service.js';
 export type {
     DanmakuPlaybackContext,
     DanmakuPlaybackContextState,

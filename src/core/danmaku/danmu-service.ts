@@ -24,6 +24,13 @@ export interface DanmuServiceDependencies {
   readonly episodeResolver?: DanmuEpisodeResolver;
 }
 
+export interface DanmuProviderResolutionOptions {
+  /** Try this already identity-compatible provider before the stable default order. */
+  readonly preferredAnimeId?: string;
+}
+
+const MAX_AUTO_PROVIDER_CANDIDATES = 5;
+
 interface CandidateDiscoverySuccess {
   readonly ok: true;
   readonly candidates: readonly DanmakuMediaCandidate[];
@@ -35,6 +42,18 @@ interface CandidateDiscoveryFailure {
 }
 
 type CandidateDiscoveryResult = CandidateDiscoverySuccess | CandidateDiscoveryFailure;
+
+interface CanonicalInputSuccess {
+  readonly ok: true;
+  readonly input: DanmakuResolveInput;
+}
+
+interface CanonicalInputFailure {
+  readonly ok: false;
+  readonly result: DanmakuServiceResult;
+}
+
+type CanonicalInputResult = CanonicalInputSuccess | CanonicalInputFailure;
 
 function emptyResult(
   state: DanmakuServiceState,
@@ -276,6 +295,96 @@ function episodeState(
   }
 }
 
+function canonicalizeInput(input: DanmakuResolveInput): CanonicalInputResult {
+  if (!mediaCanResolve(input)) {
+    return {
+      ok: false,
+      result: emptyResult('media-unresolved', 'Canonical media identity is not supported or confirmed'),
+    };
+  }
+
+  const originalInputIssue = episodeInputIssue(input);
+  if (originalInputIssue) {
+    return {
+      ok: false,
+      result: emptyResult(originalInputIssue.state, originalInputIssue.reason),
+    };
+  }
+  const manualInputIssue = manualEpisodeInputIssue(input);
+  if (manualInputIssue) {
+    return {
+      ok: false,
+      result: emptyResult(manualInputIssue.state, manualInputIssue.reason),
+    };
+  }
+  const canonicalEpisode = input.mediaEpisodes.find(
+    (episode) => episode.canonicalEpisodeId === input.episode.canonicalEpisodeId,
+  );
+  if (canonicalEpisode === undefined) {
+    return {
+      ok: false,
+      result: emptyResult('episode-rejected', 'The canonical target episode is missing'),
+    };
+  }
+  // The sequence member is the canonical source of truth. A caller-provided
+  // duplicate object with the same ID cannot alter the query or episode facts.
+  const canonicalInput: DanmakuResolveInput = { ...input, episode: canonicalEpisode };
+  if (!hasReliableEpisodeIdentity(canonicalInput)) {
+    return {
+      ok: false,
+      result: emptyResult('episode-uncertain', 'The target episode has no reliable content identity'),
+    };
+  }
+
+  return { ok: true, input: canonicalInput };
+}
+
+function automaticCandidateResolution(
+  resolution: DanmakuCandidateResolution,
+  evaluation: DanmakuCandidateResolution['evaluations'][number],
+): DanmakuCandidateResolution {
+  return {
+    state: evaluation.identity.decision === 'confirmed' ? 'verified' : 'supported',
+    selected: evaluation.candidate,
+    selectedBy: 'automatic',
+    evaluations: resolution.evaluations,
+    reason: evaluation.identity.reason,
+  };
+}
+
+function orderedProviderEvaluations(
+  resolution: DanmakuCandidateResolution,
+  preferredAnimeId: string | undefined,
+): readonly DanmakuCandidateResolution['evaluations'][number][] {
+  const preferred = preferredAnimeId?.trim() ?? '';
+  const seen = new Set<string>();
+  const eligible = resolution.evaluations.filter((evaluation) => {
+    const animeId = evaluation.candidate.animeId.trim();
+    if (
+      !animeId ||
+      seen.has(animeId) ||
+      (evaluation.identity.decision !== 'confirmed' && evaluation.identity.decision !== 'supported')
+    ) {
+      return false;
+    }
+    seen.add(animeId);
+    return true;
+  });
+
+  return eligible
+    .map((evaluation, index) => ({ evaluation, index }))
+    .sort((left, right) => {
+      const leftPreferred = preferred !== '' && left.evaluation.candidate.animeId === preferred;
+      const rightPreferred = preferred !== '' && right.evaluation.candidate.animeId === preferred;
+      if (leftPreferred !== rightPreferred) return leftPreferred ? -1 : 1;
+      const leftRank = left.evaluation.identity.decision === 'confirmed' ? 0 : 1;
+      const rightRank = right.evaluation.identity.decision === 'confirmed' ? 0 : 1;
+      return leftRank - rightRank || left.index - right.index;
+    })
+    .slice(0, MAX_AUTO_PROVIDER_CANDIDATES)
+    .map(({ evaluation }) => evaluation);
+}
+
 /**
  * Coordinates the standalone Core V2 danmaku pipeline. It deliberately has no
  * dependency on player.js, ArtPlayer, UI state, or the legacy matcher.
@@ -293,10 +402,127 @@ export class DanmuService {
 
   async resolve(input: DanmakuResolveInput): Promise<DanmakuServiceResult> {
     const bindingResult = await this.resolveBinding(input);
+    return this.resolveComments(bindingResult, input.signal);
+  }
+
+  /**
+   * Resolve a bounded set of identity-compatible providers for one canonical
+   * episode. Provider availability is considered only after media and episode
+   * identity have both been established.
+   */
+  async resolveProviders(
+    input: DanmakuResolveInput,
+    options: DanmuProviderResolutionOptions = {},
+  ): Promise<DanmakuServiceResult> {
+    // Explicit user choices retain the established manual semantics.
+    if (input.manualCandidate !== undefined) return this.resolve(input);
+
+    const canonical = canonicalizeInput(input);
+    if (!canonical.ok) return canonical.result;
+    const canonicalInput = canonical.input;
+    const discovery = await this.discoverCandidates(canonicalInput);
+    if (!discovery.ok) {
+      return emptyResult(clientErrorState(discovery.error), discovery.error.message, {
+        error: discovery.error,
+      });
+    }
+
+    const aggregateResolution = this.candidateResolver.resolve(
+      canonicalInput.media,
+      discovery.candidates,
+    );
+    const providers = orderedProviderEvaluations(
+      aggregateResolution,
+      options.preferredAnimeId,
+    );
+    if (providers.length === 0) {
+      const unresolvedState = candidateState(aggregateResolution) ?? 'candidate-uncertain';
+      return emptyResult(unresolvedState, aggregateResolution.reason, {
+        candidateResolution: aggregateResolution,
+      });
+    }
+
+    let firstEmpty: DanmakuServiceResult | null = null;
+    let firstUnresolved: DanmakuServiceResult | null = null;
+    for (const evaluation of providers) {
+      if (canonicalInput.signal?.aborted) {
+        return emptyResult('aborted', 'danmu_api request was aborted', {
+          error: {
+            kind: 'aborted',
+            status: null,
+            message: 'danmu_api request was aborted',
+          },
+        });
+      }
+
+      const candidateResolution = automaticCandidateResolution(aggregateResolution, evaluation);
+      const bindingResult = await this.resolveCandidateBinding(canonicalInput, candidateResolution);
+      if (bindingResult.binding === null) {
+        if (bindingResult.error !== null) return bindingResult;
+        firstUnresolved ??= bindingResult;
+        continue;
+      }
+
+      const result = await this.resolveComments(bindingResult, canonicalInput.signal);
+      if (result.state === 'success') return result;
+      if (result.state === 'comments-empty') {
+        firstEmpty ??= result;
+        continue;
+      }
+      return result;
+    }
+
+    return firstEmpty ?? firstUnresolved ?? emptyResult(
+      'candidate-uncertain',
+      'No bounded provider candidate established a usable episode binding',
+      { candidateResolution: aggregateResolution },
+    );
+  }
+
+  async resolveBinding(input: DanmakuResolveInput): Promise<DanmakuServiceResult> {
+    const canonical = canonicalizeInput(input);
+    if (!canonical.ok) return canonical.result;
+    const canonicalInput = canonical.input;
+
+    const discovery = await this.discoverCandidates(canonicalInput);
+    if (!discovery.ok) {
+      return emptyResult(clientErrorState(discovery.error), discovery.error.message, {
+        error: discovery.error,
+      });
+    }
+
+    const candidateResolution = this.candidateResolver.resolve(
+      input.media,
+      discovery.candidates,
+      input.manualCandidate === undefined
+        ? {}
+        : { manualAnimeId: input.manualCandidate.animeId },
+    );
+    const unresolvedCandidateState = candidateState(candidateResolution);
+    if (unresolvedCandidateState) {
+      return emptyResult(unresolvedCandidateState, candidateResolution.reason, {
+        candidateResolution,
+      });
+    }
+
+    const selectedCandidate = candidateResolution.selected;
+    if (selectedCandidate === null || candidateResolution.selectedBy === null) {
+      return emptyResult('candidate-uncertain', 'Candidate resolution did not select one work', {
+        candidateResolution,
+      });
+    }
+
+    return this.resolveCandidateBinding(canonicalInput, candidateResolution);
+  }
+
+  private async resolveComments(
+    bindingResult: DanmakuServiceResult,
+    signal?: AbortSignal,
+  ): Promise<DanmakuServiceResult> {
     if (bindingResult.binding === null) return bindingResult;
 
     const comments = await this.client.getComments(bindingResult.binding.danmuEpisodeId, {
-      signal: input.signal,
+      signal,
     });
     if (!comments.ok) {
       return emptyResult(clientErrorState(comments.error), comments.error.message, {
@@ -328,49 +554,10 @@ export class DanmuService {
     };
   }
 
-  async resolveBinding(input: DanmakuResolveInput): Promise<DanmakuServiceResult> {
-    if (!mediaCanResolve(input)) {
-      return emptyResult('media-unresolved', 'Canonical media identity is not supported or confirmed');
-    }
-
-    const originalInputIssue = episodeInputIssue(input);
-    if (originalInputIssue) return emptyResult(originalInputIssue.state, originalInputIssue.reason);
-    const manualInputIssue = manualEpisodeInputIssue(input);
-    if (manualInputIssue) return emptyResult(manualInputIssue.state, manualInputIssue.reason);
-    const canonicalEpisode = input.mediaEpisodes.find(
-      (episode) => episode.canonicalEpisodeId === input.episode.canonicalEpisodeId,
-    );
-    if (canonicalEpisode === undefined) {
-      return emptyResult('episode-rejected', 'The canonical target episode is missing');
-    }
-    // The sequence member is the canonical source of truth. A caller-provided
-    // duplicate object with the same ID cannot alter the query or episode facts.
-    const canonicalInput: DanmakuResolveInput = { ...input, episode: canonicalEpisode };
-    if (!hasReliableEpisodeIdentity(canonicalInput)) {
-      return emptyResult('episode-uncertain', 'The target episode has no reliable content identity');
-    }
-
-    const discovery = await this.discoverCandidates(canonicalInput);
-    if (!discovery.ok) {
-      return emptyResult(clientErrorState(discovery.error), discovery.error.message, {
-        error: discovery.error,
-      });
-    }
-
-    const candidateResolution = this.candidateResolver.resolve(
-      input.media,
-      discovery.candidates,
-      input.manualCandidate === undefined
-        ? {}
-        : { manualAnimeId: input.manualCandidate.animeId },
-    );
-    const unresolvedCandidateState = candidateState(candidateResolution);
-    if (unresolvedCandidateState) {
-      return emptyResult(unresolvedCandidateState, candidateResolution.reason, {
-        candidateResolution,
-      });
-    }
-
+  private async resolveCandidateBinding(
+    canonicalInput: DanmakuResolveInput,
+    candidateResolution: DanmakuCandidateResolution,
+  ): Promise<DanmakuServiceResult> {
     const selectedCandidate = candidateResolution.selected;
     if (selectedCandidate === null || candidateResolution.selectedBy === null) {
       return emptyResult('candidate-uncertain', 'Candidate resolution did not select one work', {

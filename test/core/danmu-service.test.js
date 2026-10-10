@@ -194,6 +194,27 @@ function commentsResponse(
     return jsonResponse({ count: comments.length, comments, videoDuration });
 }
 
+function matchCandidate({
+    animeId,
+    animeTitle = 'Orbital Patrol S01',
+    episodeId = `${animeId}-match`,
+    episodeTitle = 'E12',
+    type = 'drama',
+    typeDescription = 'series',
+} = {}) {
+    return {
+        animeId,
+        animeTitle,
+        episodeId,
+        episodeTitle,
+        type,
+        typeDescription,
+        shift: 0,
+        imageUrl: '',
+        url: '',
+    };
+}
+
 test('the formal Stage D fixture enumerates regression cases A through R', () => {
     assert.deepEqual(Object.keys(fixture.cases), [...'ABCDEFGHIJKLMNOPQR']);
 });
@@ -620,6 +641,158 @@ test('empty comments preserve the binding and return comments-empty', async () =
     assert.deepEqual(result.comments, []);
     assert.equal(result.videoDuration, 1200);
     assert.equal(result.error, null);
+});
+
+test('provider resolution validates each independently supported work before selecting comments', async () => {
+    const candidates = [
+        matchCandidate({ animeId: 'provider-empty' }),
+        matchCandidate({ animeId: 'provider-comments' }),
+    ];
+    const { service, calls } = recordingService([
+        matchResponse({ matches: candidates }),
+        bangumiResponse('provider-empty', 'Orbital Patrol S01', [
+            { episodeId: 'empty-e12', episodeTitle: 'E12' },
+        ]),
+        commentsResponse([]),
+        bangumiResponse('provider-comments', 'Orbital Patrol S01', [
+            { episodeId: 'comments-e12', episodeTitle: 'E12' },
+        ]),
+        commentsResponse([{ p: '1,1,16777215,user', m: 'provider B comment' }]),
+    ]);
+
+    const result = await service.resolveProviders(resolveInput());
+
+    assert.equal(result.state, 'success');
+    assert.equal(result.binding?.danmuAnimeId, 'provider-comments');
+    assert.equal(result.binding?.danmuEpisodeId, 'comments-e12');
+    assert.equal(result.comments.length, 1);
+    assert.deepEqual(
+        calls.filter(({ url }) => url.includes('/api/v2/bangumi/')).map(({ url }) => url.split('/').at(-1)),
+        ['provider-empty', 'provider-comments'],
+    );
+    assert.deepEqual(
+        calls.filter(({ url }) => url.includes('/api/v2/comment/')).map(({ url }) => /comment\/([^?]+)/u.exec(url)?.[1]),
+        ['empty-e12', 'comments-e12'],
+    );
+});
+
+test('provider resolution returns the stable first binding when every supported provider is empty', async () => {
+    const candidates = [
+        matchCandidate({ animeId: 'provider-first-empty' }),
+        matchCandidate({ animeId: 'provider-second-empty' }),
+    ];
+    const { service, calls } = recordingService([
+        matchResponse({ matches: candidates }),
+        bangumiResponse('provider-first-empty', 'Orbital Patrol S01', [
+            { episodeId: 'first-empty-e12', episodeTitle: 'E12' },
+        ]),
+        commentsResponse([]),
+        bangumiResponse('provider-second-empty', 'Orbital Patrol S01', [
+            { episodeId: 'second-empty-e12', episodeTitle: 'E12' },
+        ]),
+        commentsResponse([]),
+    ]);
+
+    const result = await service.resolveProviders(resolveInput());
+
+    assert.equal(result.state, 'comments-empty');
+    assert.equal(result.binding?.danmuAnimeId, 'provider-first-empty');
+    assert.equal(result.binding?.danmuEpisodeId, 'first-empty-e12');
+    assert.deepEqual(result.comments, []);
+    assert.equal(calls.filter(({ url }) => url.includes('/api/v2/comment/')).length, 2);
+});
+
+test('provider resolution never probes episodes or comments for uncertain or rejected identities', async (t) => {
+    await t.test('title-only identity remains uncertain', async () => {
+        const { service, calls } = recordingService([
+            matchResponse({
+                matches: [matchCandidate({
+                    animeId: 'title-only',
+                    animeTitle: 'Orbital Patrol',
+                    type: '',
+                    typeDescription: '',
+                })],
+            }),
+        ]);
+
+        const result = await service.resolveProviders(resolveInput());
+
+        assert.equal(result.state, 'candidate-uncertain');
+        assert.equal(calls.length, 1);
+        assert.ok(calls.every(({ url }) => !url.includes('/bangumi/') && !url.includes('/comment/')));
+    });
+
+    await t.test('explicit season conflict remains rejected', async () => {
+        const { service, calls } = recordingService([
+            matchResponse({
+                matches: [matchCandidate({
+                    animeId: 'wrong-season',
+                    animeTitle: 'Orbital Patrol S02',
+                })],
+            }),
+        ]);
+
+        const result = await service.resolveProviders(resolveInput());
+
+        assert.equal(result.state, 'candidate-conflict');
+        assert.equal(calls.length, 1);
+        assert.ok(calls.every(({ url }) => !url.includes('/bangumi/') && !url.includes('/comment/')));
+    });
+});
+
+test('provider resolution de-duplicates animeId and tries at most five candidates once per transaction', async () => {
+    const uniqueIds = Array.from({ length: 7 }, (_, index) => `bounded-provider-${index}`);
+    const matches = [
+        matchCandidate({ animeId: uniqueIds[0] }),
+        matchCandidate({ animeId: uniqueIds[0] }),
+        ...uniqueIds.slice(1).map((animeId) => matchCandidate({ animeId })),
+    ];
+    const bangumiResponses = uniqueIds.slice(0, 5).map((animeId) => bangumiResponse(
+        animeId,
+        'Orbital Patrol S01',
+        [{ episodeId: `${animeId}-e11`, episodeTitle: 'E11' }],
+    ));
+    const { service, calls } = recordingService([
+        matchResponse({ matches }),
+        ...bangumiResponses,
+    ]);
+
+    const result = await service.resolveProviders(resolveInput());
+    const attemptedAnimeIds = calls
+        .filter(({ url }) => url.includes('/api/v2/bangumi/'))
+        .map(({ url }) => url.split('/').at(-1));
+
+    assert.equal(result.state, 'episode-not-found');
+    assert.deepEqual(attemptedAnimeIds, uniqueIds.slice(0, 5));
+    assert.equal(new Set(attemptedAnimeIds).size, attemptedAnimeIds.length);
+    assert.equal(calls.filter(({ url }) => url.includes('/api/v2/comment/')).length, 0);
+});
+
+test('preferredAnimeId is tried first without bypassing identity and episode validation', async () => {
+    const candidates = [
+        matchCandidate({ animeId: 'provider-default' }),
+        matchCandidate({ animeId: 'provider-preferred' }),
+    ];
+    const { service, calls } = recordingService([
+        matchResponse({ matches: candidates }),
+        bangumiResponse('provider-preferred', 'Orbital Patrol S01', [
+            { episodeId: 'preferred-e12', episodeTitle: 'E12' },
+        ]),
+        commentsResponse([{ p: '1,1,16777215,user', m: 'preferred provider comment' }]),
+    ]);
+
+    const result = await service.resolveProviders(resolveInput(), {
+        preferredAnimeId: 'provider-preferred',
+    });
+
+    assert.equal(result.state, 'success');
+    assert.equal(result.binding?.danmuAnimeId, 'provider-preferred');
+    assert.equal(result.binding?.danmuEpisodeId, 'preferred-e12');
+    assert.deepEqual(
+        calls.filter(({ url }) => url.includes('/api/v2/bangumi/')).map(({ url }) => url.split('/').at(-1)),
+        ['provider-preferred'],
+    );
+    assert.ok(calls.every(({ url }) => !url.includes('/bangumi/provider-default')));
 });
 
 test('comment duration remains optional while valid values cross the Service boundary', async (t) => {

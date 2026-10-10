@@ -261,8 +261,13 @@ function cleanupResources() {
         key: '',
         episodeIndex: -1,
         danmuList: null,
+        state: '',
         timestamp: 0
     };
+    activeDanmuResolutionTransaction = null;
+    activeDanmuReload = null;
+    danmuTerminalResults.clear();
+    danmuPreferredProviders.clear();
 
     currentDanmuAnimeId = null;
     currentDanmuSourceName = '';
@@ -344,13 +349,19 @@ function onVisibilityChange() {
                 // 优先使用缓存的弹幕
                 const cachedDanmu = currentDanmuCache.danmuList;
 
-                if (cachedDanmu && cachedDanmu.length > 0 && 
-                    currentDanmuCache.episodeIndex === currentEpisodeIndex) {
+                const hasTerminalCache = Array.isArray(cachedDanmu)
+                    && currentDanmuCache.episodeIndex === currentEpisodeIndex
+                    && Date.now() - currentDanmuCache.timestamp < DANMU_CONFIG.cacheExpiration.danmuCache;
+
+                if (hasTerminalCache) {
                     // ✅ 使用缓存，不重新 config 避免闪烁，按用户开关状态恢复显示
-                    applyDanmakuVisibility('visibility-restore-cache');
+                    if (cachedDanmu.length > 0) {
+                        applyDanmakuVisibility('visibility-restore-cache');
+                    }
                     logDanmuVisibilityState('visibilitychange-restore-cache', {
                         loadedCount: cachedDanmu.length,
-                        pluginApplied: true
+                        pluginApplied: cachedDanmu.length > 0,
+                        terminalState: currentDanmuCache.state || ''
                     });
 
                     danmuDebugLog('弹幕已恢复');
@@ -938,15 +949,26 @@ function getPlayerEpisodeUrlValue(episode) {
     return episode.url || '';
 }
 
-// 弹幕缓存 - 只缓存当前集
+// 弹幕缓存：当前渲染快照；同页面内的有界终态缓存由 danmuTerminalResults 保存。
 let currentDanmuCache = {
     key: '',
     episodeIndex: -1,
     danmuList: null,
+    state: '',
     timestamp: 0
 };
 let _danmuFetchController = null;
 let danmuReloadToken = 0;
+let activeDanmuResolutionTransaction = null;
+let activeDanmuReload = null;
+const danmuTerminalResults = new Map();
+const danmuPreferredProviders = new Map();
+const DANMU_TERMINAL_CACHE_LIMIT = 24;
+const danmuTransactionMetrics = {
+    automaticStarted: 0,
+    joined: 0,
+    cacheHits: 0,
+};
 let lastDanmuMatchInfo = null;
 let lastDanmuFetchStats = null;
 
@@ -1095,6 +1117,8 @@ window.debugDanmuState = function () {
         danmuCached: Boolean(currentDanmuCache?.danmuList),
         currentDanmuCacheEpisode: currentDanmuCache?.episodeIndex,
         currentDanmuCacheCount: Array.isArray(currentDanmuCache?.danmuList) ? currentDanmuCache.danmuList.length : 0,
+        currentDanmuCacheState: currentDanmuCache?.state || '',
+        danmuTransactionMetrics: { ...danmuTransactionMetrics },
         lastDanmuMatchInfo,
         lastDanmuFetchStats,
         persistentBindingEnabled: false,
@@ -1485,19 +1509,27 @@ function cancelDanmakuRequest(reason = 'cancelled') {
     }
 }
 
-function getDanmuRequestContextKey(context) {
+function getDanmuTransactionContextKey(context) {
     const mediaId = context?.media?.mediaId || '';
-    const episodeId = context?.episode?.canonicalEpisodeId || '';
+    const episodeId = context?.episode?.canonicalEpisodeId || 'unresolved-episode';
     const sourceEpisode = context?.sourceEpisode;
-    const sourceEpisodeId = sourceEpisode?.canonicalEpisodeId || '';
-    if (!mediaId || !episodeId || !sourceEpisodeId) return '';
+    if (!mediaId || !sourceEpisode) return '';
     // The canonical IDs protect media/episode identity. The source locator is
     // deliberately separate: two lines may map to the same E12 while their
     // underlying playback entry changes during an in-flight request.
     return JSON.stringify([
         mediaId,
+        context.media.canonicalTitle || '',
+        context.media.releaseYear ?? null,
+        context.media.season ?? null,
+        context.media.mediaType || 'unknown',
+        context.media.identityState || 'uncertain',
         episodeId,
-        sourceEpisodeId,
+        context.episode?.episodeNumber ?? null,
+        context.episode?.seasonNumber ?? null,
+        context.episode?.airDate || '',
+        context.episode?.contentType || 'unknown',
+        sourceEpisode.canonicalEpisodeId || 'unresolved-source-episode',
         sourceEpisode.sourceKey || '',
         sourceEpisode.vodId || '',
         sourceEpisode.playGroup || '',
@@ -1506,6 +1538,13 @@ function getDanmuRequestContextKey(context) {
         sourceEpisode.rawEntry || '',
         sourceEpisode.playUrl || '',
     ]);
+}
+
+function getDanmuRequestContextKey(context) {
+    if (!context?.episode?.canonicalEpisodeId || !context?.sourceEpisode?.canonicalEpisodeId) {
+        return '';
+    }
+    return getDanmuTransactionContextKey(context);
 }
 
 function beginDanmakuRequest(reason, context) {
@@ -1625,13 +1664,35 @@ function createProductionDanmakuContext(title, episodeIndex) {
 }
 
 function getDanmuCoreCacheKey(context, manualCandidate, manualEpisodeId) {
-    if (!context?.episode) return '';
+    const contextKey = getDanmuTransactionContextKey(context);
+    if (!contextKey) return '';
     return [
-        context.media.mediaId,
-        context.episode.canonicalEpisodeId,
+        contextKey,
         manualCandidate?.animeId || 'auto',
         manualEpisodeId || 'auto-episode',
     ].join('|');
+}
+
+function readDanmuTerminalResult(cacheKey) {
+    if (!cacheKey) return null;
+    const cached = danmuTerminalResults.get(cacheKey);
+    if (!cached) return null;
+    if (Date.now() - cached.timestamp >= DANMU_CONFIG.cacheExpiration.danmuCache) {
+        danmuTerminalResults.delete(cacheKey);
+        return null;
+    }
+    return cached;
+}
+
+function writeDanmuTerminalResult(cacheKey, result) {
+    if (!cacheKey) return;
+    danmuTerminalResults.delete(cacheKey);
+    danmuTerminalResults.set(cacheKey, result);
+    while (danmuTerminalResults.size > DANMU_TERMINAL_CACHE_LIMIT) {
+        const oldestKey = danmuTerminalResults.keys().next().value;
+        if (oldestKey === undefined) break;
+        danmuTerminalResults.delete(oldestKey);
+    }
 }
 
 function convertCoreDanmuComments(comments, episodeIndex, videoDuration = null) {
@@ -1723,7 +1784,7 @@ async function resolveDanmakuWithCore({
     }
 
     const request = beginDanmakuRequest(reason, context);
-    const result = await runtime.service.resolve({
+    const serviceInput = {
         media: context.media,
         episode: context.episode,
         mediaEpisodes: context.mediaEpisodes,
@@ -1731,7 +1792,13 @@ async function resolveDanmakuWithCore({
         ...(manualCandidate ? { manualCandidate } : {}),
         ...(manualEpisodeId ? { manualEpisodeId } : {}),
         signal: request.controller.signal,
-    });
+    };
+    const preferredAnimeId = !manualCandidate
+        ? danmuPreferredProviders.get(context.media.mediaId) || ''
+        : '';
+    const result = manualCandidate
+        ? await runtime.service.resolve(serviceInput)
+        : await runtime.service.resolveProviders(serviceInput, { preferredAnimeId });
     if (!isCurrentDanmakuRequest(request, episodeIndex)) {
         return { context, result, danmuku: [], stale: true, reason: 'stale-request', request };
     }
@@ -1744,6 +1811,12 @@ async function resolveDanmakuWithCore({
     if (binding) {
         currentDanmuAnimeId = binding.danmuAnimeId;
         currentDanmuSourceName = binding.danmuAnimeTitle;
+        if (
+            binding.selectedBy === 'automatic'
+            && (result.state === 'success' || result.state === 'comments-empty')
+        ) {
+            danmuPreferredProviders.set(context.media.mediaId, binding.danmuAnimeId);
+        }
     }
     updateLastDanmuMatchInfo({
         reason,
@@ -1799,15 +1872,27 @@ async function getDanmukuForVideo(title, episodeIndex) {
         : null;
     const cacheKey = getDanmuCoreCacheKey(context, manualCandidate, manualEpisodeId);
 
-    cancelDanmakuRequest('new-danmaku-load');
-    if (
-        cacheKey
-        && currentDanmuCache.key === cacheKey
-        && Array.isArray(currentDanmuCache.danmuList)
-        && Date.now() - currentDanmuCache.timestamp < DANMU_CONFIG.cacheExpiration.danmuCache
-    ) {
-        return limitDanmakuList(currentDanmuCache.danmuList);
+    const cached = readDanmuTerminalResult(cacheKey);
+    if (cached) {
+        danmuTransactionMetrics.cacheHits += 1;
+        currentDanmuCache = cached;
+        if (cached.matchInfo) lastDanmuMatchInfo = { ...cached.matchInfo };
+        if (cached.fetchStats) lastDanmuFetchStats = { ...cached.fetchStats };
+        if (cached.binding) {
+            currentDanmuAnimeId = cached.binding.danmuAnimeId;
+            currentDanmuSourceName = cached.binding.danmuAnimeTitle;
+        }
+        return limitDanmakuList(cached.danmuList);
     }
+    if (cacheKey && activeDanmuResolutionTransaction?.key === cacheKey) {
+        danmuTransactionMetrics.joined += 1;
+        return activeDanmuResolutionTransaction.promise;
+    }
+
+    cancelDanmakuRequest('new-danmaku-load');
+    if (!manualSession) danmuTransactionMetrics.automaticStarted += 1;
+    const transaction = { key: cacheKey, promise: null };
+    transaction.promise = (async () => {
 
     try {
         const resolution = await resolveDanmakuWithCore({
@@ -1819,19 +1904,26 @@ async function getDanmukuForVideo(title, episodeIndex) {
         });
         if (resolution.stale) return [];
 
-        if (resolution.result?.state === 'success') {
-            currentDanmuCache = {
-                key: getDanmuCoreCacheKey(resolution.context, manualCandidate, manualEpisodeId),
+        const state = resolution.result?.state || 'episode-uncertain';
+        if (state !== 'aborted') {
+            const terminal = {
+                key: getDanmuCoreCacheKey(resolution.context, manualCandidate, manualEpisodeId) || cacheKey,
                 episodeIndex,
-                danmuList: resolution.danmuku,
+                danmuList: state === 'success' ? resolution.danmuku : [],
+                state,
+                binding: resolution.result?.binding || null,
+                matchInfo: lastDanmuMatchInfo ? { ...lastDanmuMatchInfo } : null,
+                fetchStats: lastDanmuFetchStats ? { ...lastDanmuFetchStats } : null,
                 timestamp: Date.now(),
             };
-            return resolution.danmuku;
+            currentDanmuCache = terminal;
+            writeDanmuTerminalResult(terminal.key, terminal);
         }
+        if (state === 'success') return resolution.danmuku;
 
-        if (resolution.result?.state !== 'aborted') {
+        if (state !== 'aborted') {
             danmuDebugWarn('[DanmuCore] no automatic danmaku applied', {
-                state: resolution.result?.state || 'episode-uncertain',
+                state,
                 reason: resolution.reason,
                 ...describeDanmuCoreTarget(resolution.context),
             });
@@ -1846,6 +1938,15 @@ async function getDanmukuForVideo(title, episodeIndex) {
             });
         }
         return [];
+    }
+    })();
+    activeDanmuResolutionTransaction = transaction;
+    try {
+        return await transaction.promise;
+    } finally {
+        if (activeDanmuResolutionTransaction === transaction) {
+            activeDanmuResolutionTransaction = null;
+        }
     }
 }
 
@@ -1939,7 +2040,7 @@ function waitForCurrentVideoReady(maxWait = 10000, expected = {}) {
     });
 }
 
-async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
+async function performDanmakuLoadForCurrentEpisode(reason = 'episode-switch') {
     if (!isDanmuServiceEnabled()) return;
 
     const reloadToken = ++danmuReloadToken;
@@ -2122,6 +2223,24 @@ async function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
         episodeIndex,
         episodeNumber: targetEpisodeNumber,
         loadedCount: danmuku.length,
+    });
+}
+
+function loadDanmakuForCurrentEpisode(reason = 'episode-switch') {
+    const context = createProductionDanmakuContext(currentVideoTitle, currentEpisodeIndex);
+    const contextKey = getDanmuTransactionContextKey(context);
+    if (contextKey && activeDanmuReload?.key === contextKey) {
+        danmuTransactionMetrics.joined += 1;
+        return activeDanmuReload.promise;
+    }
+
+    const reload = {
+        key: contextKey,
+        promise: performDanmakuLoadForCurrentEpisode(reason),
+    };
+    activeDanmuReload = reload;
+    return reload.promise.finally(() => {
+        if (activeDanmuReload === reload) activeDanmuReload = null;
     });
 }
 
@@ -4162,7 +4281,7 @@ async function loadEpisodeFromWatchRoomSnapshot(snapshot = {}, options = {}) {
             progressSaveInterval = null;
         }
 
-        currentDanmuCache = { episodeIndex: -1, danmuList: null, timestamp: 0 };
+        currentDanmuCache = { key: '', episodeIndex: -1, danmuList: null, state: '', timestamp: 0 };
         await clearCurrentDanmukuPlugin('watch-room-episode');
 
         const errorElement = document.getElementById('error');
@@ -4272,7 +4391,7 @@ function playEpisode(index, switchReason = 'manual') {
 		saveHistoryTimer = null;
 	}
 
-	currentDanmuCache = { episodeIndex: -1, danmuList: null, timestamp: 0 };
+	currentDanmuCache = { key: '', episodeIndex: -1, danmuList: null, state: '', timestamp: 0 };
 	danmuDebugLog('[DanmuDebug] keep manual danmu source across episode switch', {
 		currentDanmuAnimeId,
 		currentDanmuSourceName
@@ -5695,9 +5814,6 @@ async function applyManualDanmuResolution(candidate, manualEpisodeId = null) {
         return;
     }
 
-    const video = art.video;
-    const shouldResume = Boolean(video && !video.paused && !video.ended);
-    const currentTime = video ? video.currentTime : (art.currentTime || 0);
     showToast(`正在验证弹幕源: ${candidate.animeTitle}...`, 'info');
 
     const resolution = await resolveDanmakuWithCore({
@@ -5755,25 +5871,32 @@ async function applyManualDanmuResolution(candidate, manualEpisodeId = null) {
         return;
     }
 
-    currentDanmuCache = { key: '', episodeIndex: -1, danmuList: null, timestamp: 0 };
+    currentDanmuCache = { key: '', episodeIndex: -1, danmuList: null, state: '', timestamp: 0 };
     await clearCurrentDanmukuPlugin('manual-source');
     if (resolution.request && !isCurrentDanmakuRequest(
         resolution.request,
         resolution.context?.currentEpisodeIndex ?? currentEpisodeIndex,
     )) return;
 
+    const cacheKey = getDanmuCoreCacheKey(
+        resolution.context,
+        candidate,
+        manualEpisodeId,
+    );
+    const terminal = {
+        key: cacheKey,
+        episodeIndex: currentEpisodeIndex,
+        danmuList: result.state === 'success' ? resolution.danmuku : [],
+        state: result.state,
+        binding: result.binding,
+        matchInfo: lastDanmuMatchInfo ? { ...lastDanmuMatchInfo } : null,
+        fetchStats: lastDanmuFetchStats ? { ...lastDanmuFetchStats } : null,
+        timestamp: Date.now(),
+    };
+    currentDanmuCache = terminal;
+    writeDanmuTerminalResult(cacheKey, terminal);
+
     if (result.state === 'success') {
-        const cacheKey = getDanmuCoreCacheKey(
-            resolution.context,
-            candidate,
-            manualEpisodeId,
-        );
-        currentDanmuCache = {
-            key: cacheKey,
-            episodeIndex: currentEpisodeIndex,
-            danmuList: resolution.danmuku,
-            timestamp: Date.now(),
-        };
         await applyDanmakuRuntimeState({
             reason: manualEpisodeId ? 'manual-episode' : 'manual-source',
             danmuku: resolution.danmuku,
@@ -5788,13 +5911,6 @@ async function applyManualDanmuResolution(candidate, manualEpisodeId = null) {
         showToast('弹幕加载失败，请稍后重试', 'warning');
     }
 
-    if (video && currentTime > 0 && Math.abs(video.currentTime - currentTime) > 2) {
-        art.currentTime = currentTime;
-    }
-    if (shouldResume && art?.video?.paused) {
-        const playResult = art.play();
-        playResult?.catch?.(() => showToast('浏览器阻止自动播放，请手动点击播放', 'warning'));
-    }
 }
 
 async function switchDanmuSource(animeId) {

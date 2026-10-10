@@ -261,6 +261,13 @@ function createHarness(options = {}) {
     const warnings = [];
     const toasts = [];
     const pluginApplications = [];
+    const videoListeners = new Map();
+    const mediaMutations = {
+        videoCurrentTimeWrites: 0,
+        artCurrentTimeWrites: 0,
+        videoLoadCalls: 0,
+        videoSrcWrites: 0,
+    };
     const session = {
         sourceCode: 'fixture-source',
         sourceName: 'Fixture Source',
@@ -289,25 +296,52 @@ function createHarness(options = {}) {
         show() { this.option.visible = true; },
         hide() { this.option.visible = false; },
     };
+    let videoCurrentTime = Number(options.initialCurrentTime ?? 0);
+    let artCurrentTime = videoCurrentTime;
+    let videoSrc = 'https://media.example.test/current.m3u8';
     const video = {
         paused: true,
         ended: false,
-        currentTime: 0,
+        get currentTime() { return videoCurrentTime; },
+        set currentTime(value) {
+            mediaMutations.videoCurrentTimeWrites += 1;
+            videoCurrentTime = Number(value);
+        },
+        get src() { return videoSrc; },
+        set src(value) {
+            mediaMutations.videoSrcWrites += 1;
+            videoSrc = String(value);
+        },
         duration: options.playerDuration ?? 1200,
         readyState: 4,
         currentSrc: 'https://media.example.test/current.m3u8',
         seeking: false,
-        addEventListener() {},
-        removeEventListener() {},
+        addEventListener(type, listener) {
+            if (!videoListeners.has(type)) videoListeners.set(type, new Set());
+            videoListeners.get(type).add(listener);
+        },
+        removeEventListener(type, listener) {
+            videoListeners.get(type)?.delete(listener);
+        },
+        dispatchEvent(event) {
+            for (const listener of videoListeners.get(event.type) || []) {
+                listener.call(video, event);
+            }
+            return true;
+        },
         pause() { this.paused = true; },
         async play() { this.paused = false; },
-        load() {},
+        load() { mediaMutations.videoLoadCalls += 1; },
         removeAttribute() {},
     };
     const art = {
         video,
         duration: video.duration,
-        currentTime: 0,
+        get currentTime() { return artCurrentTime; },
+        set currentTime(value) {
+            mediaMutations.artCurrentTimeWrites += 1;
+            artCurrentTime = Number(value);
+        },
         playing: false,
         plugins: { artplayerPluginDanmuku: plugin },
         template: { $player: element('player') },
@@ -557,11 +591,15 @@ function createHarness(options = {}) {
         document,
         elements,
         errors,
+        advanceVideoTime(value) { videoCurrentTime = Number(value); },
+        dispatchVideoEvent(type) { return video.dispatchEvent(new context.Event(type)); },
+        mediaMutations,
         network,
         pluginApplications,
         session,
         toasts,
         warnings,
+        videoListeners,
     };
 }
 
@@ -615,6 +653,30 @@ function manualCandidate(work) {
         episodeCount: work.episodes.length,
         source: 'manual-production-test',
         rawData: {},
+    };
+}
+
+function matchCandidateForWork(work) {
+    const episode = work.episodes.find((item) => item.episodeTitle === 'E12')
+        || work.episodes[0];
+    return {
+        animeId: work.animeId,
+        animeTitle: work.animeTitle,
+        episodeId: episode?.episodeId || '',
+        episodeTitle: episode?.episodeTitle || '',
+        type: 'drama',
+        typeDescription: 'series',
+        shift: 0,
+        imageUrl: '',
+        url: '',
+    };
+}
+
+function installProviderMatch(harness, works) {
+    harness.network.state.intercept = (call) => {
+        if (!call.path.endsWith('/api/v2/match')) return undefined;
+        const matches = works.map(matchCandidateForWork);
+        return jsonResponse({ success: true, isMatched: matches.length > 0, matches });
     };
 }
 
@@ -1210,4 +1272,187 @@ test('26. source-provided 第01集 reaches Core identity and the production comm
     assert.equal(context.episode?.episodeNumber, 1);
     assert.equal(result[0]?.text, 'unnatural-e1 comment');
     assert.match(commentRequests(harness)[0].path, /\/unnatural-e1$/u);
+});
+
+test('27. production validates multiple supported providers once and selects the one with comments', async () => {
+    const emptyProvider = createWork({
+        animeId: 'provider-empty',
+        animeTitle: 'Orbital Patrol S01',
+        episodes: regularEpisodes([11, 12, 13], 'provider-empty-e'),
+        comments: new Map([['provider-empty-e12', []]]),
+    });
+    const commentProvider = createWork({
+        animeId: 'provider-comments',
+        animeTitle: 'Orbital Patrol S01',
+        episodes: regularEpisodes([11, 12, 13], 'provider-comments-e'),
+        comments: new Map([[
+            'provider-comments-e12',
+            [{ p: '12,1,16777215,user', m: 'provider B comment' }],
+        ]]),
+    });
+    const harness = createHarness({ works: [emptyProvider, commentProvider] });
+    installProviderMatch(harness, [emptyProvider, commentProvider]);
+    setStandardPlayback(harness);
+
+    const result = await harness.api.getDanmuku();
+
+    assert.equal(result[0]?.text, 'provider B comment');
+    assert.equal(harness.api.debug().lastDanmuMatchInfo.animeId, 'provider-comments');
+    assert.deepEqual(
+        requestPaths(harness).filter((path) => path.includes('/api/v2/bangumi/')),
+        [
+            '/private-prefix/api/v2/bangumi/provider-empty',
+            '/private-prefix/api/v2/bangumi/provider-comments',
+        ],
+    );
+    assert.deepEqual(
+        commentRequests(harness).map((call) => call.path),
+        [
+            '/private-prefix/api/v2/comment/provider-empty-e12',
+            '/private-prefix/api/v2/comment/provider-comments-e12',
+        ],
+    );
+});
+
+test('28. an all-empty provider transaction is terminal and same-context reads make no requests', async () => {
+    const first = createWork({
+        animeId: 'provider-first-empty',
+        animeTitle: 'Orbital Patrol S01',
+        episodes: regularEpisodes([11, 12, 13], 'provider-first-empty-e'),
+        comments: new Map([['provider-first-empty-e12', []]]),
+    });
+    const second = createWork({
+        animeId: 'provider-second-empty',
+        animeTitle: 'Orbital Patrol S01',
+        episodes: regularEpisodes([11, 12, 13], 'provider-second-empty-e'),
+        comments: new Map([['provider-second-empty-e12', []]]),
+    });
+    const harness = createHarness({ works: [first, second] });
+    installProviderMatch(harness, [first, second]);
+    setStandardPlayback(harness);
+
+    const initial = await harness.api.getDanmuku();
+    const requestCount = harness.network.state.calls.length;
+    const repeated = await Promise.all(Array.from(
+        { length: 5 },
+        () => harness.api.getDanmuku(),
+    ));
+
+    assert.equal(initial.length, 0);
+    assert.ok(repeated.every((result) => result.length === 0));
+    assert.equal(harness.api.debug().lastDanmuMatchInfo.coreState, 'comments-empty');
+    assert.equal(harness.api.debug().lastDanmuMatchInfo.animeId, 'provider-first-empty');
+    assert.equal(commentRequests(harness).length, 2);
+    assert.equal(harness.network.state.calls.length, requestCount);
+    assert.equal(harness.api.debug().danmuTransactionMetrics.cacheHits, 5);
+});
+
+test('29. a manually selected empty binding is cached as complete and does not revalidate', async () => {
+    const work = createWork({ comments: new Map([['dm-e12', []]]) });
+    const harness = createHarness({ works: [work] });
+    setStandardPlayback(harness);
+    harness.api.injectManualCandidate(manualCandidate(work));
+
+    await harness.api.switchManual(work.animeId);
+    const requestCount = harness.network.state.calls.length;
+    const repeated = await Promise.all([
+        harness.api.getDanmuku(),
+        harness.api.getDanmuku(),
+        harness.api.getDanmuku(),
+    ]);
+
+    assert.ok(repeated.every((result) => result.length === 0));
+    assert.equal(harness.api.sessionSource()?.selectedBy, 'manual');
+    assert.equal(harness.api.debug().lastDanmuMatchInfo.coreState, 'comments-empty');
+    assert.equal(commentRequests(harness).length, 1);
+    assert.equal(harness.network.state.calls.length, requestCount);
+});
+
+test('30. concurrent high-frequency reads join one same-context automatic transaction', async () => {
+    const harness = createHarness();
+    setStandardPlayback(harness);
+    const gate = deferred();
+    harness.network.state.intercept = (call) => (
+        call.path.endsWith('/api/v2/match') ? gate.promise : undefined
+    );
+
+    const reads = Array.from({ length: 12 }, () => harness.api.getDanmuku());
+    await until(
+        () => requestPaths(harness).filter((path) => path.endsWith('/api/v2/match')).length === 1,
+        'The shared automatic transaction did not start',
+    );
+    gate.resolve(jsonResponse({
+        success: true,
+        isMatched: true,
+        matches: [matchCandidateForWork(harness.network.state.works[0])],
+    }));
+    const results = await Promise.all(reads);
+
+    assert.ok(results.every((result) => result[0]?.text === 'dm-e12 comment'));
+    assert.equal(
+        requestPaths(harness).filter((path) => path.endsWith('/api/v2/match')).length,
+        1,
+    );
+    assert.equal(
+        requestPaths(harness).filter((path) => path.includes('/api/v2/bangumi/')).length,
+        1,
+    );
+    assert.equal(commentRequests(harness).length, 1);
+    assert.equal(harness.api.debug().danmuTransactionMetrics.automaticStarted, 1);
+    assert.equal(harness.api.debug().danmuTransactionMetrics.joined, 11);
+});
+
+test('31. manual danmaku validation never mutates playback transport or ArtPlayer identity', async () => {
+    const work = createWork();
+    const harness = createHarness({ works: [work], initialCurrentTime: 42 });
+    setStandardPlayback(harness);
+    harness.art.video.paused = false;
+    harness.api.injectManualCandidate(manualCandidate(work));
+    const originalArt = harness.context.window.LibertyPlayer.art;
+    const originalSrc = harness.art.video.src;
+    const originalCurrentSrc = harness.art.video.currentSrc;
+    const gate = delayFirstComment(harness);
+
+    const validation = harness.api.switchManual(work.animeId);
+    await until(() => commentRequests(harness).length === 1, 'Manual comment request did not start');
+    harness.advanceVideoTime(51);
+    gate.resolve(jsonResponse({
+        count: 1,
+        comments: [{ p: '10,1,16777215,user', m: 'manual result' }],
+        videoDuration: 1200,
+    }));
+    await validation;
+
+    assert.equal(harness.art.video.currentTime, 51);
+    assert.equal(harness.mediaMutations.videoCurrentTimeWrites, 0);
+    assert.equal(harness.mediaMutations.artCurrentTimeWrites, 0);
+    assert.equal(harness.mediaMutations.videoLoadCalls, 0);
+    assert.equal(harness.mediaMutations.videoSrcWrites, 0);
+    assert.equal(harness.art.video.src, originalSrc);
+    assert.equal(harness.art.video.currentSrc, originalCurrentSrc);
+    assert.equal(harness.context.window.LibertyPlayer.art, originalArt);
+});
+
+test('32. passive video events never start or repeat a danmaku transaction', async () => {
+    const harness = createHarness();
+    setStandardPlayback(harness);
+    await harness.api.getDanmuku();
+    const requestCount = harness.network.state.calls.length;
+    const metrics = harness.api.debug().danmuTransactionMetrics;
+
+    for (let iteration = 0; iteration < 100; iteration += 1) {
+        harness.dispatchVideoEvent('timeupdate');
+    }
+    for (let iteration = 0; iteration < 20; iteration += 1) {
+        harness.dispatchVideoEvent('progress');
+    }
+    for (let iteration = 0; iteration < 5; iteration += 1) {
+        harness.dispatchVideoEvent('waiting');
+        harness.dispatchVideoEvent('play');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(harness.network.state.calls.length, requestCount);
+    assert.deepEqual(harness.api.debug().danmuTransactionMetrics, metrics);
+    assert.equal(commentRequests(harness).length, 1);
 });
