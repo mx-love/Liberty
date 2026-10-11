@@ -1020,15 +1020,15 @@ function getVideoIdentity(title = currentVideoTitle) {
 
 function updateLastDanmuMatchInfo(info = {}) {
     const context = createProductionDanmakuContext(currentVideoTitle, currentEpisodeIndex);
+    const { currentVideoUrl: _discardedVideoUrl, ...previousSafeInfo } = lastDanmuMatchInfo || {};
     lastDanmuMatchInfo = {
-        ...(lastDanmuMatchInfo || {}),
+        ...previousSafeInfo,
         videoTitle: currentVideoTitle,
         year: getCurrentVideoYearValue(),
         episodeIndex: currentEpisodeIndex,
         episodeNumber: context?.episode?.episodeNumber ?? null,
         totalEpisodes: Array.isArray(currentEpisodes) ? currentEpisodes.length : 0,
         currentEpisodeName: getCurrentEpisodeName(currentEpisodeIndex),
-        currentVideoUrl,
         videoIdentity: getVideoIdentity(),
         persistentBindingEnabled: false,
         updatedAt: Date.now(),
@@ -1524,6 +1524,10 @@ function getDanmuTransactionContextKey(context) {
         context.media.season ?? null,
         context.media.mediaType || 'unknown',
         context.media.identityState || 'uncertain',
+        // Whole-media identity depends on a structurally unique playable item.
+        // Keep that proof in the transaction key so a later multi-item source
+        // cannot reuse a terminal singleton binding.
+        Array.isArray(context.mediaEpisodes) ? context.mediaEpisodes.length : 0,
         episodeId,
         context.episode?.episodeNumber ?? null,
         context.episode?.seasonNumber ?? null,
@@ -1807,6 +1811,17 @@ async function resolveDanmakuWithCore({
     const danmuku = result.state === 'success'
         ? convertCoreDanmuComments(result.comments, episodeIndex, result.videoDuration)
         : [];
+    const selectedProvider = binding
+        || manualCandidate
+        || result.candidateResolution?.selected
+        || null;
+    const selectedCandidate = binding
+        ? result.candidateResolution?.evaluations?.find(({ candidate }) => (
+            String(candidate.animeId) === String(binding.danmuAnimeId)
+        ))
+        : result.candidateResolution?.evaluations?.find(({ candidate }) => (
+            String(candidate.animeId) === String(selectedProvider?.animeId || '')
+        ));
 
     if (binding) {
         currentDanmuAnimeId = binding.danmuAnimeId;
@@ -1823,8 +1838,23 @@ async function resolveDanmakuWithCore({
         matchMode: 'core-v2',
         ...target,
         coreState: result.state,
-        animeId: binding?.danmuAnimeId || '',
-        animeTitle: binding?.danmuAnimeTitle || '',
+        canonicalMediaId: context.media?.mediaId || '',
+        canonicalEpisodeId: context.episode?.canonicalEpisodeId || '',
+        mediaIdentityState: context.media?.identityState || 'uncertain',
+        candidateDecision: selectedCandidate?.identity?.decision || '',
+        candidateReason: selectedCandidate?.identity?.reason || result.candidateResolution?.reason || '',
+        episodeResolutionState: result.episodeResolution?.state || '',
+        episodeResolutionReason: result.episodeResolution?.reason || '',
+        bindingScope: binding?.scope || result.episodeResolution?.bindingScope || '',
+        providerAnimeId: selectedProvider?.danmuAnimeId || selectedProvider?.animeId || '',
+        danmuItemId: binding?.danmuEpisodeId || '',
+        danmuEpisodeId: binding?.danmuEpisodeId || '',
+        terminalState: result.state,
+        commentsState: result.state === 'success'
+            ? 'available'
+            : (result.state === 'comments-empty' ? 'empty' : 'not-available'),
+        animeId: selectedProvider?.danmuAnimeId || selectedProvider?.animeId || '',
+        animeTitle: selectedProvider?.danmuAnimeTitle || selectedProvider?.animeTitle || '',
         episodeId: binding?.danmuEpisodeId || '',
         episodeTitle: binding?.danmuEpisodeTitle || '',
         sourceName: binding?.danmuAnimeTitle || '',
@@ -5673,6 +5703,110 @@ function danmuIdentityDecisionLabel(decision) {
     return labels[decision] || '待验证';
 }
 
+function danmuTerminalMatchesContext(terminal, context) {
+    const contextKey = getDanmuTransactionContextKey(context);
+    return Boolean(
+        contextKey
+        && terminal?.key
+        && terminal.episodeIndex === currentEpisodeIndex
+        && String(terminal.key).startsWith(`${contextKey}|`)
+    );
+}
+
+function danmuBindingMatchesContext(binding, context, candidate, terminal) {
+    if (!binding || !context?.media || !candidate) return false;
+    if (String(binding.canonicalMediaId || '') !== String(context.media.mediaId || '')) return false;
+    if (String(binding.danmuAnimeId || '') !== String(candidate.animeId || '')) return false;
+    if (!binding.danmuEpisodeId) return false;
+
+    const observedItemId = terminal?.matchInfo?.danmuItemId
+        || terminal?.matchInfo?.episodeId
+        || '';
+    if (observedItemId && String(observedItemId) !== String(binding.danmuEpisodeId)) return false;
+
+    if (binding.scope === 'whole_media') return true;
+    return binding.scope === 'canonical_episode'
+        && Boolean(context.episode?.canonicalEpisodeId)
+        && String(binding.canonicalEpisodeId || '') === String(context.episode.canonicalEpisodeId);
+}
+
+function getDanmuModalCandidateState(candidate, identity, context) {
+    const terminal = danmuTerminalMatchesContext(currentDanmuCache, context)
+        ? currentDanmuCache
+        : null;
+    const bindingMatches = danmuBindingMatchesContext(
+        terminal?.binding,
+        context,
+        candidate,
+        terminal,
+    );
+    const providerMatches = String(
+        terminal?.matchInfo?.providerAnimeId
+            || terminal?.matchInfo?.animeId
+            || terminal?.binding?.danmuAnimeId
+            || ''
+    ) === String(candidate.animeId || '');
+
+    if (bindingMatches) {
+        const scopeLabel = terminal.binding.scope === 'whole_media'
+            ? '整部影片已验证'
+            : '当前剧集已验证';
+        if (terminal.state === 'success') {
+            return { state: 'current', label: `当前使用 · ${scopeLabel}`, isActive: true };
+        }
+        if (terminal.state === 'comments-empty') {
+            return { state: 'empty', label: `暂无弹幕 · ${scopeLabel}`, isActive: true };
+        }
+        if (terminal.state === 'binding-supported' || terminal.state === 'binding-verified') {
+            return {
+                state: terminal.binding.scope === 'whole_media'
+                    ? 'whole-media-verified'
+                    : 'episode-verified',
+                label: scopeLabel,
+                isActive: false,
+            };
+        }
+        return { state: 'failed', label: `${scopeLabel} · 加载失败`, isActive: false };
+    }
+
+    if (terminal && providerMatches) {
+        if (terminal.state === 'episode-uncertain'
+            || terminal.state === 'episode-not-found'
+            || terminal.state === 'episode-rejected') {
+            return { state: 'episode-uncertain', label: '当前剧集身份不确定', isActive: false };
+        }
+        if (terminal.state === 'candidate-uncertain'
+            || terminal.state === 'candidate-conflict'
+            || terminal.state === 'candidate-not-found'
+            || terminal.state === 'media-unresolved') {
+            return { state: 'media-uncertain', label: '作品身份不确定', isActive: false };
+        }
+        if (terminal.state && terminal.state !== 'aborted') {
+            return { state: 'failed', label: '验证或加载失败', isActive: false };
+        }
+    }
+
+    const contextKey = getDanmuTransactionContextKey(context);
+    const activeKey = String(activeDanmuResolutionTransaction?.key || '');
+    if (contextKey && activeKey.startsWith(`${contextKey}|`)) {
+        const activeProviderId = activeKey.slice(contextKey.length + 1).split('|')[0];
+        if (activeProviderId === 'auto' || activeProviderId === String(candidate.animeId || '')) {
+            return { state: 'validating', label: '正在验证', isActive: false };
+        }
+    }
+
+    if (identity.decision === 'confirmed' || identity.decision === 'supported') {
+        return { state: 'media-verified', label: '作品身份已验证 · 当前剧集待验证', isActive: false };
+    }
+    if (identity.decision === 'uncertain') {
+        return { state: 'media-uncertain', label: '作品身份不确定', isActive: false };
+    }
+    if (identity.decision === 'rejected') {
+        return { state: 'failed', label: '作品身份冲突', isActive: false };
+    }
+    return { state: 'candidate', label: '候选 · 待验证', isActive: false };
+}
+
 function renderManualDanmuEpisodeChoices(candidate, resolution) {
     const modal = document.getElementById('danmuSourceModal');
     const modalContent = document.getElementById('danmuSourceList');
@@ -5768,15 +5902,20 @@ async function showDanmuSourceModal() {
     let html = '<div class="space-y-2 max-h-[60vh] overflow-y-auto p-2">';
     evaluations.slice(0, 20).forEach(({ candidate, identity }) => {
         manualDanmuCandidates.set(String(candidate.animeId), candidate);
-        const isActive = String(currentDanmuAnimeId || '') === String(candidate.animeId);
+        const presentation = getDanmuModalCandidateState(candidate, identity, context);
+        const isActive = presentation.isActive;
         const rejected = identity.decision === 'rejected';
         const year = candidate.year ? String(candidate.year) : '年份未知';
         const season = candidate.season ? `第${candidate.season}季` : '季数未知';
         const evidenceLabel = danmuIdentityDecisionLabel(identity.decision);
+        const activeBadge = presentation.state === 'empty'
+            ? '暂无弹幕'
+            : '✓ 当前使用';
         html += `
             <button
                 type="button"
                 data-danmu-anime-id="${escapeHtml(candidate.animeId)}"
+                data-danmu-status="${escapeHtml(presentation.state)}"
                 ${rejected ? 'disabled' : ''}
                 class="danmu-source-button w-full text-left px-4 py-3 rounded-lg transition-all ${
                     isActive
@@ -5787,10 +5926,10 @@ async function showDanmuSourceModal() {
                 }">
                 <div class="flex items-center justify-between gap-2 min-w-0">
                     <div class="danmu-source-name font-medium min-w-0">${escapeHtml(candidate.animeTitle)}</div>
-                    ${isActive ? '<span class="danmu-source-badge text-yellow-300 text-sm shrink-0">✓ 当前使用</span>' : ''}
+                    ${isActive ? `<span class="danmu-source-badge text-yellow-300 text-sm shrink-0">${activeBadge}</span>` : ''}
                 </div>
                 <div class="danmu-source-meta text-sm opacity-75 mt-1">
-                    ${escapeHtml(year)} · ${escapeHtml(season)} · ${escapeHtml(evidenceLabel)} · 当前剧集待 Core 验证
+                    ${escapeHtml(year)} · ${escapeHtml(season)} · ${escapeHtml(evidenceLabel)} · ${escapeHtml(presentation.label)}
                 </div>
             </button>
         `;
@@ -5800,12 +5939,17 @@ async function showDanmuSourceModal() {
     modalContent.querySelectorAll('.danmu-source-button:not([disabled])').forEach((button) => {
         button.addEventListener('click', () => switchDanmuSource(button.dataset.danmuAnimeId || ''));
     });
-    danmuDebugLog('[DanmuCore] manual candidate evidence', evaluations.map(({ candidate, identity }) => ({
-        animeId: candidate.animeId,
-        animeTitle: candidate.animeTitle,
-        decision: identity.decision,
-        reason: identity.reason,
-    })));
+    danmuDebugLog('[DanmuCore] manual candidate evidence', evaluations.map(({ candidate, identity }) => {
+        const presentation = getDanmuModalCandidateState(candidate, identity, context);
+        return {
+            animeId: candidate.animeId,
+            animeTitle: candidate.animeTitle,
+            decision: identity.decision,
+            reason: identity.reason,
+            terminalState: presentation.state,
+            current: presentation.isActive,
+        };
+    }));
 }
 
 async function applyManualDanmuResolution(candidate, manualEpisodeId = null) {

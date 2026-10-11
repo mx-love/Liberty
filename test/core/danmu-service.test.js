@@ -320,7 +320,7 @@ test('candidate conflict, candidate ambiguity and no candidates stop before bang
     });
 });
 
-test('episode ambiguity and movie main-feature identity never fall back to list position', async (t) => {
+test('episode ambiguity never falls back to list position and movie main features use whole-media scope', async (t) => {
     await t.test('duplicate E12', async () => {
         const { service, calls } = recordingService([
             matchResponse(),
@@ -332,7 +332,7 @@ test('episode ambiguity and movie main-feature identity never fall back to list 
         assert.equal(calls.length, 2);
     });
 
-    await t.test('movie 正片', async () => {
+    await t.test('one explicit source and danmu main feature establish a whole-media binding', async () => {
         const media = canonicalMedia({
             mediaId: 'media:one-film',
             mediaType: 'movie',
@@ -347,7 +347,12 @@ test('episode ambiguity and movie main-feature identity never fall back to list 
                 type: 'movie',
                 typeDescription: 'movie',
             })]),
-            bangumiResponse('one-film', 'One Film', [{ episodeId: 'film-main', episodeTitle: '正片' }]),
+            bangumiResponse('one-film', 'One Film', [{
+                episodeId: 'opaque-film-main',
+                episodeTitle: '完整版',
+                apiEpisodeNumber: '1',
+            }]),
+            commentsResponse(),
         ]);
         const result = await service.resolve(resolveInput({
             media,
@@ -356,9 +361,127 @@ test('episode ambiguity and movie main-feature identity never fall back to list 
             rawIndex: 0,
             rawEpisodeName: '正片',
         }));
-        assert.equal(result.state, 'episode-uncertain');
+        assert.equal(result.state, 'success');
+        assert.equal(result.binding?.scope, 'whole_media');
+        assert.equal(result.binding?.danmuEpisodeId, 'opaque-film-main');
+        assert.equal(result.episodeResolution?.bindingScope, 'whole_media');
+        assert.equal(episodes[0].episodeNumber, null);
         assert.ok(calls.every(({ url, init }) => !url.includes('S01E01') && !String(init.body ?? '').includes('S01E01')));
-        assert.equal(calls.length, 2);
+        assert.equal(calls.length, 3);
+    });
+});
+
+test('movie whole-media binding preserves strict media identity and empty-comment semantics', async (t) => {
+    const media = canonicalMedia({
+        mediaId: 'media:strict-film',
+        mediaType: 'movie',
+        canonicalTitle: 'Strict Film',
+        season: null,
+    });
+    const episodes = [canonicalEpisode(media.mediaId, '电影正片', 0)];
+    const input = resolveInput({
+        media,
+        episodes,
+        targetIndex: 0,
+        rawIndex: 0,
+        rawEpisodeName: '电影正片',
+    });
+
+    await t.test('an explicit media-type conflict blocks binding before item or comment requests', async () => {
+        const { service, calls } = recordingService([
+            searchResponse([searchAnime({
+                animeId: 'strict-film-series-conflict',
+                animeTitle: 'Strict Film',
+                type: 'drama',
+                typeDescription: 'series',
+            })]),
+        ]);
+
+        const result = await service.resolve(input);
+
+        assert.equal(result.state, 'candidate-conflict');
+        assert.equal(result.binding, null);
+        assert.equal(calls.length, 1);
+        assert.ok(calls.every(({ url }) => !url.includes('/bangumi/') && !url.includes('/comment/')));
+    });
+
+    await t.test('a valid whole-media binding with comments=[] is a legal terminal result', async () => {
+        const { service, calls } = recordingService([
+            searchResponse([searchAnime({
+                animeId: 'strict-film-empty',
+                animeTitle: 'Strict Film',
+                type: 'movie',
+                typeDescription: 'movie',
+            })]),
+            bangumiResponse('strict-film-empty', 'Strict Film', [{
+                episodeId: 'strict-film-main',
+                episodeTitle: '正片',
+            }]),
+            commentsResponse([]),
+        ]);
+
+        const result = await service.resolve(input);
+
+        assert.equal(result.state, 'comments-empty');
+        assert.equal(result.binding?.scope, 'whole_media');
+        assert.equal(result.binding?.danmuEpisodeId, 'strict-film-main');
+        assert.deepEqual(result.comments, []);
+        assert.equal(calls.filter(({ url }) => url.includes('/api/v2/comment/')).length, 1);
+    });
+
+    await t.test('manual movie selection preserves whole-media scope', async () => {
+        const manualCandidate = {
+            animeId: 'strict-film-manual',
+            animeTitle: 'Strict Film',
+            year: 2025,
+            mediaType: 'movie',
+        };
+        const { service, calls } = recordingService([
+            bangumiResponse(manualCandidate.animeId, manualCandidate.animeTitle, [{
+                episodeId: 'strict-film-manual-main',
+                episodeTitle: '完整版',
+            }]),
+            commentsResponse(),
+        ]);
+
+        const result = await service.resolve({
+            ...input,
+            manualCandidate,
+            manualEpisodeId: 'strict-film-manual-main',
+        });
+
+        assert.equal(result.state, 'success');
+        assert.equal(result.binding?.scope, 'whole_media');
+        assert.equal(result.binding?.selectedBy, 'manual');
+        assert.equal(result.binding?.danmuEpisodeId, 'strict-film-manual-main');
+        assert.equal(result.episodeResolution?.bindingScope, 'whole_media');
+        assert.equal(calls.filter(({ url }) => url.includes('/api/v2/comment/')).length, 1);
+    });
+
+    await t.test('manual item choice cannot bypass non-unique movie structure', async () => {
+        const manualCandidate = {
+            animeId: 'strict-film-duplicate-items',
+            animeTitle: 'Strict Film',
+            year: 2025,
+            mediaType: 'movie',
+        };
+        const { service, calls } = recordingService([
+            bangumiResponse(manualCandidate.animeId, manualCandidate.animeTitle, [
+                { episodeId: 'film-main-a', episodeTitle: '正片' },
+                { episodeId: 'film-main-b', episodeTitle: '完整版' },
+            ]),
+        ]);
+
+        const result = await service.resolve({
+            ...input,
+            manualCandidate,
+            manualEpisodeId: 'film-main-a',
+        });
+
+        assert.equal(result.state, 'episode-rejected');
+        assert.equal(result.binding, null);
+        assert.equal(calls.length, 1);
+        assert.ok(calls.every(({ url }) => !url.includes('/api/v2/comment/')));
     });
 });
 

@@ -135,7 +135,75 @@ function rejected(reason: string): DanmakuEpisodeResolution {
     candidates: [],
     evidence: [],
     rejectionReasons: [reason],
+    bindingScope: null,
     reason,
+  };
+}
+
+function isExplicitWholeMediaEpisode(
+  episode: CanonicalEpisode,
+  media: CanonicalMedia,
+): boolean {
+  const parsed = parsedCanonicalEpisode(episode, media);
+  return (
+    (episode.identityState === 'confirmed' || episode.identityState === 'supported') &&
+    parsed.contentType === 'movie' &&
+    parsed.confidence === 'high' &&
+    !parsed.ambiguous &&
+    parsed.seasonNumber === null &&
+    parsed.episodeNumber === null &&
+    parsed.absoluteNumber === null &&
+    parsed.airDate === null &&
+    parsed.evidence.some(({ code }) => code === 'movie_marker')
+  );
+}
+
+function resolveUniqueWholeMedia(
+  input: DanmakuEpisodeResolutionInput,
+): DanmakuEpisodeResolution | null {
+  if (
+    input.media.mediaType !== 'movie' ||
+    (input.media.identityState !== 'confirmed' && input.media.identityState !== 'supported') ||
+    input.canonicalEpisodes.length !== 1 ||
+    input.danmuEpisodes.length !== 1 ||
+    !isExplicitWholeMediaEpisode(input.targetEpisode, input.media)
+  ) {
+    return null;
+  }
+
+  const selected = input.danmuEpisodes[0];
+  if (selected === undefined) return null;
+  const parsed = parseEpisode(selected.episodeTitle, { mediaType: input.media.mediaType });
+  if (
+    parsed.contentType !== 'movie' ||
+    parsed.confidence !== 'high' ||
+    parsed.ambiguous ||
+    parsed.seasonNumber !== null ||
+    parsed.episodeNumber !== null ||
+    parsed.absoluteNumber !== null ||
+    parsed.airDate !== null ||
+    !parsed.evidence.some(({ code }) => code === 'movie_marker')
+  ) {
+    return null;
+  }
+
+  return {
+    state: 'supported',
+    selected,
+    candidates: [selected],
+    evidence: [
+      {
+        code: 'canonical_media_match',
+        reason: `The source and danmu items both belong to canonical movie ${input.media.mediaId}`,
+      },
+      {
+        code: 'source_sequence_membership',
+        reason: 'Each side has exactly one explicit, non-episodic main-feature item',
+      },
+    ],
+    rejectionReasons: [],
+    bindingScope: 'whole_media',
+    reason: 'Unique explicit main-feature structure supports a whole-media binding',
   };
 }
 
@@ -167,6 +235,9 @@ export function resolveDanmakuEpisode(
     return rejected('The target episode must occur exactly once in the canonical sequence');
   }
   const targetCoordinate = targetCoordinates[0] ?? -1;
+  const wholeMediaResolution = resolveUniqueWholeMedia(input);
+  if (wholeMediaResolution !== null) return wholeMediaResolution;
+
   const sourceSequence = input.canonicalEpisodes.map((episode, index) =>
     canonicalSourceEpisode(episode, input.media, index));
   const sourceEpisode = canonicalSourceEpisode(
@@ -219,6 +290,7 @@ export function resolveDanmakuEpisode(
     candidates,
     evidence: resolution.evidence,
     rejectionReasons: resolution.rejectionReasons,
+    bindingScope: selected === null ? null : 'canonical_episode',
     reason: resolution.reason,
   };
 }

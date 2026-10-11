@@ -50,6 +50,8 @@ function createWork(overrides = {}) {
         animeId: 'orbital-s1',
         animeTitle: 'Orbital Patrol S01',
         year: 2025,
+        type: 'drama',
+        typeDescription: 'series',
         episodes: regularEpisodes(),
         comments: new Map(),
         videoDuration: 1200,
@@ -107,8 +109,8 @@ function createNetwork(works = [createWork()]) {
                 animeTitle: work.animeTitle,
                 episodeId: episode.episodeId,
                 episodeTitle: episode.episodeTitle,
-                type: 'drama',
-                typeDescription: 'series',
+                type: work.type,
+                typeDescription: work.typeDescription,
                 shift: 0,
                 imageUrl: '',
                 url: '',
@@ -124,8 +126,8 @@ function createNetwork(works = [createWork()]) {
                     animeId: work.animeId,
                     bangumiId: work.animeId,
                     animeTitle: work.animeTitle,
-                    type: 'drama',
-                    typeDescription: 'series',
+                    type: work.type,
+                    typeDescription: work.typeDescription,
                     imageUrl: '',
                     startDate: work.year ? String(work.year) + '-01-01' : '',
                     episodeCount: work.episodes.length,
@@ -145,8 +147,8 @@ function createNetwork(works = [createWork()]) {
                     animeId: work.animeId,
                     bangumiId: work.animeId,
                     animeTitle: work.animeTitle,
-                    type: 'drama',
-                    typeDescription: 'series',
+                    type: work.type,
+                    typeDescription: work.typeDescription,
                     episodes: work.episodes.map((episode) => ({
                         seasonId: 'season-' + work.animeId,
                         episodeId: episode.episodeId,
@@ -560,6 +562,19 @@ function createHarness(options = {}) {
             confirmManualEpisode(animeId, episodeId) {
                 return confirmDanmuEpisodeChoice(String(animeId), String(episodeId));
             },
+            showSourceModal() { return showDanmuSourceModal(); },
+            sourceModalHtml() { return document.getElementById('danmuSourceList').innerHTML; },
+            setActiveValidation(animeId = 'auto') {
+                const context = createProductionDanmakuContext(currentVideoTitle, currentEpisodeIndex);
+                const candidate = animeId === 'auto'
+                    ? null
+                    : manualDanmuCandidates.get(String(animeId));
+                activeDanmuResolutionTransaction = {
+                    key: getDanmuCoreCacheKey(context, candidate, null),
+                    promise: Promise.resolve([]),
+                };
+            },
+            clearActiveValidation() { activeDanmuResolutionTransaction = null; },
             toggleDanmaku() { return toggleDanmakuByShortcut(); },
             beginRequest(reason = 'test-request') {
                 const context = createProductionDanmakuContext(currentVideoTitle, currentEpisodeIndex);
@@ -646,8 +661,8 @@ function manualCandidate(work) {
         animeId: work.animeId,
         bangumiId: work.animeId,
         animeTitle: work.animeTitle,
-        type: 'drama',
-        typeDescription: 'series',
+        type: work.type,
+        typeDescription: work.typeDescription,
         imageUrl: '',
         startDate: String(work.year) + '-01-01',
         episodeCount: work.episodes.length,
@@ -664,8 +679,8 @@ function matchCandidateForWork(work) {
         animeTitle: work.animeTitle,
         episodeId: episode?.episodeId || '',
         episodeTitle: episode?.episodeTitle || '',
-        type: 'drama',
-        typeDescription: 'series',
+        type: work.type,
+        typeDescription: work.typeDescription,
         shift: 0,
         imageUrl: '',
         url: '',
@@ -1455,4 +1470,194 @@ test('32. passive video events never start or repeat a danmaku transaction', asy
     assert.equal(harness.network.state.calls.length, requestCount);
     assert.deepEqual(harness.api.debug().danmuTransactionMetrics, metrics);
     assert.equal(commentRequests(harness).length, 1);
+});
+
+test('33. source modal renders the current canonical-episode binding instead of stale search state', async () => {
+    const harness = createHarness();
+    setStandardPlayback(harness);
+
+    await harness.api.getDanmuku();
+    await harness.api.showSourceModal();
+
+    const html = harness.api.sourceModalHtml();
+    const diagnostics = harness.api.debug().lastDanmuMatchInfo;
+    assert.match(html, /data-danmu-status="current"/u);
+    assert.match(html, /当前使用/u);
+    assert.match(html, /当前剧集已验证/u);
+    assert.doesNotMatch(html, /当前剧集待 Core 验证/u);
+    assert.equal(diagnostics.bindingScope, 'canonical_episode');
+    assert.equal(diagnostics.providerAnimeId, 'orbital-s1');
+    assert.equal(diagnostics.danmuEpisodeId, 'dm-e12');
+    assert.equal(diagnostics.terminalState, 'success');
+    assert.equal(diagnostics.commentsState, 'available');
+    assert.equal(Object.hasOwn(diagnostics, 'currentVideoUrl'), false);
+});
+
+test('34. an old episode binding is not shown as current after the playback episode changes', async () => {
+    const harness = createHarness();
+    setStandardPlayback(harness);
+    await harness.api.getDanmuku();
+
+    harness.api.setPlayback({
+        title: 'Orbital Patrol S01',
+        episodes: playbackEpisodes(['E11', 'E12', 'E13']),
+        index: 2,
+        resetSession: false,
+    });
+    await harness.api.showSourceModal();
+
+    const html = harness.api.sourceModalHtml();
+    assert.doesNotMatch(html, /data-danmu-status="current"/u);
+    assert.doesNotMatch(html, /✓ 当前使用/u);
+    assert.match(html, /data-danmu-status="media-verified"/u);
+});
+
+test('35. source modal exposes an episode-uncertain terminal state', async () => {
+    const work = createWork({
+        episodes: [
+            { episodeId: 'duplicate-a', episodeTitle: 'E12', episodeNumber: '1' },
+            { episodeId: 'duplicate-b', episodeTitle: '第12集', episodeNumber: '2' },
+        ],
+    });
+    const harness = createHarness({ works: [work] });
+    setStandardPlayback(harness);
+
+    await harness.api.getDanmuku();
+    await harness.api.showSourceModal();
+
+    const html = harness.api.sourceModalHtml();
+    assert.match(html, /data-danmu-status="episode-uncertain"/u);
+    assert.match(html, /当前剧集身份不确定/u);
+    assert.doesNotMatch(html, /✓ 当前使用/u);
+});
+
+test('36. source modal distinguishes a verified binding whose comment request failed', async () => {
+    const harness = createHarness();
+    setStandardPlayback(harness);
+    harness.network.state.intercept = (call) => {
+        if (call.path.includes('/api/v2/comment/')) throw new Error('fixture network failure');
+        return undefined;
+    };
+
+    await harness.api.getDanmuku();
+    await harness.api.showSourceModal();
+
+    const html = harness.api.sourceModalHtml();
+    assert.match(html, /data-danmu-status="failed"/u);
+    assert.match(html, /当前剧集已验证 · 加载失败/u);
+    assert.doesNotMatch(html, /✓ 当前使用/u);
+});
+
+test('37. an empty whole-media binding is terminal, cached, and rendered without a fake E01', async () => {
+    const movie = createWork({
+        title: 'Celestial Feature',
+        animeId: 'celestial-feature-2025',
+        animeTitle: 'Celestial Feature',
+        type: 'movie',
+        typeDescription: '动画电影',
+        episodes: [{
+            episodeId: 'celestial-main-feature',
+            episodeTitle: '正片',
+            episodeNumber: '1',
+            airDate: '',
+        }],
+        comments: new Map([['celestial-main-feature', []]]),
+    });
+    const harness = createHarness({ works: [movie] });
+    setStandardPlayback(harness, {
+        title: 'Celestial Feature',
+        category: '动画电影',
+        episodes: playbackEpisodes(['正片'], { prefix: 'celestial' }),
+        index: 0,
+    });
+
+    const initial = await harness.api.getDanmuku();
+    const requestCount = harness.network.state.calls.length;
+    const repeated = await harness.api.getDanmuku();
+    const diagnostics = harness.api.debug().lastDanmuMatchInfo;
+
+    assert.equal(initial.length, 0);
+    assert.equal(repeated.length, 0);
+    assert.equal(harness.network.state.calls.length, requestCount);
+    assert.equal(commentRequests(harness).length, 1);
+    assert.equal(harness.api.createContext().episode?.episodeNumber, null);
+    assert.equal(diagnostics.bindingScope, 'whole_media');
+    assert.equal(diagnostics.danmuEpisodeId, 'celestial-main-feature');
+    assert.equal(diagnostics.terminalState, 'comments-empty');
+    assert.equal(diagnostics.commentsState, 'empty');
+
+    await harness.api.showSourceModal();
+    const html = harness.api.sourceModalHtml();
+    assert.match(html, /data-danmu-status="empty"/u);
+    assert.match(html, /暂无弹幕 · 整部影片已验证/u);
+    assert.doesNotMatch(html, /E01/u);
+    assert.doesNotMatch(html, /✓ 当前使用/u);
+});
+
+test('38. source modal derives validating state from the active current-context transaction', async () => {
+    const harness = createHarness();
+    setStandardPlayback(harness);
+    harness.api.setActiveValidation();
+
+    await harness.api.showSourceModal();
+
+    const html = harness.api.sourceModalHtml();
+    assert.match(html, /data-danmu-status="validating"/u);
+    assert.match(html, /正在验证/u);
+    assert.doesNotMatch(html, /✓ 当前使用/u);
+    harness.api.clearActiveValidation();
+});
+
+test('39. a former whole-media binding is not reused after the source becomes multi-item', async () => {
+    const movie = createWork({
+        title: 'Structural Feature',
+        animeId: 'structural-feature-2025',
+        animeTitle: 'Structural Feature',
+        type: 'movie',
+        typeDescription: 'movie',
+        episodes: [{
+            episodeId: 'structural-main-feature',
+            episodeTitle: '正片',
+            episodeNumber: '1',
+            airDate: '',
+        }],
+    });
+    const harness = createHarness({ works: [movie] });
+    const mainPlaybackItem = {
+        rawIndex: 0,
+        name: '正片',
+        rawEpisodeName: '正片',
+        url: 'https://media.example.test/structural-main.m3u8',
+    };
+    const trailerPlaybackItem = {
+        rawIndex: 1,
+        name: '预告片',
+        rawEpisodeName: '预告片',
+        url: 'https://media.example.test/structural-trailer.m3u8',
+    };
+    setStandardPlayback(harness, {
+        title: 'Structural Feature',
+        category: '电影',
+        episodes: [mainPlaybackItem],
+        index: 0,
+    });
+
+    await harness.api.getDanmuku();
+    const singleItemRequests = harness.network.state.calls.length;
+    assert.equal(harness.api.debug().lastDanmuMatchInfo.bindingScope, 'whole_media');
+
+    harness.api.setPlayback({
+        title: 'Structural Feature',
+        episodes: [mainPlaybackItem, trailerPlaybackItem],
+        index: 0,
+        resetSession: false,
+    });
+    await harness.api.getDanmuku();
+    await harness.api.showSourceModal();
+
+    const html = harness.api.sourceModalHtml();
+    assert.ok(harness.network.state.calls.length > singleItemRequests);
+    assert.doesNotMatch(html, /data-danmu-status="current"/u);
+    assert.doesNotMatch(html, /✓ 当前使用/u);
+    assert.match(html, /data-danmu-status="episode-uncertain"/u);
 });

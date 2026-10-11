@@ -150,8 +150,12 @@ export interface DanmakuEpisodeResolution {
   readonly candidates: readonly DanmuEpisode[];
   readonly evidence: readonly EpisodeResolutionEvidence[];
   readonly rejectionReasons: readonly string[];
+  /** The identity scope established by episode resolution, when decisive. */
+  readonly bindingScope: DanmakuBindingScope | null;
   readonly reason: string;
 }
+
+export type DanmakuBindingScope = 'canonical_episode' | 'whole_media';
 
 export interface DanmakuBindingEvidence {
   readonly stage: 'media' | 'episode' | 'manual';
@@ -169,7 +173,7 @@ export interface DanmakuBinding {
   readonly danmuEpisodeTitle: string;
   readonly mappingState: 'supported' | 'verified';
   readonly selectedBy: 'automatic' | 'manual';
-  readonly scope: 'canonical_episode';
+  readonly scope: DanmakuBindingScope;
   readonly evidence: readonly DanmakuBindingEvidence[];
 }
 

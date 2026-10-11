@@ -1,0 +1,46 @@
+import type { MediaType } from '../types/media.js';
+
+export interface MediaTypeClassificationOptions {
+  /** `TV` family labels are useful source metadata, but ambiguous in danmu_api labels. */
+  readonly treatBareTvAsSeries?: boolean;
+}
+
+function normalizeLabels(values: readonly unknown[]): string {
+  return values
+    .filter((value) => value !== null && value !== undefined)
+    .map((value) => String(value).normalize('NFKC').toLocaleLowerCase('zh-CN').trim())
+    .filter(Boolean)
+    .join(' ');
+}
+
+/**
+ * Classify transport labels without discarding their original category text.
+ *
+ * Animation movies must be checked before the broader animation family: a
+ * label such as `动漫电影` carries both animation and movie words, while its
+ * playback identity is still a movie rather than an episodic anime series.
+ */
+export function classifyMediaTypeLabels(
+  values: readonly unknown[],
+  options: MediaTypeClassificationOptions = {},
+): MediaType {
+  const value = normalizeLabels(values);
+  if (!value) return 'unknown';
+
+  const hasAnimation = /(?:日番|番剧|动漫|動畫|动画|\banime\b|\banimation\b|\banimated\b)/iu.test(value);
+  const hasMovie = /(?:电影|電影|影片|剧场版|劇場版|\bmovie\b|\bfilm\b)/iu.test(value);
+
+  // `动漫电影`, `动画电影`, `Animated Movie`, and equivalent split
+  // transport fields are movies. The raw labels remain available as genre
+  // evidence on SourceRecord/DanmakuMediaCandidate.
+  if (hasAnimation && hasMovie) return 'movie';
+  if (hasAnimation) return 'anime';
+  if (/(?:综艺|綜藝|真人秀|\bvariety\b)/iu.test(value)) return 'variety';
+  if (/(?:纪录片|紀錄片|记录片|紀錄|纪录|\bdocumentary\b)/iu.test(value)) return 'documentary';
+  if (hasMovie) return 'movie';
+  if (/(?:电视剧|電視劇|连续剧|連續劇|剧集|劇集|韩剧|韓劇|日剧|日劇|美剧|美劇|欧美剧|歐美劇|日韩剧|日韓劇|国产剧|國產劇|\bseries\b|\bdrama\b)/iu.test(value)) {
+    return 'series';
+  }
+  if (options.treatBareTvAsSeries && /\btv(?:series|show)?\b/iu.test(value)) return 'series';
+  return 'unknown';
+}

@@ -152,7 +152,7 @@ function extractContentMarker(value: string): ContentMarker | null {
     };
   }
 
-  const movie = /(?:正片|剧场版|電影版|电影版)/u.exec(value);
+  const movie = /(?:电影正片|電影正片|完整版|正片|剧场版|電影版|电影版)/u.exec(value);
   if (movie) {
     return {
       contentType: 'movie',

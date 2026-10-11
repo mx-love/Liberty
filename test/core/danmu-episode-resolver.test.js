@@ -203,9 +203,12 @@ test('a semantic upstream airDate can identify a variety item when its title is 
   assert.ok(resolution.evidence.some(({ code }) => code === 'exact_air_date'));
 });
 
-test('movie 正片 remains uncertain instead of being invented as E01', () => {
+test('a unique explicit movie main feature resolves with whole-media scope without inventing E01', () => {
   const canonicalEpisodes = canonicalSequence(['正片']);
-  const candidate = danmuEpisode('正片', 0, { apiEpisodeNumber: '1' });
+  const candidate = danmuEpisode('完整版', 0, {
+    episodeId: 'opaque-main-feature',
+    apiEpisodeNumber: '1',
+  });
   const resolution = resolveDanmakuEpisode({
     media: canonicalMedia(canonicalEpisodes, { mediaType: 'movie' }),
     targetEpisode: canonicalEpisodes[0],
@@ -213,8 +216,125 @@ test('movie 正片 remains uncertain instead of being invented as E01', () => {
     danmuEpisodes: [candidate],
   });
 
-  assert.equal(resolution.state, 'uncertain');
-  assert.equal(resolution.selected, null);
+  assert.equal(canonicalEpisodes[0].episodeNumber, null);
+  assert.equal(resolution.state, 'supported');
+  assert.equal(resolution.selected, candidate);
+  assert.equal(resolution.bindingScope, 'whole_media');
+  assert.ok(resolution.evidence.some(({ code }) => code === 'source_sequence_membership'));
+});
+
+test('whole-media resolution requires one unambiguous item on both sides', async (t) => {
+  await t.test('one source item and two danmu main-feature items remain uncertain', () => {
+    const canonicalEpisodes = canonicalSequence(['正片']);
+    const resolution = resolveDanmakuEpisode({
+      media: canonicalMedia(canonicalEpisodes, { mediaType: 'movie' }),
+      targetEpisode: canonicalEpisodes[0],
+      canonicalEpisodes,
+      danmuEpisodes: [danmuEpisode('正片', 0), danmuEpisode('完整版', 1)],
+    });
+
+    assert.equal(resolution.state, 'uncertain');
+    assert.equal(resolution.selected, null);
+    assert.equal(resolution.bindingScope, null);
+  });
+
+  await t.test('two source items and one danmu main-feature item remain uncertain', () => {
+    const canonicalEpisodes = canonicalSequence(['正片', '完整版']);
+    const resolution = resolveDanmakuEpisode({
+      media: canonicalMedia(canonicalEpisodes, { mediaType: 'movie' }),
+      targetEpisode: canonicalEpisodes[0],
+      canonicalEpisodes,
+      danmuEpisodes: [danmuEpisode('正片', 0)],
+    });
+
+    assert.equal(resolution.state, 'uncertain');
+    assert.equal(resolution.selected, null);
+    assert.equal(resolution.bindingScope, null);
+  });
+
+  await t.test('trailers, PVs and special extras cannot be promoted to the movie main feature', () => {
+    const canonicalEpisodes = canonicalSequence(['正片']);
+    for (const label of ['预告片', 'PV', 'trailer', 'SP', '花絮']) {
+      const resolution = resolveDanmakuEpisode({
+        media: canonicalMedia(canonicalEpisodes, { mediaType: 'movie' }),
+        targetEpisode: canonicalEpisodes[0],
+        canonicalEpisodes,
+        danmuEpisodes: [danmuEpisode(label, 0)],
+      });
+
+      assert.ok(
+        resolution.state === 'not_found'
+          || resolution.state === 'uncertain'
+          || resolution.state === 'rejected',
+        label,
+      );
+      assert.equal(resolution.selected, null, label);
+      assert.equal(resolution.bindingScope, null, label);
+    }
+  });
+
+  await t.test('an unresolved canonical media cannot establish whole-media scope', () => {
+    const canonicalEpisodes = canonicalSequence(['正片']);
+    const resolution = resolveDanmakuEpisode({
+      media: canonicalMedia(canonicalEpisodes, { mediaType: 'movie', identityState: 'uncertain' }),
+      targetEpisode: canonicalEpisodes[0],
+      canonicalEpisodes,
+      danmuEpisodes: [danmuEpisode('正片', 0)],
+    });
+
+    assert.equal(resolution.selected, null);
+    assert.equal(resolution.bindingScope, null);
+  });
+});
+
+test('TV resolution retains canonical-episode semantics and never uses singleton structure', async (t) => {
+  await t.test('an explicit single TV episode remains canonical-episode scoped', () => {
+    const resolution = resolveFixture(['第01集'], 0, ['E01']);
+
+    assert.equal(resolution.state, 'supported');
+    assert.equal(resolution.selected?.episodeTitle, 'E01');
+    assert.equal(resolution.bindingScope, 'canonical_episode');
+  });
+
+  await t.test('a TV item named 正片 is not treated as a whole-media movie', () => {
+    const canonicalEpisodes = canonicalSequence(['正片']);
+    const resolution = resolveDanmakuEpisode({
+      media: canonicalMedia(canonicalEpisodes, { mediaType: 'series' }),
+      targetEpisode: canonicalEpisodes[0],
+      canonicalEpisodes,
+      danmuEpisodes: [danmuEpisode('正片', 0)],
+    });
+
+    assert.equal(resolution.selected, null);
+    assert.equal(resolution.bindingScope, null);
+  });
+
+  await t.test('URL-only metadata stays unresolved even when both positions are zero', () => {
+    const canonicalEpisodes = [canonicalEpisode('https://media.example.test/main.m3u8', 0, {
+      contentType: 'unknown',
+      episodeNumber: null,
+      absoluteNumber: null,
+      episodeTitle: null,
+      identityState: 'uncertain',
+    })];
+    const resolution = resolveDanmakuEpisode({
+      media: canonicalMedia(canonicalEpisodes),
+      targetEpisode: canonicalEpisodes[0],
+      canonicalEpisodes,
+      danmuEpisodes: [danmuEpisode('第1集', 0, { apiEpisodeNumber: '1' })],
+    });
+
+    assert.equal(resolution.selected, null);
+    assert.equal(resolution.bindingScope, null);
+  });
+
+  await t.test('existing pure-numeric 1/01 episode identity remains canonical-episode scoped', () => {
+    const resolution = resolveFixture(['1'], 0, ['01']);
+
+    assert.equal(resolution.state, 'supported');
+    assert.equal(resolution.selected?.episodeTitle, '01');
+    assert.equal(resolution.bindingScope, 'canonical_episode');
+  });
 });
 
 test('duplicate E12 candidates remain ambiguous', () => {

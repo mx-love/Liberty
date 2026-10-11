@@ -634,7 +634,7 @@ function extractContentMarker(value) {
       evidenceCode: "special_marker"
     };
   }
-  const movie = /(?:正片|剧场版|電影版|电影版)/u.exec(value);
+  const movie = /(?:电影正片|電影正片|完整版|正片|剧场版|電影版|电影版)/u.exec(value);
   if (movie) {
     return {
       contentType: "movie",
@@ -1411,6 +1411,27 @@ var EpisodeResolver = class {
   }
 };
 
+// src/core/identity/media-type-classifier.ts
+function normalizeLabels(values) {
+  return values.filter((value) => value !== null && value !== void 0).map((value) => String(value).normalize("NFKC").toLocaleLowerCase("zh-CN").trim()).filter(Boolean).join(" ");
+}
+function classifyMediaTypeLabels(values, options = {}) {
+  const value = normalizeLabels(values);
+  if (!value) return "unknown";
+  const hasAnimation = /(?:日番|番剧|动漫|動畫|动画|\banime\b|\banimation\b|\banimated\b)/iu.test(value);
+  const hasMovie = /(?:电影|電影|影片|剧场版|劇場版|\bmovie\b|\bfilm\b)/iu.test(value);
+  if (hasAnimation && hasMovie) return "movie";
+  if (hasAnimation) return "anime";
+  if (/(?:综艺|綜藝|真人秀|\bvariety\b)/iu.test(value)) return "variety";
+  if (/(?:纪录片|紀錄片|记录片|紀錄|纪录|\bdocumentary\b)/iu.test(value)) return "documentary";
+  if (hasMovie) return "movie";
+  if (/(?:电视剧|電視劇|连续剧|連續劇|剧集|劇集|韩剧|韓劇|日剧|日劇|美剧|美劇|欧美剧|歐美劇|日韩剧|日韓劇|国产剧|國產劇|\bseries\b|\bdrama\b)/iu.test(value)) {
+    return "series";
+  }
+  if (options.treatBareTvAsSeries && /\btv(?:series|show)?\b/iu.test(value)) return "series";
+  return "unknown";
+}
+
 // src/core/source/source-normalizer.ts
 var HTML_ENTITIES = {
   "&amp;": "&",
@@ -1443,14 +1464,7 @@ function parseYear(value) {
   return match ? Number(match[1]) : null;
 }
 function classifyMediaType(category) {
-  const value = cleanText(category).toLowerCase();
-  if (!value) return "unknown";
-  if (/(动漫|动画|anime)/i.test(value)) return "anime";
-  if (/(综艺|真人秀|variety)/i.test(value)) return "variety";
-  if (/(纪录片|纪录|documentary)/i.test(value)) return "documentary";
-  if (/(电影|影片|movie)/i.test(value)) return "movie";
-  if (/(电视剧|连续剧|剧集|欧美剧|国产剧|日韩剧|tv)/i.test(value)) return "series";
-  return "unknown";
+  return classifyMediaTypeLabels([cleanText(category)], { treatBareTvAsSeries: true });
 }
 function parseSourceEpisodeNumber(rawEpisodeName, mediaType = "unknown") {
   return parseEpisode(stringValue(rawEpisodeName), { mediaType });
@@ -2316,16 +2330,8 @@ function yearFromDate(value) {
   return match?.[1] ? Number(match[1]) : null;
 }
 function mediaTypeFromDanmu(type, typeDescription) {
-  const value = `${type} ${typeDescription}`.normalize("NFKC").toLocaleLowerCase("zh-CN");
-  const types = /* @__PURE__ */ new Set();
-  if (/(?:日番|番剧|动漫|动画|\banime\b|\banimation\b)/iu.test(value)) types.add("anime");
-  if (/(?:电影|剧场版|\bmovie\b|\bfilm\b)/iu.test(value)) types.add("movie");
-  if (/(?:电视剧|连续剧|韩剧|日剧|美剧|国产剧|\bseries\b|\bdrama\b)/iu.test(value)) {
-    types.add("series");
-  }
-  if (/(?:综艺|\bvariety\b)/iu.test(value)) types.add("variety");
-  if (/(?:纪录片|记录片|\bdocumentary\b)/iu.test(value)) types.add("documentary");
-  return types.size === 1 ? [...types][0] : void 0;
+  const classified = classifyMediaTypeLabels([type, typeDescription]);
+  return classified === "unknown" ? void 0 : classified;
 }
 function adaptDanmuMatchCandidate(candidate) {
   return {
@@ -2569,7 +2575,41 @@ function rejected(reason) {
     candidates: [],
     evidence: [],
     rejectionReasons: [reason],
+    bindingScope: null,
     reason
+  };
+}
+function isExplicitWholeMediaEpisode(episode, media) {
+  const parsed = parsedCanonicalEpisode(episode, media);
+  return (episode.identityState === "confirmed" || episode.identityState === "supported") && parsed.contentType === "movie" && parsed.confidence === "high" && !parsed.ambiguous && parsed.seasonNumber === null && parsed.episodeNumber === null && parsed.absoluteNumber === null && parsed.airDate === null && parsed.evidence.some(({ code }) => code === "movie_marker");
+}
+function resolveUniqueWholeMedia(input) {
+  if (input.media.mediaType !== "movie" || input.media.identityState !== "confirmed" && input.media.identityState !== "supported" || input.canonicalEpisodes.length !== 1 || input.danmuEpisodes.length !== 1 || !isExplicitWholeMediaEpisode(input.targetEpisode, input.media)) {
+    return null;
+  }
+  const selected = input.danmuEpisodes[0];
+  if (selected === void 0) return null;
+  const parsed = parseEpisode(selected.episodeTitle, { mediaType: input.media.mediaType });
+  if (parsed.contentType !== "movie" || parsed.confidence !== "high" || parsed.ambiguous || parsed.seasonNumber !== null || parsed.episodeNumber !== null || parsed.absoluteNumber !== null || parsed.airDate !== null || !parsed.evidence.some(({ code }) => code === "movie_marker")) {
+    return null;
+  }
+  return {
+    state: "supported",
+    selected,
+    candidates: [selected],
+    evidence: [
+      {
+        code: "canonical_media_match",
+        reason: `The source and danmu items both belong to canonical movie ${input.media.mediaId}`
+      },
+      {
+        code: "source_sequence_membership",
+        reason: "Each side has exactly one explicit, non-episodic main-feature item"
+      }
+    ],
+    rejectionReasons: [],
+    bindingScope: "whole_media",
+    reason: "Unique explicit main-feature structure supports a whole-media binding"
   };
 }
 function resolveDanmakuEpisode(input) {
@@ -2591,6 +2631,8 @@ function resolveDanmakuEpisode(input) {
     return rejected("The target episode must occur exactly once in the canonical sequence");
   }
   const targetCoordinate = targetCoordinates[0] ?? -1;
+  const wholeMediaResolution = resolveUniqueWholeMedia(input);
+  if (wholeMediaResolution !== null) return wholeMediaResolution;
   const sourceSequence = input.canonicalEpisodes.map((episode, index) => canonicalSourceEpisode(episode, input.media, index));
   const sourceEpisode = canonicalSourceEpisode(
     input.targetEpisode,
@@ -2626,6 +2668,7 @@ function resolveDanmakuEpisode(input) {
     candidates,
     evidence: resolution.evidence,
     rejectionReasons: resolution.rejectionReasons,
+    bindingScope: selected === null ? null : "canonical_episode",
     reason: resolution.reason
   };
 }
@@ -2774,12 +2817,20 @@ function applyManualEpisodeSelection(resolution, episodes, manualEpisodeId) {
       reason: `The manually selected episodeId ${episodeId} is not an identity-compatible candidate`
     };
   }
+  const selectedIdentity = parseEpisode(selected.episodeTitle);
+  if (resolution.bindingScope === null && selectedIdentity.contentType === "movie") {
+    return {
+      ok: false,
+      reason: "A manual item choice cannot bypass the unique whole-media structure requirement"
+    };
+  }
   return {
     ok: true,
     resolution: {
       ...resolution,
       state: resolution.state === "verified" ? "verified" : "supported",
       selected,
+      bindingScope: resolution.bindingScope ?? "canonical_episode",
       reason: `The user confirmed identity-compatible danmu episode ${episodeId}`
     }
   };
@@ -3076,6 +3127,13 @@ var DanmuService = class {
         episodeResolution
       });
     }
+    const bindingScope = episodeResolution.bindingScope;
+    if (bindingScope === null) {
+      return emptyResult("episode-uncertain", "Episode resolution did not establish a binding scope", {
+        candidateResolution,
+        episodeResolution
+      });
+    }
     const mappingState = candidateResolution.state === "verified" && episodeResolution.state === "verified" ? "verified" : "supported";
     const binding = {
       canonicalMediaId: canonicalInput.media.mediaId,
@@ -3086,7 +3144,7 @@ var DanmuService = class {
       danmuEpisodeTitle: selectedEpisode.episodeTitle,
       mappingState,
       selectedBy: candidateResolution.selectedBy,
-      scope: "canonical_episode",
+      scope: bindingScope,
       evidence: [
         {
           stage: "media",
@@ -3108,7 +3166,7 @@ var DanmuService = class {
     };
     return emptyResult(
       mappingState === "verified" ? "binding-verified" : "binding-supported",
-      "A canonical-episode-scoped danmaku binding was established",
+      bindingScope === "whole_media" ? "A whole-media-scoped danmaku binding was established" : "A canonical-episode-scoped danmaku binding was established",
       { binding, candidateResolution, episodeResolution }
     );
   }

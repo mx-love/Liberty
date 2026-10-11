@@ -1,4 +1,5 @@
 import { EntityResolver } from '../identity/entity-resolver.js';
+import { classifyMediaTypeLabels } from '../identity/media-type-classifier.js';
 import { parseTitle } from '../identity/title-parser.js';
 import type { MediaIdentityInput } from '../types/identity.js';
 import type { CanonicalMedia, MediaType } from '../types/media.js';
@@ -49,18 +50,8 @@ function yearFromDate(value: string): number | null {
  * `tvseries`/`TV` remain unknown because danmu_api also uses them for TV anime.
  */
 function mediaTypeFromDanmu(type: string, typeDescription: string): MediaType | undefined {
-  const value = `${type} ${typeDescription}`.normalize('NFKC').toLocaleLowerCase('zh-CN');
-  const types = new Set<MediaType>();
-
-  if (/(?:日番|番剧|动漫|动画|\banime\b|\banimation\b)/iu.test(value)) types.add('anime');
-  if (/(?:电影|剧场版|\bmovie\b|\bfilm\b)/iu.test(value)) types.add('movie');
-  if (/(?:电视剧|连续剧|韩剧|日剧|美剧|国产剧|\bseries\b|\bdrama\b)/iu.test(value)) {
-    types.add('series');
-  }
-  if (/(?:综艺|\bvariety\b)/iu.test(value)) types.add('variety');
-  if (/(?:纪录片|记录片|\bdocumentary\b)/iu.test(value)) types.add('documentary');
-
-  return types.size === 1 ? [...types][0] : undefined;
+  const classified = classifyMediaTypeLabels([type, typeDescription]);
+  return classified === 'unknown' ? undefined : classified;
 }
 
 export function adaptDanmuMatchCandidate(candidate: DanmuMatchCandidate): DanmakuMediaCandidate {

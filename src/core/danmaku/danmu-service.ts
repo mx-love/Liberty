@@ -257,6 +257,13 @@ function applyManualEpisodeSelection(
       reason: `The manually selected episodeId ${episodeId} is not an identity-compatible candidate`,
     };
   }
+  const selectedIdentity = parseEpisode(selected.episodeTitle);
+  if (resolution.bindingScope === null && selectedIdentity.contentType === 'movie') {
+    return {
+      ok: false,
+      reason: 'A manual item choice cannot bypass the unique whole-media structure requirement',
+    };
+  }
 
   return {
     ok: true,
@@ -264,6 +271,7 @@ function applyManualEpisodeSelection(
       ...resolution,
       state: resolution.state === 'verified' ? 'verified' : 'supported',
       selected,
+      bindingScope: resolution.bindingScope ?? 'canonical_episode',
       reason: `The user confirmed identity-compatible danmu episode ${episodeId}`,
     },
   };
@@ -621,6 +629,13 @@ export class DanmuService {
         episodeResolution,
       });
     }
+    const bindingScope = episodeResolution.bindingScope;
+    if (bindingScope === null) {
+      return emptyResult('episode-uncertain', 'Episode resolution did not establish a binding scope', {
+        candidateResolution,
+        episodeResolution,
+      });
+    }
 
     const mappingState = candidateResolution.state === 'verified' && episodeResolution.state === 'verified'
       ? 'verified'
@@ -634,7 +649,7 @@ export class DanmuService {
       danmuEpisodeTitle: selectedEpisode.episodeTitle,
       mappingState,
       selectedBy: candidateResolution.selectedBy,
-      scope: 'canonical_episode',
+      scope: bindingScope,
       evidence: [
         {
           stage: 'media',
@@ -661,7 +676,9 @@ export class DanmuService {
 
     return emptyResult(
       mappingState === 'verified' ? 'binding-verified' : 'binding-supported',
-      'A canonical-episode-scoped danmaku binding was established',
+      bindingScope === 'whole_media'
+        ? 'A whole-media-scoped danmaku binding was established'
+        : 'A canonical-episode-scoped danmaku binding was established',
       { binding, candidateResolution, episodeResolution },
     );
   }

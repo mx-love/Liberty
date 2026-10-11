@@ -6,6 +6,7 @@ import type {
     SourceRecord,
 } from '../types/source.js';
 import { parseEpisode } from '../episode/episode-parser.js';
+import { classifyMediaTypeLabels } from '../identity/media-type-classifier.js';
 import { parseTitle } from '../identity/title-parser.js';
 
 export interface SourceNormalizerContext {
@@ -53,14 +54,7 @@ function parseYear(value: unknown): number | null {
 }
 
 function classifyMediaType(category: unknown): MediaType {
-    const value = cleanText(category).toLowerCase();
-    if (!value) return 'unknown';
-    if (/(动漫|动画|anime)/i.test(value)) return 'anime';
-    if (/(综艺|真人秀|variety)/i.test(value)) return 'variety';
-    if (/(纪录片|纪录|documentary)/i.test(value)) return 'documentary';
-    if (/(电影|影片|movie)/i.test(value)) return 'movie';
-    if (/(电视剧|连续剧|剧集|欧美剧|国产剧|日韩剧|tv)/i.test(value)) return 'series';
-    return 'unknown';
+    return classifyMediaTypeLabels([cleanText(category)], { treatBareTvAsSeries: true });
 }
 
 export function parseSourceEpisodeNumber(
