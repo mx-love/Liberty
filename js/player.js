@@ -1649,7 +1649,7 @@ function createProductionDanmakuContext(title, episodeIndex) {
         rawTitle: String(title || currentVideoTitle || session.title || ''),
         rawYear: params.get('year') || session.year || '',
         rawRemarks: session.remarks || '',
-        rawCategory: session.category || session.type || '',
+        rawCategory: [session.category, session.type].filter(Boolean).join(' '),
         rawDirector: session.director || '',
         rawActors: session.actors || '',
         rawArea: session.area || '',
@@ -4614,9 +4614,13 @@ function saveToHistory(forceImmediate = false) {
 
         try {
             const urlParams = new URLSearchParams(window.location.search);
-            const sourceName = urlParams.get('source') || '';
-            const sourceCode = urlParams.get('source') || '';
-            const id_from_params = urlParams.get('id');
+            const playbackSession = window.LibertyUtils?.playbackState?.readPlaybackSession?.() || {};
+            const sourceCode = urlParams.get('source')
+                || urlParams.get('source_code')
+                || playbackSession.sourceCode
+                || '';
+            const sourceName = playbackSession.sourceName || sourceCode;
+            const id_from_params = urlParams.get('id') || playbackSession.vodId || '';
 
             // ✅ 获取当前播放位置
             let currentPosition = 0;
@@ -4650,10 +4654,22 @@ function saveToHistory(forceImmediate = false) {
                 }
                 return { url };
             }).filter(episode => episode.url);
+            const historyYear = urlParams.get('year')
+                || playbackSession.year
+                || localStorage.getItem('currentVideoYear')
+                || '';
             const videoInfo = {
                 title: currentVideoTitle,
+                year: historyYear,
+                category: playbackSession.category || localStorage.getItem('currentVideoCategory') || '',
+                type: playbackSession.type || localStorage.getItem('currentVideoType') || '',
+                remarks: playbackSession.remarks || localStorage.getItem('currentVideoRemarks') || '',
+                director: playbackSession.director || localStorage.getItem('currentVideoDirector') || '',
+                actors: playbackSession.actors || localStorage.getItem('currentVideoActors') || '',
+                area: playbackSession.area || localStorage.getItem('currentVideoArea') || '',
+                language: playbackSession.language || localStorage.getItem('currentVideoLanguage') || '',
                 directVideoUrl: currentVideoUrl,
-                url: `player.html?url=${encodeURIComponent(currentVideoUrl)}&title=${encodeURIComponent(currentVideoTitle)}&source=${encodeURIComponent(sourceName)}&source_code=${encodeURIComponent(sourceCode)}&id=${encodeURIComponent(id_from_params || '')}&index=${currentEpisodeIndex}&position=${Math.floor(currentPosition)}`,
+                url: `player.html?url=${encodeURIComponent(currentVideoUrl)}&title=${encodeURIComponent(currentVideoTitle)}&year=${encodeURIComponent(historyYear)}&source=${encodeURIComponent(sourceCode)}&source_code=${encodeURIComponent(sourceCode)}&id=${encodeURIComponent(id_from_params)}&index=${currentEpisodeIndex}&position=${Math.floor(currentPosition)}`,
                 episodeIndex: currentEpisodeIndex,
                 sourceName: sourceName,
                 vod_id: id_from_params || '',
@@ -4676,6 +4692,14 @@ function saveToHistory(forceImmediate = false) {
                 existingItem.sourceName = videoInfo.sourceName;
                 existingItem.sourceCode = videoInfo.sourceCode;
                 existingItem.vod_id = videoInfo.vod_id;
+                existingItem.year = videoInfo.year;
+                existingItem.category = videoInfo.category;
+                existingItem.type = videoInfo.type;
+                existingItem.remarks = videoInfo.remarks;
+                existingItem.director = videoInfo.director;
+                existingItem.actors = videoInfo.actors;
+                existingItem.area = videoInfo.area;
+                existingItem.language = videoInfo.language;
                 existingItem.directVideoUrl = videoInfo.directVideoUrl;
                 existingItem.url = videoInfo.url;
                 existingItem.playbackPosition = currentPosition;

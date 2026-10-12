@@ -572,7 +572,7 @@ function extractPart(value) {
   return null;
 }
 function extractContentMarker(value) {
-  const preview = /(?:预告(?:片)?|先导片|先行片|\btrailer\b|\bPV\s*\d*\b)/iu.exec(value);
+  const preview = /(?:预告(?:片)?|先导片|先行片|\btrailer\b|\bteaser\b|\bPV\s*\d*\b)/iu.exec(value);
   if (preview) {
     return {
       contentType: "preview",
@@ -614,7 +614,7 @@ function extractContentMarker(value) {
       evidenceCode: "special_marker"
     };
   }
-  const extra = /(?:番外|加更(?:版)?|花絮|彩蛋|特别节目)/u.exec(value);
+  const extra = /(?:番外|加更(?:版)?|花絮|幕后|特典|彩蛋|特别节目|制作特辑|片段|\bextra\b|\bbonus\b|\bclip\b)/iu.exec(value);
   if (extra) {
     return {
       contentType: "special",
@@ -624,7 +624,7 @@ function extractContentMarker(value) {
       evidenceCode: "special_marker"
     };
   }
-  const special = /(?:特别篇|特别编|特别版)/u.exec(value);
+  const special = /(?:特别篇|特别编|特别版|\bspecial\b)/iu.exec(value);
   if (special) {
     return {
       contentType: "special",
@@ -1425,7 +1425,7 @@ function classifyMediaTypeLabels(values, options = {}) {
   if (/(?:综艺|綜藝|真人秀|\bvariety\b)/iu.test(value)) return "variety";
   if (/(?:纪录片|紀錄片|记录片|紀錄|纪录|\bdocumentary\b)/iu.test(value)) return "documentary";
   if (hasMovie) return "movie";
-  if (/(?:电视剧|電視劇|连续剧|連續劇|剧集|劇集|韩剧|韓劇|日剧|日劇|美剧|美劇|欧美剧|歐美劇|日韩剧|日韓劇|国产剧|國產劇|\bseries\b|\bdrama\b)/iu.test(value)) {
+  if (/(?:电视剧|電視劇|连续剧|連續劇|剧集|劇集|韩剧|韓劇|日剧|日劇|美剧|美劇|欧美剧|歐美劇|日韩剧|日韓劇|国产剧|國產劇|大陆剧|大陸劇|\bseries\b|\bdrama\b)/iu.test(value)) {
     return "series";
   }
   if (options.treatBareTvAsSeries && /\btv(?:series|show)?\b/iu.test(value)) return "series";
@@ -2579,18 +2579,26 @@ function rejected(reason) {
     reason
   };
 }
-function isExplicitWholeMediaEpisode(episode, media) {
+function hasExplicitWholeMediaContradiction(parsed) {
+  return parsed.contentType === "preview" || parsed.contentType === "special" || parsed.contentType === "recap" || parsed.contentType === "interview";
+}
+function isCanonicalMediaTitle(label, media) {
+  const normalizedLabel = parseTitle(label).normalizedBaseTitle.trim().toLocaleLowerCase("en-US");
+  if (!normalizedLabel) return false;
+  return [media.canonicalTitle, ...media.aliases].some((title) => parseTitle(title).normalizedBaseTitle.trim().toLocaleLowerCase("en-US") === normalizedLabel);
+}
+function isWholeMediaCompatibleEpisode(episode, media) {
   const parsed = parsedCanonicalEpisode(episode, media);
-  return (episode.identityState === "confirmed" || episode.identityState === "supported") && parsed.contentType === "movie" && parsed.confidence === "high" && !parsed.ambiguous && parsed.seasonNumber === null && parsed.episodeNumber === null && parsed.absoluteNumber === null && parsed.airDate === null && parsed.evidence.some(({ code }) => code === "movie_marker");
+  return (episode.identityState === "confirmed" || episode.identityState === "supported") && episode.contentType === "movie" && episode.seasonNumber === null && episode.episodeNumber === null && episode.absoluteNumber === null && episode.airDate === null && !hasExplicitWholeMediaContradiction(parsed);
 }
 function resolveUniqueWholeMedia(input) {
-  if (input.media.mediaType !== "movie" || input.media.identityState !== "confirmed" && input.media.identityState !== "supported" || input.canonicalEpisodes.length !== 1 || input.danmuEpisodes.length !== 1 || !isExplicitWholeMediaEpisode(input.targetEpisode, input.media)) {
+  if (input.media.mediaType !== "movie" || input.media.identityState !== "confirmed" && input.media.identityState !== "supported" || input.canonicalEpisodes.length !== 1 || input.danmuEpisodes.length !== 1 || !isWholeMediaCompatibleEpisode(input.targetEpisode, input.media)) {
     return null;
   }
   const selected = input.danmuEpisodes[0];
   if (selected === void 0) return null;
   const parsed = parseEpisode(selected.episodeTitle, { mediaType: input.media.mediaType });
-  if (parsed.contentType !== "movie" || parsed.confidence !== "high" || parsed.ambiguous || parsed.seasonNumber !== null || parsed.episodeNumber !== null || parsed.absoluteNumber !== null || parsed.airDate !== null || !parsed.evidence.some(({ code }) => code === "movie_marker")) {
+  if (hasExplicitWholeMediaContradiction(parsed) && !isCanonicalMediaTitle(selected.episodeTitle, input.media)) {
     return null;
   }
   return {
@@ -2604,12 +2612,12 @@ function resolveUniqueWholeMedia(input) {
       },
       {
         code: "source_sequence_membership",
-        reason: "Each side has exactly one explicit, non-episodic main-feature item"
+        reason: "Each side has exactly one content unit and neither has explicit special-content evidence"
       }
     ],
     rejectionReasons: [],
     bindingScope: "whole_media",
-    reason: "Unique explicit main-feature structure supports a whole-media binding"
+    reason: "Strict movie identity and unique non-special content structure support a whole-media binding"
   };
 }
 function resolveDanmakuEpisode(input) {
@@ -2717,6 +2725,15 @@ function reliableMatchFileName(input) {
   if (input.episode.seasonNumber !== null && input.episode.seasonNumber !== season) return null;
   return `${input.media.canonicalTitle.trim()} S${padEpisodeNumber(season)}E${padEpisodeNumber(episode)}`;
 }
+function hasExplicitWholeMediaContradiction2(parsed) {
+  return parsed.contentType === "preview" || parsed.contentType === "special" || parsed.contentType === "recap" || parsed.contentType === "interview";
+}
+function hasReliableWholeMediaInput(input) {
+  if (input.media.mediaType !== "movie" || input.mediaEpisodes.length !== 1 || input.mediaEpisodes[0]?.canonicalEpisodeId !== input.episode.canonicalEpisodeId || input.episode.contentType !== "movie") {
+    return false;
+  }
+  return !hasExplicitWholeMediaContradiction2(input.sourceEpisode.parsedEpisodeInfo);
+}
 function hasReliableEpisodeIdentity(input) {
   const episode = input.episode;
   if (episode.identityState !== "confirmed" && episode.identityState !== "supported") {
@@ -2725,6 +2742,7 @@ function hasReliableEpisodeIdentity(input) {
   if (episode.episodeNumber !== null || episode.absoluteNumber !== null || episode.airDate !== null) {
     return true;
   }
+  if (hasReliableWholeMediaInput(input)) return true;
   const parsed = parseEpisode(episode.episodeTitle ?? "", {
     mediaType: input.media.mediaType
   });
@@ -3209,6 +3227,39 @@ function mediaScopeId(input) {
 function partKey(value) {
   return value === null ? "-" : String(value);
 }
+function normalizedTitleIdentity(value) {
+  return parseTitle(value).normalizedBaseTitle.trim().toLocaleLowerCase("en-US");
+}
+function hasExplicitWholeMediaContradiction3(parsed) {
+  return parsed.contentType === "preview" || parsed.contentType === "special" || parsed.contentType === "recap" || parsed.contentType === "interview";
+}
+function asStructurallyUniqueMovieItem(parsed) {
+  const movieMarkerEvidence = parsed.evidence.filter(({ code }) => code === "movie_marker");
+  const nonIdentityEvidence = parsed.evidence.filter(
+    ({ code }) => code === "ignored_technical_token" || code === "unrecognized"
+  );
+  const evidence = movieMarkerEvidence.length > 0 ? movieMarkerEvidence : nonIdentityEvidence.length > 0 ? nonIdentityEvidence : [{
+    code: "unrecognized",
+    token: parsed.rawName,
+    reason: "The label is not used as episode identity for a structurally unique movie item"
+  }];
+  return {
+    ...parsed,
+    contentType: "movie",
+    seasonNumber: null,
+    episodeNumber: null,
+    absoluteNumber: null,
+    specialNumber: null,
+    specialKind: null,
+    airDate: null,
+    part: null,
+    numberKind: "none",
+    confidence: movieMarkerEvidence.length > 0 ? "high" : "none",
+    ambiguous: false,
+    evidence,
+    uncertainTokens: movieMarkerEvidence.length > 0 || parsed.rawName.trim() === "" ? [] : [parsed.rawName]
+  };
+}
 function reliableSemanticKey(parsed, mediaSeason) {
   if (parsed.confidence !== "high" || parsed.ambiguous) return null;
   if (parsed.airDate !== null) {
@@ -3263,7 +3314,7 @@ function mediaEvidence(rawTitle, canonicalTitle, releaseYear, season) {
 }
 function rawRecord(input) {
   const rawPlayFrom = input.playGroup ?? input.sourceName ?? input.sourceKey;
-  const rawPlayUrl = input.episodes.map((episode) => episode.rawEntry ?? `${episode.name}$${episode.url}`).join("#");
+  const rawPlayUrl = input.episodes.map((episode) => episode.rawEntry ?? `${stringValue3(episode.name)}$${episode.url}`).join("#");
   return {
     ...input.rawData ?? {},
     vod_id: input.vodId,
@@ -3297,13 +3348,21 @@ function createDanmakuPlaybackContext(input) {
   const mediaId = mediaScopeId(input);
   const playGroupIndex = input.playGroupIndex ?? 0;
   const playGroup = input.playGroup ?? input.sourceName ?? input.sourceKey;
+  const mediaTitleIdentities = new Set(
+    [normalized.rawTitle, canonicalTitle, ...parsedTitle.aliases].map((value) => normalizedTitleIdentity(value)).filter(Boolean)
+  );
   const drafts = input.episodes.map((episode2) => {
-    const parsed = parseEpisode(episode2.name, { mediaType: normalized.mediaType });
+    const rawLabel = stringValue3(episode2.name);
+    const labelParsed = parseEpisode(rawLabel, { mediaType: normalized.mediaType });
+    const labelIsWorkTitle = mediaTitleIdentities.has(normalizedTitleIdentity(rawLabel));
+    const structurallyUniqueMovieItem = normalized.mediaType === "movie" && input.episodes.length === 1 && episode2.url.trim() !== "" && (!hasExplicitWholeMediaContradiction3(labelParsed) || labelIsWorkTitle);
+    const parsed = structurallyUniqueMovieItem ? asStructurallyUniqueMovieItem(labelParsed) : labelParsed;
     return {
       input: episode2,
       parsed,
-      semanticKey: reliableSemanticKey(parsed, mediaSeason),
-      seasonConflict: mediaSeason !== null && parsed.seasonNumber !== null && mediaSeason !== parsed.seasonNumber
+      semanticKey: structurallyUniqueMovieItem ? "movie:whole-media" : reliableSemanticKey(parsed, mediaSeason),
+      seasonConflict: mediaSeason !== null && parsed.seasonNumber !== null && mediaSeason !== parsed.seasonNumber,
+      structurallyUniqueMovieItem
     };
   });
   const semanticCounts = /* @__PURE__ */ new Map();
@@ -3354,7 +3413,7 @@ function createDanmakuPlaybackContext(input) {
     } else if (mapped) {
       mappingState = "mapped";
       mappingEvidence = [
-        `Mapped from reliable parsed episode identity ${draft.semanticKey}`
+        draft.structurallyUniqueMovieItem ? "Mapped as the only non-special content unit of a movie; no episode number was inferred" : `Mapped from reliable parsed episode identity ${draft.semanticKey}`
       ];
     }
     sourceEpisodes.push({
@@ -3379,7 +3438,7 @@ function createDanmakuPlaybackContext(input) {
     rawIndex: playGroupIndex,
     rawName: playGroup,
     displayName: playGroup,
-    rawValue: input.episodes.map((episode2) => episode2.rawEntry ?? `${episode2.name}$${episode2.url}`).join("#"),
+    rawValue: input.episodes.map((episode2) => episode2.rawEntry ?? `${stringValue3(episode2.name)}$${episode2.url}`).join("#"),
     episodes: sourceEpisodes
   };
   const sourceRecord = {

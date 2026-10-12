@@ -1995,18 +1995,19 @@ async function showDetails(id, vod_name, sourceCode) {
         const modal = document.getElementById('modal');
         const modalTitle = document.getElementById('modalTitle');
         const modalContent = document.getElementById('modalContent');
+        const rawVideoInfo = data.videoInfo || {};
+        const sourceVideoTitle = rawVideoInfo.title || vod_name || '未知视频';
 
         // 显示来源信息
-        const sourceName = data.videoInfo && data.videoInfo.source_name ?
-            ` <span class="text-sm font-normal text-gray-400">(${escapeHtml(data.videoInfo.source_name)})</span>` : '';
+        const sourceName = rawVideoInfo.source_name ?
+            ` <span class="text-sm font-normal text-gray-400">(${escapeHtml(rawVideoInfo.source_name)})</span>` : '';
 
         // 不对标题进行截断处理，允许完整显示
-        modalTitle.innerHTML = `<span class="break-words">${escapeHtml(vod_name || '未知视频')}</span>${sourceName}`;
-        currentVideoTitle = vod_name || '未知视频';
-		currentVideoYear = (data.videoInfo && data.videoInfo.year) ? String(data.videoInfo.year) : ''; // 新增
-        const rawVideoInfo = data.videoInfo || {};
+        modalTitle.innerHTML = `<span class="break-words">${escapeHtml(sourceVideoTitle)}</span>${sourceName}`;
+        currentVideoTitle = sourceVideoTitle;
+		currentVideoYear = rawVideoInfo.year ? String(rawVideoInfo.year) : ''; // 新增
         currentVideoMetadata = {
-            category: rawVideoInfo.category || '',
+            category: rawVideoInfo.category || rawVideoInfo.type || '',
             type: rawVideoInfo.type || '',
             remarks: rawVideoInfo.remarks || '',
             director: rawVideoInfo.director || '',
@@ -2183,6 +2184,7 @@ function playVideo(url, vod_name, sourceCode, episodeIndex = 0, vodId = '') {
             localStorage.setItem('currentEpisodeEntries', JSON.stringify(currentEpisodes));
             localStorage.setItem('currentEpisodeIndex', episodeIndex);
             localStorage.setItem('currentSourceCode', sourceCode || '');
+            localStorage.setItem('currentVodId', vodId || '');
         }
         localStorage.setItem('lastPlayTime', Date.now());
         localStorage.setItem('lastSearchPage', currentPath);

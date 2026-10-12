@@ -109,6 +109,34 @@ function reliableMatchFileName(input: DanmakuResolveInput): string | null {
   return `${input.media.canonicalTitle.trim()} S${padEpisodeNumber(season)}E${padEpisodeNumber(episode)}`;
 }
 
+function hasExplicitWholeMediaContradiction(
+  parsed: ReturnType<typeof parseEpisode>,
+): boolean {
+  return (
+    parsed.contentType === 'preview' ||
+    parsed.contentType === 'special' ||
+    parsed.contentType === 'recap' ||
+    parsed.contentType === 'interview'
+  );
+}
+
+function hasReliableWholeMediaInput(input: DanmakuResolveInput): boolean {
+  if (
+    input.media.mediaType !== 'movie' ||
+    input.mediaEpisodes.length !== 1 ||
+    input.mediaEpisodes[0]?.canonicalEpisodeId !== input.episode.canonicalEpisodeId ||
+    input.episode.contentType !== 'movie'
+  ) {
+    return false;
+  }
+
+  // The playback adapter has already converted a unique, non-contradictory
+  // movie content unit into an explicit whole-media mapping. Reuse that
+  // parsed source boundary here instead of reparsing a work title that may
+  // legitimately contain words such as "Special" or "Trailer".
+  return !hasExplicitWholeMediaContradiction(input.sourceEpisode.parsedEpisodeInfo);
+}
+
 function hasReliableEpisodeIdentity(input: DanmakuResolveInput): boolean {
   const episode = input.episode;
   if (episode.identityState !== 'confirmed' && episode.identityState !== 'supported') {
@@ -121,6 +149,8 @@ function hasReliableEpisodeIdentity(input: DanmakuResolveInput): boolean {
   ) {
     return true;
   }
+
+  if (hasReliableWholeMediaInput(input)) return true;
 
   const parsed = parseEpisode(episode.episodeTitle ?? '', {
     mediaType: input.media.mediaType,

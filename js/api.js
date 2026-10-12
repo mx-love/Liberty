@@ -239,10 +239,12 @@ function buildDetailPayload(videoDetail, detailUrl, sourceCode) {
             cover: videoDetail.vod_pic,
             desc: videoDetail.vod_content,
             type: videoDetail.type_name,
+            category: videoDetail.vod_class || videoDetail.type_name,
             year: videoDetail.vod_year,
             area: videoDetail.vod_area,
             director: videoDetail.vod_director,
             actor: videoDetail.vod_actor,
+            language: videoDetail.vod_lang,
             remarks: videoDetail.vod_remarks,
             source_name: sourceCode === 'custom' ? '自定义源' : API_SITES[sourceCode].name,
             source_code: sourceCode

@@ -223,6 +223,80 @@ test('a unique explicit movie main feature resolves with whole-media scope witho
   assert.ok(resolution.evidence.some(({ code }) => code === 'source_sequence_membership'));
 });
 
+test('whole-media resolution uses unique structure when labels are absent or non-semantic', async (t) => {
+  for (const [name, sourceLabel, danmuLabel] of [
+    ['empty labels', '', ''],
+    ['numeric source and work-title danmu label', '1', 'Fixture Movie'],
+    ['quality source and empty danmu label', 'HD', ''],
+  ]) {
+    await t.test(name, () => {
+      const canonicalEpisodes = [canonicalEpisode(sourceLabel, 0, {
+        contentType: 'movie',
+        seasonNumber: null,
+        episodeNumber: null,
+        absoluteNumber: null,
+        airDate: null,
+        identityState: 'supported',
+      })];
+      const media = canonicalMedia(canonicalEpisodes, {
+        mediaType: 'movie',
+        canonicalTitle: 'Fixture Movie',
+      });
+      const resolution = resolveDanmakuEpisode({
+        media,
+        targetEpisode: canonicalEpisodes[0],
+        canonicalEpisodes,
+        danmuEpisodes: [danmuEpisode(danmuLabel, 0)],
+      });
+
+      assert.equal(canonicalEpisodes[0].episodeNumber, null);
+      assert.equal(resolution.state, 'supported');
+      assert.equal(resolution.bindingScope, 'whole_media');
+      assert.equal(resolution.selected?.episodeTitle, danmuLabel);
+    });
+  }
+});
+
+test('a unique danmu label equal to the movie title is not special-content evidence', () => {
+  const canonicalEpisodes = [canonicalEpisode('Midnight Special', 0, {
+    contentType: 'movie',
+    seasonNumber: null,
+    episodeNumber: null,
+    absoluteNumber: null,
+    airDate: null,
+  })];
+  const media = canonicalMedia(canonicalEpisodes, {
+    mediaType: 'movie',
+    canonicalTitle: 'Midnight Special',
+  });
+  const resolution = resolveDanmakuEpisode({
+    media,
+    targetEpisode: canonicalEpisodes[0],
+    canonicalEpisodes,
+    danmuEpisodes: [danmuEpisode('Midnight Special', 0)],
+  });
+
+  assert.equal(resolution.state, 'supported');
+  assert.equal(resolution.bindingScope, 'whole_media');
+});
+
+test('a numbered canonical movie episode is not reinterpreted as whole-media scope', () => {
+  const canonicalEpisodes = [canonicalEpisode('E1', 0)];
+  const resolution = resolveDanmakuEpisode({
+    media: canonicalMedia(canonicalEpisodes, {
+      mediaType: 'movie',
+      canonicalTitle: 'Fixture Movie',
+    }),
+    targetEpisode: canonicalEpisodes[0],
+    canonicalEpisodes,
+    danmuEpisodes: [danmuEpisode('', 0)],
+  });
+
+  assert.equal(canonicalEpisodes[0].episodeNumber, 1);
+  assert.equal(resolution.selected, null);
+  assert.equal(resolution.bindingScope, null);
+});
+
 test('whole-media resolution requires one unambiguous item on both sides', async (t) => {
   await t.test('one source item and two danmu main-feature items remain uncertain', () => {
     const canonicalEpisodes = canonicalSequence(['正片']);
@@ -254,7 +328,10 @@ test('whole-media resolution requires one unambiguous item on both sides', async
 
   await t.test('trailers, PVs and special extras cannot be promoted to the movie main feature', () => {
     const canonicalEpisodes = canonicalSequence(['正片']);
-    for (const label of ['预告片', 'PV', 'trailer', 'SP', '花絮']) {
+    for (const label of [
+      '预告片', 'PV', 'trailer', 'Teaser', 'SP', '花絮', '幕后', '特典',
+      'Special', 'Extra', 'Bonus', 'Clip', '片段', '采访', '制作特辑',
+    ]) {
       const resolution = resolveDanmakuEpisode({
         media: canonicalMedia(canonicalEpisodes, { mediaType: 'movie' }),
         targetEpisode: canonicalEpisodes[0],

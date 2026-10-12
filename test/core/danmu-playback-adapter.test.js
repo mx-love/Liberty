@@ -114,6 +114,99 @@ test('technical and ambiguous numeric labels remain uncertain and never fall bac
     }
 });
 
+test('a structurally unique movie item can use whole-media identity without a semantic label', () => {
+    for (const rawName of [null, '', '1', 'HD', 'Example Movie']) {
+        const context = createDanmakuPlaybackContext(playback({
+            rawTitle: 'Example Movie',
+            rawCategory: '电影',
+            rawYear: '2025',
+            rawRemarks: '',
+            episodes: [episode(0, rawName, `movie-${String(rawName)}`)],
+            currentEpisodeIndex: 0,
+        }));
+
+        assert.equal(context.state, 'ready', String(rawName));
+        assert.equal(context.media.mediaType, 'movie', String(rawName));
+        assert.equal(context.mediaEpisodes.length, 1, String(rawName));
+        assert.equal(context.sourceEpisode?.mappingState, 'mapped', String(rawName));
+        assert.equal(context.episode?.contentType, 'movie', String(rawName));
+        assert.equal(context.episode?.episodeNumber, null, String(rawName));
+        assert.equal(context.episode?.absoluteNumber, null, String(rawName));
+        assert.equal(context.sourceEpisode?.parsedEpisodeInfo.episodeNumber, null, String(rawName));
+        assert.equal(context.sourceEpisode?.parsedEpisodeInfo.numberKind, 'none', String(rawName));
+        assert.ok(
+            context.sourceEpisode?.mappingEvidence.some((item) => item.includes('no episode number')),
+            String(rawName),
+        );
+    }
+});
+
+test('a movie work title remains a label identity even when its title contains a special-content word', () => {
+    const context = createDanmakuPlaybackContext(playback({
+        rawTitle: 'Midnight Special',
+        rawCategory: 'movie',
+        rawYear: '2025',
+        rawRemarks: '',
+        episodes: [episode(0, 'Midnight Special', 'movie-title')],
+        currentEpisodeIndex: 0,
+    }));
+
+    assert.equal(context.state, 'ready');
+    assert.equal(context.media.mediaType, 'movie');
+    assert.equal(context.sourceEpisode?.mappingState, 'mapped');
+    assert.equal(context.episode?.contentType, 'movie');
+    assert.equal(context.episode?.episodeNumber, null);
+});
+
+test('explicit special-content evidence blocks structural movie mapping', () => {
+    for (const rawName of [
+        '预告片',
+        'PV',
+        'Trailer',
+        'Teaser',
+        '花絮',
+        '幕后',
+        '特典',
+        'SP',
+        'Special',
+        'Extra',
+        'Bonus',
+        'Clip',
+        '片段',
+        '采访',
+        '制作特辑',
+    ]) {
+        const context = createDanmakuPlaybackContext(playback({
+            rawTitle: 'Example Movie',
+            rawCategory: '电影',
+            rawYear: '2025',
+            rawRemarks: '',
+            episodes: [episode(0, rawName, `special-${rawName}`)],
+            currentEpisodeIndex: 0,
+        }));
+
+        assert.equal(context.state, 'uncertain', rawName);
+        assert.equal(context.sourceEpisode?.mappingState, 'unmapped', rawName);
+        assert.equal(context.sourceEpisode?.canonicalEpisodeId, null, rawName);
+    }
+});
+
+test('multiple movie playback items remain conservative even when their labels are weak', () => {
+    const context = createDanmakuPlaybackContext(playback({
+        rawTitle: 'Example Movie',
+        rawCategory: '电影',
+        rawYear: '2025',
+        rawRemarks: '',
+        episodes: [episode(0, '', 'movie-a'), episode(1, 'HD', 'movie-b')],
+        currentEpisodeIndex: 0,
+    }));
+
+    assert.equal(context.state, 'uncertain');
+    assert.equal(context.media.mediaType, 'movie');
+    assert.equal(context.sourceEpisodes.length, 2);
+    assert.ok(context.sourceEpisodes.every((item) => item.mappingState === 'unmapped'));
+});
+
 test('duplicate explicit E12 entries are conflicting instead of selecting the first row', () => {
     const context = createDanmakuPlaybackContext(playback({
         episodes: [episode(4, 'E12', 'a'), episode(8, '第12集', 'b')],

@@ -527,6 +527,27 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
         let syncSuccessful = false;
         let storedPlayGroup = '';
         let storedPlayGroupIndex = null;
+        const historyUrlParams = new URLSearchParams(new URL(url, window.location.origin).search);
+        const normalizeMediaMetadata = (input = {}) => ({
+            title: String(input.title ?? input.vod_name ?? ''),
+            year: String(input.year ?? input.vod_year ?? ''),
+            category: String(input.category ?? input.type_name ?? input.vod_class ?? ''),
+            type: String(input.type ?? input.type_name ?? ''),
+            remarks: String(input.remarks ?? input.vod_remarks ?? ''),
+            director: String(input.director ?? input.vod_director ?? ''),
+            actors: String(input.actors ?? input.actor ?? input.vod_actor ?? ''),
+            area: String(input.area ?? input.vod_area ?? ''),
+            language: String(input.language ?? input.lang ?? input.vod_lang ?? '')
+        });
+        const mergeMediaMetadata = (current, source) => {
+            const next = { ...current };
+            const normalized = normalizeMediaMetadata(source);
+            for (const [field, value] of Object.entries(normalized)) {
+                if (value.trim()) next[field] = value;
+            }
+            return next;
+        };
+        let restoredMediaMetadata = normalizeMediaMetadata({ title });
 
         // 检查viewingHistory，查找匹配的项
         const historyRaw = localStorage.getItem('viewingHistory');
@@ -539,6 +560,7 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
             }
 
             if (historyItem) {
+                restoredMediaMetadata = mergeMediaMetadata(restoredMediaMetadata, historyItem);
                 const storedEpisodeEntries = Array.isArray(historyItem.episodeEntries)
                     ? historyItem.episodeEntries
                     : [];
@@ -561,8 +583,22 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
             }
         }
 
+        const restoredSourceCode = String(
+            historyItem?.sourceCode
+            || historyUrlParams.get('source_code')
+            || historyUrlParams.get('source')
+            || ''
+        );
+        const restoredSourceName = String(historyItem?.sourceName || restoredSourceCode);
+        const restoredVodId = String(
+            historyItem?.vod_id
+            || historyItem?.vodId
+            || historyUrlParams.get('id')
+            || ''
+        );
+
         // Always attempt to fetch fresh episode list if we have the necessary info
-        if (historyItem && historyItem.vod_id && historyItem.sourceName) {
+        if (historyItem && restoredVodId && restoredSourceCode) {
             // Show loading toast to indicate syncing
             showToast('正在同步最新剧集列表...', 'info');
 
@@ -572,7 +608,7 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
                 // historyItem.sourceName is used as the sourceCode here
                 // Add a cache buster timestamp
                 const timestamp = new Date().getTime();
-                const apiUrl = `/api/detail?id=${encodeURIComponent(historyItem.vod_id)}&source=${encodeURIComponent(historyItem.sourceName)}&_t=${timestamp}`;
+                const apiUrl = `/api/detail?id=${encodeURIComponent(restoredVodId)}&source=${encodeURIComponent(restoredSourceCode)}&_t=${timestamp}`;
 
                 // Add timeout to the fetch request
                 const controller = new AbortController();
@@ -587,6 +623,14 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
                     throw new Error(`API request failed with status ${response.status}`);
                 }
                 const videoDetails = await response.json();
+                restoredMediaMetadata = mergeMediaMetadata(
+                    restoredMediaMetadata,
+                    {
+                        ...videoDetails,
+                        ...(videoDetails?.videoInfo || {})
+                    }
+                );
+                Object.assign(historyItem, restoredMediaMetadata);
 
                 const detailPlaySources = Array.isArray(videoDetails?.playSources)
                     ? videoDetails.playSources
@@ -618,27 +662,24 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
                     }
 
                     // console.log(`成功获取 "${title}" 最新剧集列表:`, episodesList.length, "集");
-                    // Update the history item in localStorage with the fresh episodes
-                    if (historyItem) {
-                        const normalizeEpisodeUrls = window.LibertyUtils?.media?.normalizeEpisodeUrls;
-                        historyItem.episodes = normalizeEpisodeUrls
-                            ? normalizeEpisodeUrls(episodesList)
-                            : episodesList.map(episode => (
-                                typeof episode === 'string' ? episode : episode?.url || ''
-                            )).filter(Boolean);
-                        historyItem.episodeEntries = [...episodesList];
-                        historyItem.lastSyncTime = Date.now(); // Add sync timestamp
-                        const history = JSON.parse(historyRaw); // Re-parse to ensure we have the latest version
-                        const idx = history.findIndex(item => item.url === url);
-                        if (idx !== -1) {
-                            history[idx] = { ...history[idx], ...historyItem }; // Merge, ensuring other properties are kept
-                            localStorage.setItem('viewingHistory', JSON.stringify(history));
-                            // console.log("观看历史中的剧集列表已更新。");
-                        }
-                    }
+                    const normalizeEpisodeUrls = window.LibertyUtils?.media?.normalizeEpisodeUrls;
+                    historyItem.episodes = normalizeEpisodeUrls
+                        ? normalizeEpisodeUrls(episodesList)
+                        : episodesList.map(episode => (
+                            typeof episode === 'string' ? episode : episode?.url || ''
+                        )).filter(Boolean);
+                    historyItem.episodeEntries = [...episodesList];
+                    historyItem.lastSyncTime = Date.now(); // Add sync timestamp
                 } else {
                     // console.log(`未能获取 "${title}" 的最新剧集列表，或列表为空。将使用已存储的剧集。`);
                     showToast('未获取到最新剧集信息，使用缓存数据', 'warning');
+                }
+
+                const history = JSON.parse(localStorage.getItem('viewingHistory') || historyRaw || '[]');
+                const idx = history.findIndex(item => item.url === url);
+                if (idx !== -1) {
+                    history[idx] = { ...history[idx], ...historyItem };
+                    localStorage.setItem('viewingHistory', JSON.stringify(history));
                 }
             } catch (fetchError) {
                 // console.error(`获取 "${title}" 最新剧集列表失败:`, fetchError, "将使用已存储的剧集。");
@@ -655,7 +696,7 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
 
 
         // 如果在历史记录中没找到，尝试使用上一个会话的集数数据
-        if (episodesList.length === 0) {
+        if (episodesList.length === 0 && !historyItem) {
             try {
                 const storedEpisodes = JSON.parse(localStorage.getItem('currentEpisodes') || '[]');
                 if (storedEpisodes.length > 0) {
@@ -667,19 +708,51 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
             }
         }
 
-        // 将剧集列表保存到localStorage，播放器页面会读取它
-        if (episodesList.length > 0) {
-            const playbackState = window.LibertyUtils?.playbackState;
-            if (playbackState?.writeCurrentEpisodeEntries) {
-                playbackState.writeCurrentEpisodeEntries(episodesList);
-            } else {
-                const episodeUrls = episodesList.map(episode => (
-                    typeof episode === 'string' ? episode : episode?.url || ''
-                )).filter(Boolean);
-                localStorage.setItem('currentEpisodes', JSON.stringify(episodeUrls));
-                localStorage.setItem('currentEpisodeEntries', JSON.stringify(episodesList));
-            }
-            // console.log(`已将剧集列表保存到localStorage，共 ${episodesList.length} 集`);
+        const restoredTitle = restoredMediaMetadata.title || title || '未知视频';
+
+        // Restore media evidence together with the episode list. Empty fields are
+        // written deliberately so an old history row cannot inherit metadata from
+        // the previously played work.
+        const playbackSession = {
+            title: restoredTitle,
+            year: restoredMediaMetadata.year,
+            category: restoredMediaMetadata.category,
+            type: restoredMediaMetadata.type,
+            remarks: restoredMediaMetadata.remarks,
+            director: restoredMediaMetadata.director,
+            actors: restoredMediaMetadata.actors,
+            area: restoredMediaMetadata.area,
+            language: restoredMediaMetadata.language,
+            sourceName: restoredSourceName,
+            sourceCode: restoredSourceCode,
+            vodId: restoredVodId,
+            episodeIndex
+        };
+        const playbackState = window.LibertyUtils?.playbackState;
+        if (playbackState?.writePlaybackSession) {
+            playbackState.writePlaybackSession({
+                ...playbackSession,
+                episodeEntries: episodesList
+            });
+        } else {
+            localStorage.setItem('currentVideoTitle', playbackSession.title);
+            localStorage.setItem('currentVideoYear', playbackSession.year);
+            localStorage.setItem('currentVideoCategory', playbackSession.category);
+            localStorage.setItem('currentVideoType', playbackSession.type);
+            localStorage.setItem('currentVideoRemarks', playbackSession.remarks);
+            localStorage.setItem('currentVideoDirector', playbackSession.director);
+            localStorage.setItem('currentVideoActors', playbackSession.actors);
+            localStorage.setItem('currentVideoArea', playbackSession.area);
+            localStorage.setItem('currentVideoLanguage', playbackSession.language);
+            localStorage.setItem('currentSourceName', playbackSession.sourceName);
+            localStorage.setItem('currentSourceCode', playbackSession.sourceCode);
+            localStorage.setItem('currentVodId', playbackSession.vodId);
+            localStorage.setItem('currentEpisodeIndex', String(playbackSession.episodeIndex));
+            const episodeUrls = episodesList.map(episode => (
+                typeof episode === 'string' ? episode : episode?.url || ''
+            )).filter(Boolean);
+            localStorage.setItem('currentEpisodes', JSON.stringify(episodeUrls));
+            localStorage.setItem('currentEpisodeEntries', JSON.stringify(episodesList));
         }
 
         // 保存当前页面URL作为返回地址
@@ -693,10 +766,6 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
 
         // 构造播放器URL
         let playerUrl;
-        const sourceNameForUrl = historyItem ? historyItem.sourceName : (new URLSearchParams(new URL(url, window.location.origin).search)).get('source');
-        const sourceCodeForUrl = historyItem ? historyItem.sourceCode || historyItem.sourceName : (new URLSearchParams(new URL(url, window.location.origin).search)).get('source_code');
-        const idForUrl = historyItem ? historyItem.vod_id : '';
-
 
         if (url.includes('player.html') || url.includes('watch.html')) {
             // console.log('检测到嵌套播放链接，解析真实URL');
@@ -705,18 +774,20 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
                 const nestedParams = nestedUrl.searchParams;
                 const realVideoUrl = nestedParams.get('url') || url;
 
-                playerUrl = `player.html?url=${encodeURIComponent(realVideoUrl)}&title=${encodeURIComponent(title)}&index=${episodeIndex}&position=${Math.floor(playbackPosition || 0)}&returnUrl=${encodeURIComponent(currentPath)}`;
-                if (sourceNameForUrl) playerUrl += `&source=${encodeURIComponent(sourceNameForUrl)}`;
-                if (sourceCodeForUrl) playerUrl += `&source_code=${encodeURIComponent(sourceCodeForUrl)}`;
-                if (idForUrl) playerUrl += `&id=${encodeURIComponent(idForUrl)}`;
+                playerUrl = `player.html?url=${encodeURIComponent(realVideoUrl)}&title=${encodeURIComponent(restoredTitle)}&index=${episodeIndex}&position=${Math.floor(playbackPosition || 0)}&returnUrl=${encodeURIComponent(currentPath)}`;
+                if (restoredSourceCode) playerUrl += `&source=${encodeURIComponent(restoredSourceCode)}`;
+                if (restoredSourceCode) playerUrl += `&source_code=${encodeURIComponent(restoredSourceCode)}`;
+                if (restoredVodId) playerUrl += `&id=${encodeURIComponent(restoredVodId)}`;
+                if (restoredMediaMetadata.year) playerUrl += `&year=${encodeURIComponent(restoredMediaMetadata.year)}`;
 
 
             } catch (e) {
                 // console.error('解析嵌套URL出错:', e);
-                playerUrl = `player.html?url=${encodeURIComponent(url)}&title=${encodeURIComponent(title)}&index=${episodeIndex}&position=${Math.floor(playbackPosition || 0)}&returnUrl=${encodeURIComponent(currentPath)}`;
-                if (sourceNameForUrl) playerUrl += `&source=${encodeURIComponent(sourceNameForUrl)}`;
-                if (sourceCodeForUrl) playerUrl += `&source_code=${encodeURIComponent(sourceCodeForUrl)}`;
-                if (idForUrl) playerUrl += `&id=${encodeURIComponent(idForUrl)}`;
+                playerUrl = `player.html?url=${encodeURIComponent(url)}&title=${encodeURIComponent(restoredTitle)}&index=${episodeIndex}&position=${Math.floor(playbackPosition || 0)}&returnUrl=${encodeURIComponent(currentPath)}`;
+                if (restoredSourceCode) playerUrl += `&source=${encodeURIComponent(restoredSourceCode)}`;
+                if (restoredSourceCode) playerUrl += `&source_code=${encodeURIComponent(restoredSourceCode)}`;
+                if (restoredVodId) playerUrl += `&id=${encodeURIComponent(restoredVodId)}`;
+                if (restoredMediaMetadata.year) playerUrl += `&year=${encodeURIComponent(restoredMediaMetadata.year)}`;
             }
         } else {
              // This case should ideally not happen if 'url' is always a player.html link from history
@@ -727,9 +798,11 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
             }
             playUrl.searchParams.set('position', Math.floor(playbackPosition || 0).toString());
             playUrl.searchParams.set('returnUrl', encodeURIComponent(currentPath));
-            if (sourceNameForUrl) playUrl.searchParams.set('source', sourceNameForUrl);
-            if (sourceCodeForUrl) playUrl.searchParams.set('source_code', sourceCodeForUrl);
-            if (idForUrl) playUrl.searchParams.set('id', idForUrl);
+            playUrl.searchParams.set('title', restoredTitle);
+            if (restoredSourceCode) playUrl.searchParams.set('source', restoredSourceCode);
+            if (restoredSourceCode) playUrl.searchParams.set('source_code', restoredSourceCode);
+            if (restoredVodId) playUrl.searchParams.set('id', restoredVodId);
+            if (restoredMediaMetadata.year) playUrl.searchParams.set('year', restoredMediaMetadata.year);
             playerUrl = playUrl.toString();
         }
 

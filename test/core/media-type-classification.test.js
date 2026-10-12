@@ -39,6 +39,8 @@ const classificationCases = [
     ['动漫', 'anime'],
     ['动画剧集', 'anime'],
     ['电视剧', 'series'],
+    ['大陆剧', 'series'],
+    ['大陸劇', 'series'],
     ['欧美剧', 'series'],
     ['日韩剧', 'series'],
     ['电影', 'movie'],

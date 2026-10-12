@@ -38,7 +38,7 @@ export function classifyMediaTypeLabels(
   if (/(?:综艺|綜藝|真人秀|\bvariety\b)/iu.test(value)) return 'variety';
   if (/(?:纪录片|紀錄片|记录片|紀錄|纪录|\bdocumentary\b)/iu.test(value)) return 'documentary';
   if (hasMovie) return 'movie';
-  if (/(?:电视剧|電視劇|连续剧|連續劇|剧集|劇集|韩剧|韓劇|日剧|日劇|美剧|美劇|欧美剧|歐美劇|日韩剧|日韓劇|国产剧|國產劇|\bseries\b|\bdrama\b)/iu.test(value)) {
+  if (/(?:电视剧|電視劇|连续剧|連續劇|剧集|劇集|韩剧|韓劇|日剧|日劇|美剧|美劇|欧美剧|歐美劇|日韩剧|日韓劇|国产剧|國產劇|大陆剧|大陸劇|\bseries\b|\bdrama\b)/iu.test(value)) {
     return 'series';
   }
   if (options.treatBareTvAsSeries && /\btv(?:series|show)?\b/iu.test(value)) return 'series';

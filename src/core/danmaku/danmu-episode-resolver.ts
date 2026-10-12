@@ -3,6 +3,7 @@ import type { CanonicalMedia } from '../types/media.js';
 import type { SourceEpisode } from '../types/source.js';
 import { parseEpisode } from '../episode/episode-parser.js';
 import { resolveEpisode } from '../episode/episode-resolver.js';
+import { parseTitle } from '../identity/title-parser.js';
 import type {
   DanmakuEpisodeResolution,
   DanmuEpisode,
@@ -140,21 +141,36 @@ function rejected(reason: string): DanmakuEpisodeResolution {
   };
 }
 
-function isExplicitWholeMediaEpisode(
+function hasExplicitWholeMediaContradiction(parsed: ParsedEpisodeInfo): boolean {
+  return (
+    parsed.contentType === 'preview' ||
+    parsed.contentType === 'special' ||
+    parsed.contentType === 'recap' ||
+    parsed.contentType === 'interview'
+  );
+}
+
+function isCanonicalMediaTitle(label: string, media: CanonicalMedia): boolean {
+  const normalizedLabel = parseTitle(label).normalizedBaseTitle.trim().toLocaleLowerCase('en-US');
+  if (!normalizedLabel) return false;
+  return [media.canonicalTitle, ...media.aliases].some((title) => (
+    parseTitle(title).normalizedBaseTitle.trim().toLocaleLowerCase('en-US') === normalizedLabel
+  ));
+}
+
+function isWholeMediaCompatibleEpisode(
   episode: CanonicalEpisode,
   media: CanonicalMedia,
 ): boolean {
   const parsed = parsedCanonicalEpisode(episode, media);
   return (
     (episode.identityState === 'confirmed' || episode.identityState === 'supported') &&
-    parsed.contentType === 'movie' &&
-    parsed.confidence === 'high' &&
-    !parsed.ambiguous &&
-    parsed.seasonNumber === null &&
-    parsed.episodeNumber === null &&
-    parsed.absoluteNumber === null &&
-    parsed.airDate === null &&
-    parsed.evidence.some(({ code }) => code === 'movie_marker')
+    episode.contentType === 'movie' &&
+    episode.seasonNumber === null &&
+    episode.episodeNumber === null &&
+    episode.absoluteNumber === null &&
+    episode.airDate === null &&
+    !hasExplicitWholeMediaContradiction(parsed)
   );
 }
 
@@ -166,7 +182,7 @@ function resolveUniqueWholeMedia(
     (input.media.identityState !== 'confirmed' && input.media.identityState !== 'supported') ||
     input.canonicalEpisodes.length !== 1 ||
     input.danmuEpisodes.length !== 1 ||
-    !isExplicitWholeMediaEpisode(input.targetEpisode, input.media)
+    !isWholeMediaCompatibleEpisode(input.targetEpisode, input.media)
   ) {
     return null;
   }
@@ -175,14 +191,8 @@ function resolveUniqueWholeMedia(
   if (selected === undefined) return null;
   const parsed = parseEpisode(selected.episodeTitle, { mediaType: input.media.mediaType });
   if (
-    parsed.contentType !== 'movie' ||
-    parsed.confidence !== 'high' ||
-    parsed.ambiguous ||
-    parsed.seasonNumber !== null ||
-    parsed.episodeNumber !== null ||
-    parsed.absoluteNumber !== null ||
-    parsed.airDate !== null ||
-    !parsed.evidence.some(({ code }) => code === 'movie_marker')
+    hasExplicitWholeMediaContradiction(parsed) &&
+    !isCanonicalMediaTitle(selected.episodeTitle, input.media)
   ) {
     return null;
   }
@@ -198,12 +208,12 @@ function resolveUniqueWholeMedia(
       },
       {
         code: 'source_sequence_membership',
-        reason: 'Each side has exactly one explicit, non-episodic main-feature item',
+        reason: 'Each side has exactly one content unit and neither has explicit special-content evidence',
       },
     ],
     rejectionReasons: [],
     bindingScope: 'whole_media',
-    reason: 'Unique explicit main-feature structure supports a whole-media binding',
+    reason: 'Strict movie identity and unique non-special content structure support a whole-media binding',
   };
 }
 

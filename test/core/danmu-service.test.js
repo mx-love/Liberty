@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
+    createDanmakuPlaybackContext,
     DanmuClient,
     DanmuService,
     parseEpisode,
@@ -482,6 +483,109 @@ test('movie whole-media binding preserves strict media identity and empty-commen
         assert.equal(result.binding, null);
         assert.equal(calls.length, 1);
         assert.ok(calls.every(({ url }) => !url.includes('/api/v2/comment/')));
+    });
+});
+
+test('movie whole-media playback context reaches Service without label-derived E01', async (t) => {
+    for (const [name, sourceLabel, danmuLabel] of [
+        ['missing labels', null, null],
+        ['empty labels', '', ''],
+        ['numeric source and work-title upstream label', '1', 'Structural Movie'],
+        ['quality source and empty upstream label', 'HD', null],
+        ['work title containing a special word', 'Midnight Special', 'Midnight Special'],
+    ]) {
+        await t.test(name, async () => {
+            const title = name === 'work title containing a special word'
+                ? 'Midnight Special'
+                : 'Structural Movie';
+            const context = createDanmakuPlaybackContext({
+                sourceKey: 'fixture-source',
+                sourceName: 'Fixture Source',
+                vodId: `movie-${name}`,
+                rawTitle: title,
+                rawYear: '2025',
+                rawCategory: 'movie',
+                episodes: [{
+                    rawIndex: 0,
+                    name: sourceLabel,
+                    url: 'https://media.example.test/movie.m3u8',
+                }],
+                currentEpisodeIndex: 0,
+            });
+            assert.equal(context.state, 'ready');
+            assert.equal(context.episode?.episodeNumber, null);
+            assert.equal(context.sourceEpisode?.parsedEpisodeInfo.episodeNumber, null);
+
+            const animeId = `movie-${name}`;
+            const { service, calls } = recordingService([
+                searchResponse([searchAnime({
+                    animeId,
+                    animeTitle: title,
+                    type: 'movie',
+                    typeDescription: 'movie',
+                })]),
+                bangumiResponse(animeId, title, [{
+                    episodeId: `${animeId}-item`,
+                    episodeTitle: danmuLabel,
+                }]),
+                commentsResponse(),
+            ]);
+            const result = await service.resolve({
+                media: context.media,
+                episode: context.episode,
+                mediaEpisodes: context.mediaEpisodes,
+                sourceEpisode: context.sourceEpisode,
+            });
+
+            assert.equal(result.state, 'success');
+            assert.equal(result.binding?.scope, 'whole_media');
+            assert.equal(result.binding?.danmuEpisodeId, `${animeId}-item`);
+            assert.equal(calls.filter(({ url }) => url.includes('/api/v2/comment/')).length, 1);
+            assert.ok(calls.every(({ url, init }) => (
+                !url.includes('S01E01') && !String(init.body ?? '').includes('S01E01')
+            )));
+        });
+    }
+
+    await t.test('missing labels with comments=[] remain a legal terminal binding', async () => {
+        const context = createDanmakuPlaybackContext({
+            sourceKey: 'fixture-source',
+            vodId: 'movie-empty-comments',
+            rawTitle: 'Empty Structural Movie',
+            rawYear: '2025',
+            rawCategory: 'movie',
+            episodes: [{
+                rawIndex: 0,
+                name: null,
+                url: 'https://media.example.test/movie-empty.m3u8',
+            }],
+            currentEpisodeIndex: 0,
+        });
+        assert.equal(context.state, 'ready');
+        const { service, calls } = recordingService([
+            searchResponse([searchAnime({
+                animeId: 'movie-empty-comments',
+                animeTitle: 'Empty Structural Movie',
+                type: 'movie',
+                typeDescription: 'movie',
+            })]),
+            bangumiResponse('movie-empty-comments', 'Empty Structural Movie', [{
+                episodeId: 'movie-empty-comments-item',
+                episodeTitle: null,
+            }]),
+            commentsResponse([]),
+        ]);
+        const result = await service.resolve({
+            media: context.media,
+            episode: context.episode,
+            mediaEpisodes: context.mediaEpisodes,
+            sourceEpisode: context.sourceEpisode,
+        });
+
+        assert.equal(result.state, 'comments-empty');
+        assert.equal(result.binding?.scope, 'whole_media');
+        assert.deepEqual(result.comments, []);
+        assert.equal(calls.filter(({ url }) => url.includes('/api/v2/comment/')).length, 1);
     });
 });
 

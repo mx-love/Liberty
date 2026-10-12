@@ -48,13 +48,17 @@ function loadApiMetadataBoundary() {
     const source = sourceBetween(
         apiSource,
         'function isPlayableUrl(',
-        '\nfunction buildDetailPayload('
+        '\nfunction joinUrlPath('
     );
     const context = {
-        M3U8_PATTERN: /\$https?:\/\/[^"'\s]+?\.m3u8/g
+        M3U8_PATTERN: /\$https?:\/\/[^"'\s]+?\.m3u8/g,
+        API_SITES: {
+            fixture: { name: 'Fixture Source' }
+        },
+        window: { LibertyUtils: {} }
     };
     vm.runInNewContext(`${source}\n;globalThis.boundary = {\n` +
-        'parseEpisodeEntry, parseVodPlaySources, buildSinglePlaySourceFromUrls, parseHtmlPlaySources\n' +
+        'parseEpisodeEntry, parseVodPlaySources, buildSinglePlaySourceFromUrls, parseHtmlPlaySources, buildDetailPayload\n' +
         '};', context, { filename: 'js/api.js#metadata-boundary' });
     return context.boundary;
 }
@@ -143,7 +147,17 @@ function createStorage(initial = {}) {
     };
 }
 
-function runAppPlayback({ localStorage, playbackState, episodes, title, year, sourceKey, vodId, episodeIndex }) {
+function runAppPlayback({
+    localStorage,
+    playbackState,
+    episodes,
+    title,
+    year,
+    sourceKey,
+    vodId,
+    episodeIndex,
+    metadata = {}
+}) {
     const source = sourceBetween(
         appSource,
         'function playVideo(',
@@ -160,14 +174,20 @@ function runAppPlayback({ localStorage, playbackState, episodes, title, year, so
         __year: year,
         __sourceKey: sourceKey,
         __vodId: vodId,
-        __episodeIndex: episodeIndex
+        __episodeIndex: episodeIndex,
+        __metadata: metadata
     };
     vm.runInNewContext(`
         let currentVideoYear = globalThis.__year;
         let currentVideoMetadata = {
-            category: '电视剧',
-            type: '电视剧',
-            sourceName: globalThis.__sourceKey
+            category: globalThis.__metadata.category || '电视剧',
+            type: globalThis.__metadata.type || '电视剧',
+            remarks: globalThis.__metadata.remarks || '',
+            director: globalThis.__metadata.director || '',
+            actors: globalThis.__metadata.actors || '',
+            area: globalThis.__metadata.area || '',
+            language: globalThis.__metadata.language || '',
+            sourceName: globalThis.__metadata.sourceName || globalThis.__sourceKey
         };
         let currentEpisodes = globalThis.__episodes;
         function getEpisodeUrl(episode) {
@@ -228,7 +248,8 @@ function runProductionMetadataPipeline(entries, currentEpisodeIndex, options = {
         year,
         sourceKey,
         vodId,
-        episodeIndex: currentEpisodeIndex
+        episodeIndex: currentEpisodeIndex,
+        metadata: options.metadata || {}
     });
     const session = playbackState.readPlaybackSession();
     const playerResult = loadPlayerProductionBoundary(localStorage, playbackState)(
@@ -244,8 +265,31 @@ function runProductionMetadataPipeline(entries, currentEpisodeIndex, options = {
     };
 }
 
-function runProductionHistorySave(entries, episodeIndex = 0) {
-    const localStorage = createStorage();
+function runProductionHistorySave(entries, episodeIndex = 0, metadata = {}) {
+    const playbackSession = {
+        title: metadata.title || 'Example Series 4',
+        year: metadata.year || '',
+        category: metadata.category || '',
+        type: metadata.type || '',
+        remarks: metadata.remarks || '',
+        director: metadata.director || '',
+        actors: metadata.actors || '',
+        area: metadata.area || '',
+        language: metadata.language || '',
+        sourceName: metadata.sourceName || 'fixture-source',
+        sourceCode: metadata.sourceCode || 'fixture-source',
+        vodId: metadata.vodId || 'fixture-vod'
+    };
+    const localStorage = createStorage({
+        currentVideoYear: playbackSession.year,
+        currentVideoCategory: playbackSession.category,
+        currentVideoType: playbackSession.type,
+        currentVideoRemarks: playbackSession.remarks,
+        currentVideoDirector: playbackSession.director,
+        currentVideoActors: playbackSession.actors,
+        currentVideoArea: playbackSession.area,
+        currentVideoLanguage: playbackSession.language
+    });
     const urlHelper = sourceBetween(
         playerSource,
         'function getPlayerEpisodeUrlValue(',
@@ -265,8 +309,16 @@ function runProductionHistorySave(entries, episodeIndex = 0) {
         console,
         __entries: entries,
         __episodeIndex: episodeIndex,
+        __playbackSession: playbackSession,
         window: {
-            location: { search: '?source=subo&id=8199' },
+            location: {
+                search: `?source=${encodeURIComponent(playbackSession.sourceCode)}&id=${encodeURIComponent(playbackSession.vodId)}${metadata.urlYear ? `&year=${encodeURIComponent(metadata.urlYear)}` : ''}`
+            },
+            LibertyUtils: {
+                playbackState: {
+                    readPlaybackSession: () => playbackSession
+                }
+            },
             LibertyDebug: { log() {} }
         }
     };
@@ -277,7 +329,7 @@ function runProductionHistorySave(entries, episodeIndex = 0) {
         let currentEpisodeEntries = globalThis.__entries;
         let currentEpisodes = currentEpisodeEntries.map(entry => entry.url);
         let currentEpisodeIndex = globalThis.__episodeIndex;
-        let currentVideoTitle = '非自然死亡';
+        let currentVideoTitle = globalThis.__playbackSession.title;
         let currentVideoUrl = currentEpisodes[currentEpisodeIndex];
         let art = { video: { currentTime: 120, duration: 2700 } };
         ${urlHelper}
@@ -291,8 +343,14 @@ function runProductionHistorySave(entries, episodeIndex = 0) {
     };
 }
 
-async function runProductionHistoryReplay({ historyItem, detailPayload }) {
+async function runProductionHistoryReplay({
+    historyItem,
+    detailPayload,
+    detailStatus = 200,
+    initialStorage = {}
+}) {
     const localStorage = createStorage({
+        ...initialStorage,
         viewingHistory: JSON.stringify([historyItem])
     });
     const playbackState = loadPlaybackState(localStorage);
@@ -301,6 +359,7 @@ async function runProductionHistoryReplay({ historyItem, detailPayload }) {
         'async function playFromHistory(',
         '\n// 添加观看历史'
     );
+    const fetchUrls = [];
     const context = {
         AbortController,
         URL,
@@ -308,13 +367,16 @@ async function runProductionHistoryReplay({ historyItem, detailPayload }) {
         clearTimeout,
         console,
         encodeURIComponent,
-        fetch: async () => ({
-            ok: true,
-            status: 200,
-            async json() {
-                return detailPayload;
-            }
-        }),
+        fetch: async (requestUrl) => {
+            fetchUrls.push(String(requestUrl));
+            return {
+                ok: detailStatus >= 200 && detailStatus < 300,
+                status: detailStatus,
+                async json() {
+                    return detailPayload;
+                }
+            };
+        },
         localStorage,
         setTimeout,
         window: {
@@ -353,6 +415,7 @@ async function runProductionHistoryReplay({ historyItem, detailPayload }) {
     return {
         localStorage,
         playbackState,
+        fetchUrls,
         openedUrl: context.openedUrl(),
         history: JSON.parse(localStorage.getItem('viewingHistory') || '[]')
     };
@@ -490,6 +553,241 @@ test('history save and replay retain the selected play group and source-provided
     assert.equal(playerResult.context.sourceEpisode?.rawEpisodeName, '第01集');
     assert.equal(playerResult.context.sourceEpisode?.parsedEpisodeInfo.episodeNumber, 1);
     assert.equal(playerResult.context.episode?.episodeNumber, 1);
+});
+
+test('source media metadata reaches first-play CanonicalMedia and history storage', () => {
+    const detail = jsonValue(api.buildDetailPayload({
+        vod_id: 'example-series-4',
+        vod_name: 'Example Series 4',
+        vod_year: '2014',
+        type_name: '电视剧',
+        vod_class: '大陆剧',
+        vod_director: 'Director One',
+        vod_actor: 'Actor One,Actor Two',
+        vod_area: 'Mainland',
+        vod_lang: 'Mandarin',
+        vod_remarks: 'Complete',
+        vod_pic: 'https://images.example.test/cover.jpg',
+        vod_content: '',
+        vod_play_from: 'fixture-line',
+        vod_play_url: 'E1$https://media.example.test/e1.m3u8'
+    }, 'https://api.example.test/detail', 'fixture'));
+    assert.equal(detail.videoInfo.type, '电视剧');
+    assert.equal(detail.videoInfo.category, '大陆剧');
+    assert.equal(detail.videoInfo.language, 'Mandarin');
+
+    const entries = jsonValue(normalizeEpisodeList(detail.episodes));
+    const firstPlay = runProductionMetadataPipeline(entries, 0, {
+        title: detail.videoInfo.title,
+        year: detail.videoInfo.year,
+        sourceKey: 'fixture-code',
+        vodId: 'example-series-4',
+        metadata: {
+            category: detail.videoInfo.category,
+            type: detail.videoInfo.type,
+            director: detail.videoInfo.director,
+            actors: detail.videoInfo.actor,
+            area: detail.videoInfo.area,
+            language: detail.videoInfo.language,
+            sourceName: 'Fixture Display Name'
+        }
+    });
+
+    assert.equal(firstPlay.session.year, '2014');
+    assert.equal(firstPlay.session.category, '大陆剧');
+    assert.equal(firstPlay.session.type, '电视剧');
+    assert.equal(firstPlay.session.sourceCode, 'fixture-code');
+    assert.equal(firstPlay.session.sourceName, 'Fixture Display Name');
+    assert.equal(firstPlay.session.vodId, 'example-series-4');
+    assert.equal(firstPlay.context.media.releaseYear, 2014);
+    assert.equal(firstPlay.context.media.mediaType, 'series');
+    assert.deepEqual(Array.from(firstPlay.context.media.directors), ['Director One']);
+    assert.deepEqual(Array.from(firstPlay.context.media.actors), ['Actor One', 'Actor Two']);
+    assert.equal(firstPlay.context.sourceRecord.rawData.vod_area, 'Mainland');
+    assert.equal(firstPlay.context.sourceRecord.rawData.vod_lang, 'Mandarin');
+
+    const movieFirstPlay = runProductionMetadataPipeline(entries, 0, {
+        title: 'Example Feature',
+        year: '2025',
+        sourceKey: 'fixture-code',
+        vodId: 'example-feature',
+        metadata: {
+            category: 'Action Adventure',
+            type: 'movie',
+            sourceName: 'Fixture Display Name'
+        }
+    });
+    assert.equal(movieFirstPlay.context.media.mediaType, 'movie');
+    assert.equal(movieFirstPlay.context.episode?.episodeNumber, null);
+
+    const saved = runProductionHistorySave(entries, 0, {
+        title: detail.videoInfo.title,
+        year: detail.videoInfo.year,
+        category: detail.videoInfo.category,
+        type: detail.videoInfo.type,
+        director: detail.videoInfo.director,
+        actors: detail.videoInfo.actor,
+        area: detail.videoInfo.area,
+        language: detail.videoInfo.language,
+        sourceName: 'Fixture Display Name',
+        sourceCode: 'fixture-code',
+        vodId: 'example-series-4'
+    });
+    const historyItem = saved.history[0];
+    assert.equal(historyItem.year, '2014');
+    assert.equal(historyItem.category, '大陆剧');
+    assert.equal(historyItem.type, '电视剧');
+    assert.equal(historyItem.sourceName, 'Fixture Display Name');
+    assert.equal(historyItem.sourceCode, 'fixture-code');
+    assert.equal(historyItem.vod_id, 'example-series-4');
+    assert.match(historyItem.url, /[?&]year=2014(?:&|$)/u);
+    assert.match(historyItem.url, /[?&]source=fixture-code(?:&|$)/u);
+    assert.doesNotMatch(historyItem.url, /source=Fixture(?:%20| )Display/u);
+});
+
+test('history save prefers the current URL year over stale playback session metadata', () => {
+    const saved = runProductionHistorySave([{
+        rawIndex: 0,
+        rawEpisodeName: 'E1',
+        displayEpisodeName: 'E1',
+        episodeNameSource: 'source',
+        url: 'https://media.example.test/current-e1.m3u8'
+    }], 0, {
+        year: '1999',
+        urlYear: '2014'
+    });
+
+    assert.equal(saved.history[0].year, '2014');
+    assert.match(saved.history[0].url, /[?&]year=2014(?:&|$)/u);
+});
+
+test('old history uses its real locator to hydrate metadata without treating sourceName as sourceCode', async () => {
+    const episode = {
+        rawIndex: 0,
+        rawEpisodeName: 'E1',
+        displayEpisodeName: 'E1',
+        episodeNameSource: 'source',
+        name: 'E1',
+        url: 'https://media.example.test/legacy-e1.m3u8',
+        rawEntry: 'E1$https://media.example.test/legacy-e1.m3u8'
+    };
+    const oldHistoryItem = {
+        title: 'Example Series 4',
+        sourceName: 'Fixture Display Name',
+        url: 'player.html?url=https%3A%2F%2Fmedia.example.test%2Flegacy-e1.m3u8&source=fixture-code&source_code=fixture-code&id=legacy-vod&index=0',
+        episodeIndex: 0,
+        episodes: [episode.url],
+        episodeEntries: [episode]
+    };
+    const replayed = await runProductionHistoryReplay({
+        historyItem: oldHistoryItem,
+        detailPayload: {
+            videoInfo: {
+                title: 'Example Series 4',
+                year: '2014',
+                type: '电视剧',
+                category: '大陆剧',
+                director: 'Director One',
+                actor: 'Actor One',
+                area: 'Mainland',
+                language: 'Mandarin'
+            },
+            episodes: [episode],
+            playSources: [{ name: 'fixture-line', rawIndex: 0, episodes: [episode] }]
+        }
+    });
+    const session = replayed.playbackState.readPlaybackSession();
+    const playerResult = loadPlayerProductionBoundary(
+        replayed.localStorage,
+        replayed.playbackState
+    )('Example Series 4', 0);
+
+    assert.match(replayed.fetchUrls[0], /[?&]source=fixture-code(?:&|$)/u);
+    assert.doesNotMatch(replayed.fetchUrls[0], /Fixture(?:%20| )Display/u);
+    assert.equal(session.sourceCode, 'fixture-code');
+    assert.equal(session.sourceName, 'Fixture Display Name');
+    assert.equal(session.vodId, 'legacy-vod');
+    assert.equal(session.year, '2014');
+    assert.equal(session.category, '大陆剧');
+    assert.equal(session.type, '电视剧');
+    assert.equal(playerResult.context.media.releaseYear, 2014);
+    assert.equal(playerResult.context.media.mediaType, 'series');
+    assert.match(replayed.openedUrl, /[?&]source=fixture-code(?:&|$)/u);
+    assert.match(replayed.openedUrl, /[?&]id=legacy-vod(?:&|$)/u);
+});
+
+test('failed old-history hydration clears stale media and episode state from another work', async () => {
+    const oldHistoryItem = {
+        title: 'Media B',
+        url: 'player.html?url=https%3A%2F%2Fmedia.example.test%2Fmedia-b.m3u8&source=source-b&source_code=source-b&id=vod-b&index=0',
+        episodeIndex: 0,
+        episodes: [],
+        episodeEntries: []
+    };
+    const replayed = await runProductionHistoryReplay({
+        historyItem: oldHistoryItem,
+        detailPayload: {},
+        detailStatus: 503,
+        initialStorage: {
+            currentVideoTitle: 'Media A',
+            currentVideoYear: '1999',
+            currentVideoCategory: '电视剧',
+            currentVideoType: 'series',
+            currentVideoDirector: 'Media A Director',
+            currentEpisodes: JSON.stringify([
+                'https://media.example.test/a1.m3u8',
+                'https://media.example.test/a2.m3u8'
+            ]),
+            currentEpisodeEntries: JSON.stringify([
+                { rawEpisodeName: 'E1', url: 'https://media.example.test/a1.m3u8' },
+                { rawEpisodeName: 'E2', url: 'https://media.example.test/a2.m3u8' }
+            ])
+        }
+    });
+    const session = replayed.playbackState.readPlaybackSession();
+    const playerResult = loadPlayerProductionBoundary(
+        replayed.localStorage,
+        replayed.playbackState
+    )('Media B', 0);
+
+    assert.match(replayed.fetchUrls[0], /[?&]source=source-b(?:&|$)/u);
+    assert.equal(session.title, 'Media B');
+    assert.equal(session.sourceCode, 'source-b');
+    assert.equal(session.vodId, 'vod-b');
+    assert.equal(session.year, '');
+    assert.equal(session.category, '');
+    assert.equal(session.type, '');
+    assert.equal(session.director, '');
+    assert.deepEqual(Array.from(session.episodes), []);
+    assert.deepEqual(Array.from(session.episodeEntries), []);
+    assert.equal(playerResult.observed.length, 0);
+    assert.equal(playerResult.context.state, 'invalid');
+    assert.equal(playerResult.context.episode, null);
+    assert.equal(playerResult.context.sourceEpisode, null);
+});
+
+test('a legacy display source name is not guessed to be an API source code', async () => {
+    const historyItem = {
+        title: 'Legacy Display Only',
+        sourceName: 'Human Readable Source',
+        url: 'player.html?url=https%3A%2F%2Fmedia.example.test%2Flegacy.m3u8&index=0',
+        episodeIndex: 0,
+        episodes: ['https://media.example.test/legacy.m3u8'],
+        episodeEntries: [{ url: 'https://media.example.test/legacy.m3u8' }]
+    };
+    const replayed = await runProductionHistoryReplay({
+        historyItem,
+        detailPayload: {
+            videoInfo: { year: '2020' }
+        }
+    });
+    const session = replayed.playbackState.readPlaybackSession();
+
+    assert.deepEqual(replayed.fetchUrls, []);
+    assert.equal(session.sourceName, 'Human Readable Source');
+    assert.equal(session.sourceCode, '');
+    assert.equal(session.vodId, '');
+    assert.equal(session.year, '');
 });
 
 test('API URL-only and $URL entries keep a UI label without inventing a raw episode name', () => {

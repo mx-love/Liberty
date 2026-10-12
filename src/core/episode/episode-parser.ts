@@ -84,7 +84,7 @@ function extractPart(value: string): { readonly part: EpisodePart; readonly matc
 }
 
 function extractContentMarker(value: string): ContentMarker | null {
-  const preview = /(?:预告(?:片)?|先导片|先行片|\btrailer\b|\bPV\s*\d*\b)/iu.exec(value);
+  const preview = /(?:预告(?:片)?|先导片|先行片|\btrailer\b|\bteaser\b|\bPV\s*\d*\b)/iu.exec(value);
   if (preview) {
     return {
       contentType: 'preview',
@@ -130,7 +130,7 @@ function extractContentMarker(value: string): ContentMarker | null {
     };
   }
 
-  const extra = /(?:番外|加更(?:版)?|花絮|彩蛋|特别节目)/u.exec(value);
+  const extra = /(?:番外|加更(?:版)?|花絮|幕后|特典|彩蛋|特别节目|制作特辑|片段|\bextra\b|\bbonus\b|\bclip\b)/iu.exec(value);
   if (extra) {
     return {
       contentType: 'special',
@@ -141,7 +141,7 @@ function extractContentMarker(value: string): ContentMarker | null {
     };
   }
 
-  const special = /(?:特别篇|特别编|特别版)/u.exec(value);
+  const special = /(?:特别篇|特别编|特别版|\bspecial\b)/iu.exec(value);
   if (special) {
     return {
       contentType: 'special',

@@ -9,7 +9,7 @@ import type { SourceEpisode, SourcePlayGroup, SourceRecord } from '../types/sour
 export interface DanmakuPlaybackEpisodeInput {
   /** The coordinate supplied by the active playback list. It is never episode identity. */
   readonly rawIndex: number;
-  readonly name: string;
+  readonly name: string | null;
   readonly url: string;
   readonly rawEntry?: string;
 }
@@ -61,6 +61,7 @@ interface EpisodeDraft {
   readonly parsed: ParsedEpisodeInfo;
   readonly semanticKey: string | null;
   readonly seasonConflict: boolean;
+  readonly structurallyUniqueMovieItem: boolean;
 }
 
 function stringValue(value: string | number | null | undefined): string {
@@ -84,6 +85,54 @@ function mediaScopeId(input: DanmakuPlaybackInput): string {
 
 function partKey(value: ParsedEpisodeInfo['part']): string {
   return value === null ? '-' : String(value);
+}
+
+function normalizedTitleIdentity(value: string): string {
+  return parseTitle(value).normalizedBaseTitle.trim().toLocaleLowerCase('en-US');
+}
+
+function hasExplicitWholeMediaContradiction(parsed: ParsedEpisodeInfo): boolean {
+  return (
+    parsed.contentType === 'preview' ||
+    parsed.contentType === 'special' ||
+    parsed.contentType === 'recap' ||
+    parsed.contentType === 'interview'
+  );
+}
+
+function asStructurallyUniqueMovieItem(parsed: ParsedEpisodeInfo): ParsedEpisodeInfo {
+  const movieMarkerEvidence = parsed.evidence.filter(({ code }) => code === 'movie_marker');
+  const nonIdentityEvidence = parsed.evidence.filter(
+    ({ code }) => code === 'ignored_technical_token' || code === 'unrecognized',
+  );
+  const evidence = movieMarkerEvidence.length > 0
+    ? movieMarkerEvidence
+    : nonIdentityEvidence.length > 0
+      ? nonIdentityEvidence
+      : [{
+          code: 'unrecognized' as const,
+          token: parsed.rawName,
+          reason: 'The label is not used as episode identity for a structurally unique movie item',
+        }];
+
+  return {
+    ...parsed,
+    contentType: 'movie',
+    seasonNumber: null,
+    episodeNumber: null,
+    absoluteNumber: null,
+    specialNumber: null,
+    specialKind: null,
+    airDate: null,
+    part: null,
+    numberKind: 'none',
+    confidence: movieMarkerEvidence.length > 0 ? 'high' : 'none',
+    ambiguous: false,
+    evidence,
+    uncertainTokens: movieMarkerEvidence.length > 0 || parsed.rawName.trim() === ''
+      ? []
+      : [parsed.rawName],
+  };
 }
 
 function reliableSemanticKey(
@@ -163,7 +212,7 @@ function mediaEvidence(
 function rawRecord(input: DanmakuPlaybackInput): Readonly<Record<string, unknown>> {
   const rawPlayFrom = input.playGroup ?? input.sourceName ?? input.sourceKey;
   const rawPlayUrl = input.episodes
-    .map((episode) => episode.rawEntry ?? `${episode.name}$${episode.url}`)
+    .map((episode) => episode.rawEntry ?? `${stringValue(episode.name)}$${episode.url}`)
     .join('#');
 
   return {
@@ -210,17 +259,36 @@ export function createDanmakuPlaybackContext(
   const mediaId = mediaScopeId(input);
   const playGroupIndex = input.playGroupIndex ?? 0;
   const playGroup = input.playGroup ?? input.sourceName ?? input.sourceKey;
+  const mediaTitleIdentities = new Set(
+    [normalized.rawTitle, canonicalTitle, ...parsedTitle.aliases]
+      .map((value) => normalizedTitleIdentity(value))
+      .filter(Boolean),
+  );
 
   const drafts: readonly EpisodeDraft[] = input.episodes.map((episode) => {
-    const parsed = parseEpisode(episode.name, { mediaType: normalized.mediaType });
+    const rawLabel = stringValue(episode.name);
+    const labelParsed = parseEpisode(rawLabel, { mediaType: normalized.mediaType });
+    const labelIsWorkTitle = mediaTitleIdentities.has(normalizedTitleIdentity(rawLabel));
+    const structurallyUniqueMovieItem = (
+      normalized.mediaType === 'movie' &&
+      input.episodes.length === 1 &&
+      episode.url.trim() !== '' &&
+      (!hasExplicitWholeMediaContradiction(labelParsed) || labelIsWorkTitle)
+    );
+    const parsed = structurallyUniqueMovieItem
+      ? asStructurallyUniqueMovieItem(labelParsed)
+      : labelParsed;
     return {
       input: episode,
       parsed,
-      semanticKey: reliableSemanticKey(parsed, mediaSeason),
+      semanticKey: structurallyUniqueMovieItem
+        ? 'movie:whole-media'
+        : reliableSemanticKey(parsed, mediaSeason),
       seasonConflict:
         mediaSeason !== null
         && parsed.seasonNumber !== null
         && mediaSeason !== parsed.seasonNumber,
+      structurallyUniqueMovieItem,
     };
   });
   const semanticCounts = new Map<string, number>();
@@ -279,7 +347,9 @@ export function createDanmakuPlaybackContext(
     } else if (mapped) {
       mappingState = 'mapped';
       mappingEvidence = [
-        `Mapped from reliable parsed episode identity ${draft.semanticKey}`,
+        draft.structurallyUniqueMovieItem
+          ? 'Mapped as the only non-special content unit of a movie; no episode number was inferred'
+          : `Mapped from reliable parsed episode identity ${draft.semanticKey}`,
       ];
     }
 
@@ -307,7 +377,7 @@ export function createDanmakuPlaybackContext(
     rawName: playGroup,
     displayName: playGroup,
     rawValue: input.episodes
-      .map((episode) => episode.rawEntry ?? `${episode.name}$${episode.url}`)
+      .map((episode) => episode.rawEntry ?? `${stringValue(episode.name)}$${episode.url}`)
       .join('#'),
     episodes: sourceEpisodes,
   };

@@ -1548,7 +1548,7 @@ test('36. source modal distinguishes a verified binding whose comment request fa
     assert.doesNotMatch(html, /✓ 当前使用/u);
 });
 
-test('37. an empty whole-media binding is terminal, cached, and rendered without a fake E01', async () => {
+test('37. a missing-label empty whole-media binding is terminal, cached, and rendered without a fake E01', async () => {
     const movie = createWork({
         title: 'Celestial Feature',
         animeId: 'celestial-feature-2025',
@@ -1557,7 +1557,7 @@ test('37. an empty whole-media binding is terminal, cached, and rendered without
         typeDescription: '动画电影',
         episodes: [{
             episodeId: 'celestial-main-feature',
-            episodeTitle: '正片',
+            episodeTitle: '',
             episodeNumber: '1',
             airDate: '',
         }],
@@ -1567,7 +1567,13 @@ test('37. an empty whole-media binding is terminal, cached, and rendered without
     setStandardPlayback(harness, {
         title: 'Celestial Feature',
         category: '动画电影',
-        episodes: playbackEpisodes(['正片'], { prefix: 'celestial' }),
+        episodes: [{
+            rawIndex: 0,
+            name: '',
+            rawEpisodeName: '',
+            episodeNameSource: 'generated',
+            url: 'https://media.example.test/celestial-0.m3u8',
+        }],
         index: 0,
     });
 
@@ -1660,4 +1666,50 @@ test('39. a former whole-media binding is not reused after the source becomes mu
     assert.doesNotMatch(html, /data-danmu-status="current"/u);
     assert.doesNotMatch(html, /✓ 当前使用/u);
     assert.match(html, /data-danmu-status="episode-uncertain"/u);
+});
+
+test('40. a missing-label movie auto-selects its provider and applies comments through production', async () => {
+    const movie = createWork({
+        title: 'Unlabelled Feature',
+        animeId: 'unlabelled-feature-2025',
+        animeTitle: 'Unlabelled Feature',
+        type: 'movie',
+        typeDescription: 'movie',
+        episodes: [{
+            episodeId: 'unlabelled-feature-item',
+            episodeTitle: '',
+            episodeNumber: '1',
+            airDate: '',
+        }],
+    });
+    const harness = createHarness({ works: [movie] });
+    setStandardPlayback(harness, {
+        title: 'Unlabelled Feature',
+        category: 'movie',
+        episodes: [{
+            rawIndex: 0,
+            name: '',
+            rawEpisodeName: '',
+            episodeNameSource: 'generated',
+            url: 'https://media.example.test/unlabelled-feature.m3u8',
+        }],
+        index: 0,
+    });
+
+    const result = await harness.api.getDanmuku();
+    const context = harness.api.createContext();
+    const diagnostics = harness.api.debug().lastDanmuMatchInfo;
+
+    assert.equal(context.state, 'ready');
+    assert.equal(context.media.mediaType, 'movie');
+    assert.equal(context.episode?.episodeNumber, null);
+    assert.equal(context.sourceEpisode?.parsedEpisodeInfo.episodeNumber, null);
+    assert.equal(result[0]?.text, 'unlabelled-feature-item comment');
+    assert.equal(diagnostics.bindingScope, 'whole_media');
+    assert.equal(diagnostics.danmuEpisodeId, 'unlabelled-feature-item');
+    assert.equal(commentRequests(harness).length, 1);
+    assert.ok(harness.network.state.calls.every((call) => (
+        !call.url.includes('S01E01') && !JSON.stringify(call.body || {}).includes('S01E01')
+    )));
+    assert.deepEqual(harness.errors, []);
 });
