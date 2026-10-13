@@ -1713,3 +1713,54 @@ test('40. a missing-label movie auto-selects its provider and applies comments t
     )));
     assert.deepEqual(harness.errors, []);
 });
+
+test('41. an explicit third-season title binds E01 without year evidence', async () => {
+    const work = createWork({
+        title: 'Example Competition',
+        animeId: 'example-competition-s3',
+        animeTitle: 'Example Competition 第3季',
+        year: 0,
+        episodes: regularEpisodes([1]),
+    });
+    const harness = createHarness({ works: [work] });
+    setStandardPlayback(harness, {
+        title: 'Example Competition 第三季',
+        year: '',
+        episodes: playbackEpisodes(['第01集'], { prefix: 'competition-s3' }),
+        index: 0,
+    });
+
+    const result = await harness.api.getDanmuku();
+    const matchCall = harness.network.state.calls.find((call) => call.path.endsWith('/api/v2/match'));
+
+    assert.equal(harness.api.createContext().media.season, 3);
+    assert.equal(result[0]?.text, 'dm-e1 comment');
+    assert.equal(matchCall?.body?.fileName, 'Example Competition S03E01');
+    assert.match(commentRequests(harness)[0].path, /\/dm-e1$/u);
+    assert.equal(harness.api.debug().lastDanmuMatchInfo.coreState, 'success');
+});
+
+test('42. source modal displays the season parsed by Core instead of stale raw candidate metadata', async () => {
+    const work = createWork({
+        title: 'Example Competition',
+        animeId: 'example-competition-s3',
+        animeTitle: 'Example Competition 第3季',
+        year: 0,
+        episodes: regularEpisodes([1]),
+    });
+    const harness = createHarness({ works: [work] });
+    setStandardPlayback(harness, {
+        title: 'Example Competition 第三季',
+        year: '',
+        episodes: playbackEpisodes(['第01集'], { prefix: 'competition-s3-modal' }),
+        index: 0,
+    });
+
+    await harness.api.showSourceModal();
+
+    const html = harness.api.sourceModalHtml();
+    assert.match(html, /第3季/u);
+    assert.doesNotMatch(html, /季数未知/u);
+    assert.match(html, /证据支持/u);
+    assert.doesNotMatch(html, /作品身份冲突/u);
+});

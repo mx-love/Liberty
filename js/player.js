@@ -5882,7 +5882,14 @@ async function showDanmuSourceModal() {
     const context = createProductionDanmakuContext(currentVideoTitle, currentEpisodeIndex);
     const modal = document.getElementById('danmuSourceModal');
     const modalContent = document.getElementById('danmuSourceList');
-    if (!runtime || !context || !modal || !modalContent || !runtime.core.adaptDanmuSearchAnime) {
+    if (
+        !runtime
+        || !context
+        || !modal
+        || !modalContent
+        || !runtime.core.adaptDanmuSearchAnime
+        || !runtime.core.adaptDanmakuCandidate
+    ) {
         showToast('Liberty Core V2 尚未就绪', 'error');
         return;
     }
@@ -5930,7 +5937,11 @@ async function showDanmuSourceModal() {
         const isActive = presentation.isActive;
         const rejected = identity.decision === 'rejected';
         const year = candidate.year ? String(candidate.year) : '年份未知';
-        const season = candidate.season ? `第${candidate.season}季` : '季数未知';
+        const candidateIdentity = runtime.core.adaptDanmakuCandidate(candidate);
+        const resolvedSeason = Number.isInteger(candidateIdentity.season) && candidateIdentity.season > 0
+            ? candidateIdentity.season
+            : null;
+        const season = resolvedSeason ? `第${resolvedSeason}季` : '季数未知';
         const evidenceLabel = danmuIdentityDecisionLabel(identity.decision);
         const activeBadge = presentation.state === 'empty'
             ? '暂无弹幕'

@@ -44,6 +44,62 @@ test('candidate adapter reuses parseTitle and preserves missing fields as unknow
     assert.equal(adapted.externalIds.danmu, 'candidate-s2');
 });
 
+test('candidate adapter applies one shared explicit-season grammar without promoting numbered titles', () => {
+    const explicitSeasonTitles = [
+        'Example Show 第三季',
+        'Example Show 第3季',
+        'Example Show 第03季',
+        'Example Show Season 3',
+        'Example Show Season3',
+        'Example Show S3',
+        'Example Show S03',
+    ];
+
+    for (const animeTitle of explicitSeasonTitles) {
+        const adapted = adaptDanmakuCandidate(candidate(animeTitle, { animeTitle }));
+        assert.equal(adapted.parsedTitle.baseTitle, 'Example Show', animeTitle);
+        assert.equal(adapted.parsedTitle.interpretations[0]?.confidence, 'high', animeTitle);
+        assert.equal(adapted.season, 3, animeTitle);
+    }
+
+    const numberedTitle = adaptDanmakuCandidate(candidate('numbered-title', {
+        animeTitle: 'Example Show 4',
+    }));
+    assert.equal(numberedTitle.parsedTitle.baseTitle, 'Example Show 4');
+    assert.equal(numberedTitle.season, null);
+});
+
+test('equal explicit seasons support media identity without a year while conflicts remain blocking', () => {
+    const media = canonicalMedia({
+        canonicalTitle: 'Example Show',
+        releaseYear: null,
+        season: 3,
+        mediaType: 'unknown',
+    });
+    const matching = resolveDanmakuCandidate(media, [candidate('season-3', {
+        animeTitle: 'Example Show 第3季',
+    })]);
+    const conflicting = resolveDanmakuCandidate(media, [candidate('season-4', {
+        animeTitle: 'Example Show 第4季',
+    })]);
+    const unknown = resolveDanmakuCandidate(media, [candidate('season-unknown', {
+        animeTitle: 'Example Show',
+    })]);
+
+    assert.equal(matching.state, 'supported');
+    assert.equal(
+        matching.evaluations[0].identity.evidence.find((item) => item.field === 'season')?.state,
+        'supporting',
+    );
+    assert.equal(conflicting.state, 'conflicting');
+    assert.ok(conflicting.evaluations[0].identity.blockers.some(({ code }) => code === 'season_conflict'));
+    assert.equal(unknown.state, 'uncertain');
+    assert.equal(
+        unknown.evaluations[0].identity.evidence.find((item) => item.field === 'season')?.state,
+        'unknown',
+    );
+});
+
 test('candidate adapter carries only explicit identity metadata into the shared model', () => {
     const rawCandidate = {
         animeId: 'candidate-1',
