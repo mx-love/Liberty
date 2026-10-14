@@ -1,5 +1,9 @@
 import type { CanonicalEpisode, EpisodeResolutionEvidence } from '../types/episode.js';
-import type { CandidateEvidence, IdentityResolution } from '../types/identity.js';
+import type {
+  CandidateEvidence,
+  IdentityResolution,
+  MediaIdentityInput,
+} from '../types/identity.js';
 import type { CanonicalMedia, MediaType } from '../types/media.js';
 import type { SourceEpisode } from '../types/source.js';
 
@@ -113,8 +117,60 @@ export interface DanmakuMediaCandidate {
   readonly areas?: readonly string[];
   readonly languages?: readonly string[];
   readonly externalIds?: Readonly<Record<string, string>>;
+  /** Structured provider/source metadata, when danmu_api supplies it. */
+  readonly provider?: string;
   readonly source?: string;
   readonly rawData?: Readonly<Record<string, unknown>>;
+}
+
+export type DanmakuCandidateMetadataSource =
+  | 'structured_field'
+  | 'parsed_composite_display_field'
+  | 'parsed_identity_title'
+  | 'declared_alias'
+  | 'raw_display_title'
+  | 'unknown';
+
+export interface DanmakuCandidateFieldProvenance<T> {
+  readonly effectiveValue: T | null;
+  readonly structuredValue: T | null;
+  readonly compositeValue: T | null;
+  readonly identityValue: T | null;
+  readonly source: DanmakuCandidateMetadataSource;
+  /** Structured metadata remains authoritative, but disagreement is observable. */
+  readonly conflict: boolean;
+}
+
+export interface DanmakuCandidateAliasProvenance {
+  readonly value: string;
+  readonly source: 'parsed_identity_title' | 'declared_alias';
+}
+
+export interface DanmakuCandidateIdentityProvenance {
+  readonly rawTitle: 'raw_display_title';
+  readonly displayTitle: 'raw_display_title';
+  readonly identityTitle: 'raw_display_title' | 'parsed_composite_display_field';
+  readonly aliases: readonly DanmakuCandidateAliasProvenance[];
+  readonly compositeTypeLabel: string | null;
+  readonly year: DanmakuCandidateFieldProvenance<number>;
+  readonly mediaType: DanmakuCandidateFieldProvenance<MediaType>;
+  readonly season: DanmakuCandidateFieldProvenance<number>;
+  readonly provider: DanmakuCandidateFieldProvenance<string>;
+}
+
+/**
+ * Identity input produced at the danmu_api boundary.
+ *
+ * The raw/display title remains available for UI and diagnostics, while only
+ * identityTitle (after a bounded composite suffix is recognized) is parsed by
+ * the shared TitleParser and sent to EntityResolver.
+ */
+export interface DanmakuCandidateIdentity extends MediaIdentityInput {
+  readonly rawTitle: string;
+  readonly displayTitle: string;
+  readonly identityTitle: string;
+  readonly provider: string | null;
+  readonly provenance: DanmakuCandidateIdentityProvenance;
 }
 
 export type DanmakuCandidateResolutionState =
@@ -126,6 +182,7 @@ export type DanmakuCandidateResolutionState =
 
 export interface DanmakuCandidateEvaluation {
   readonly candidate: DanmakuMediaCandidate;
+  readonly identityInput: DanmakuCandidateIdentity;
   readonly identity: IdentityResolution;
 }
 
