@@ -695,19 +695,6 @@ async function playFromHistory(url, title, episodeIndex, playbackPosition = 0) {
         }
 
 
-        // 如果在历史记录中没找到，尝试使用上一个会话的集数数据
-        if (episodesList.length === 0 && !historyItem) {
-            try {
-                const storedEpisodes = JSON.parse(localStorage.getItem('currentEpisodes') || '[]');
-                if (storedEpisodes.length > 0) {
-                    episodesList = storedEpisodes;
-                    // console.log(`使用localStorage中的集数数据:`, episodesList.length);
-                }
-            } catch (e) {
-                // console.error('解析currentEpisodes失败:', e);
-            }
-        }
-
         const restoredTitle = restoredMediaMetadata.title || title || '未知视频';
 
         // Restore media evidence together with the episode list. Empty fields are

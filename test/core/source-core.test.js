@@ -87,6 +87,70 @@ test('AppleCMS playlist parser retains groups, entries, raw indexes and URLs', (
     assert.equal(groups[1].episodes.length, 1, 'invalid non-HTTP entries retain no playable episode');
 });
 
+test('filtering invalid AppleCMS entries preserves upstream rawIndex and records filteredIndex separately', () => {
+    const [group] = parseAppleCmsPlaySources(
+        'fixture',
+        '101',
+        'line',
+        'E1$https://media.example/1.m3u8#broken-entry#E3$https://media.example/3.m3u8',
+        'series',
+    );
+
+    assert.deepEqual(
+        group.episodes.map((episode) => ({
+            rawIndex: episode.rawIndex,
+            filteredIndex: episode.filteredIndex,
+            episodeNumber: episode.parsedEpisodeInfo.episodeNumber,
+        })),
+        [
+            { rawIndex: 0, filteredIndex: 0, episodeNumber: 1 },
+            { rawIndex: 2, filteredIndex: 1, episodeNumber: 3 },
+        ],
+    );
+});
+
+test('generic missing placeholders do not suppress usable media type evidence', () => {
+    for (const missingType of [null, undefined, '', '   ', 'N/A', 'null', 'undefined', '\u672a\u77e5']) {
+        const record = SourceNormalizer.normalize({
+            vod_id: 'placeholder',
+            vod_name: 'Placeholder Example',
+            type_name: missingType,
+            vod_class: 'TV Drama',
+            vod_tag: 'Series',
+        }, { sourceKey: 'fixture', fetchedAt: 1 });
+        assert.equal(record.mediaType, 'series', String(missingType));
+        assert.equal(record.rawCategory, 'TV Drama', String(missingType));
+    }
+});
+
+test('missing metadata falls back conservatively without fabricating a media type', () => {
+    const animatedMovie = SourceNormalizer.normalize({
+        vod_id: 'animated-movie',
+        vod_name: 'Animated Feature',
+        type_name: '\u672a\u77e5',
+        vod_class: '\u52a8\u753b\u7535\u5f71',
+    }, { sourceKey: 'fixture', fetchedAt: 1 });
+    assert.equal(animatedMovie.mediaType, 'movie');
+
+    const allMissing = SourceNormalizer.normalize({
+        vod_id: 'all-missing',
+        vod_name: 'Unknown Work',
+        type_name: ' N/A ',
+        vod_class: 'null',
+        vod_tag: 'undefined',
+    }, { sourceKey: 'fixture', fetchedAt: 1 });
+    assert.equal(allMissing.mediaType, 'unknown');
+
+    const realValue = SourceNormalizer.normalize({
+        vod_id: 'real-value',
+        vod_name: 'Series Work',
+        type_name: '\u56fd\u4ea7\u5267',
+        vod_class: '',
+    }, { sourceKey: 'fixture', fetchedAt: 1 });
+    assert.equal(realValue.rawCategory, '\u56fd\u4ea7\u5267');
+    assert.equal(realValue.mediaType, 'series');
+});
+
 test('rawIndex and generated display names never become episode-number evidence', () => {
     const groups = parseAppleCmsPlaySources(
         'fixture',

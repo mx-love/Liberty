@@ -66,14 +66,132 @@ function danmuEpisode(label, index, overrides = {}) {
 
 function resolveFixture(canonicalLabels, targetIndex, danmuLabels, options = {}) {
   const canonicalEpisodes = canonicalSequence(canonicalLabels);
-  const danmuEpisodes = danmuLabels.map((label, index) => danmuEpisode(label, index));
+  const danmuEpisodes = danmuLabels.map((label, index) => danmuEpisode(
+    label,
+    index,
+    options.danmuEpisodeOverrides,
+  ));
   return resolveDanmakuEpisode({
     media: canonicalMedia(canonicalEpisodes, options.media),
     targetEpisode: canonicalEpisodes[targetIndex],
     canonicalEpisodes,
     danmuEpisodes,
+    candidateIdentityTitles: options.candidateIdentityTitles,
   });
 }
+
+test('context-aware adapter extracts bounded numeric episode suffixes from validated work titles', async (t) => {
+  for (const [rawTitle, canonicalLabel] of [
+    ['Example Show_01', 'E01'],
+    ['Example Show_1', 'E01'],
+    ['Example Show_02', 'E02'],
+    ['Example Show_10', 'E10'],
+    ['Example Show_24', 'E24'],
+    ['【alpha】Example Show_01', 'E01'],
+    ['Example Show_E01', 'E01'],
+    ['Example Show_E1', 'E01'],
+    ['Example Show_EP01', 'E01'],
+    ['Example Show_EP1', 'E01'],
+    ['Example Show_S03E01', 'S03E01'],
+    ['Example Show_S3E1', 'S03E01'],
+  ]) {
+    await t.test(rawTitle, () => {
+      const resolution = resolveFixture([canonicalLabel], 0, [rawTitle], {
+        media: {
+          canonicalTitle: 'Example Show',
+          season: canonicalLabel.startsWith('S03') ? 3 : null,
+        },
+        danmuEpisodeOverrides: { rawIndex: 37, apiEpisodeNumber: '999' },
+      });
+
+      assert.equal(resolution.state, 'supported');
+      assert.equal(resolution.selected?.episodeTitle, rawTitle);
+      assert.equal(resolution.bindingScope, 'canonical_episode');
+    });
+  }
+});
+
+test('context-aware adapter accepts declared media and validated candidate aliases', async (t) => {
+  await t.test('canonical media alias', () => {
+    const resolution = resolveFixture(['E01'], 0, ['Example Alias_01'], {
+      media: { canonicalTitle: 'Example Show', aliases: ['Example Alias'] },
+    });
+
+    assert.equal(resolution.state, 'supported');
+    assert.equal(resolution.selected?.episodeTitle, 'Example Alias_01');
+  });
+
+  await t.test('validated danmu candidate alias', () => {
+    const resolution = resolveFixture(['E01'], 0, ['Candidate Alias_01'], {
+      media: { canonicalTitle: 'Example Show' },
+      candidateIdentityTitles: ['Candidate Alias'],
+    });
+
+    assert.equal(resolution.state, 'supported');
+    assert.equal(resolution.selected?.episodeTitle, 'Candidate Alias_01');
+  });
+});
+
+test('context-aware adapter rejects non-boundary and non-episode suffixes', async (t) => {
+  for (const rawTitle of [
+    'Example Showcase_01',
+    'Example Show_2024',
+    'Example Show_1080P',
+    'Example Show_720P',
+    'Example Show_2160P',
+    'Example Show_4K',
+    'Example Show_TRAILER',
+    'Example Show_TEASER',
+    'Example Show_PREVIEW',
+    'Example Show_PV',
+    'Example Show_SP',
+    'Example Show_SPECIAL',
+    'Example Show_RECAP',
+    'Example Show_INTERVIEW',
+    'Example Show_PART1',
+    'Example Show_PART2',
+    '【PV】Example Show_01',
+    '【SP】Example Show_01',
+    '【PART1】Example Show_01',
+    'Example Show_国语',
+    'Example Show_粤语',
+    'Example Show_HD',
+  ]) {
+    await t.test(rawTitle, () => {
+      const resolution = resolveFixture(['E01'], 0, [rawTitle], {
+        media: { canonicalTitle: 'Example Show' },
+      });
+
+      assert.equal(resolution.selected, null);
+      assert.equal(resolution.bindingScope, null);
+    });
+  }
+});
+
+test('movie title suffixes stay on whole-media resolution and never invent E01', () => {
+  const canonicalEpisodes = [canonicalEpisode('正片', 0, {
+    contentType: 'movie',
+    seasonNumber: null,
+    episodeNumber: null,
+    absoluteNumber: null,
+    airDate: null,
+  })];
+  const resolution = resolveDanmakuEpisode({
+    media: canonicalMedia(canonicalEpisodes, {
+      mediaType: 'movie',
+      canonicalTitle: 'Example Movie',
+    }),
+    targetEpisode: canonicalEpisodes[0],
+    canonicalEpisodes,
+    danmuEpisodes: [danmuEpisode('Example Movie_01', 0, { apiEpisodeNumber: '1' })],
+    candidateIdentityTitles: ['Example Movie'],
+  });
+
+  assert.equal(canonicalEpisodes[0].episodeNumber, null);
+  assert.equal(resolution.state, 'supported');
+  assert.equal(resolution.bindingScope, 'whole_media');
+  assert.equal(resolution.selected?.episodeTitle, 'Example Movie_01');
+});
 
 test('rawIndex 1 / E12 resolves by the title identity, not index or API episodeNumber', () => {
   const canonicalEpisodes = canonicalSequence(['第11集', '第12集', '第13集']);

@@ -9,7 +9,7 @@ function isPasswordProtected() {
     const pwd = window.__ENV__ && window.__ENV__.PASSWORD;
     
     // 检查普通密码是否有效
-    return typeof pwd === 'string' && pwd.length === 64 && !/^0+$/.test(pwd);
+    return pwd === 'required';
 }
 
 /**
@@ -45,20 +45,26 @@ window.isPasswordRequired = isPasswordRequired;
  */
 async function verifyPassword(password) {
     try {
-        const correctHash = window.__ENV__?.PASSWORD;
-        if (!correctHash) return false;
-
-        const inputHash = await sha256(password);
-        const isValid = inputHash === correctHash;
-
-        if (isValid) {
+        if (!isPasswordProtected() || !password) return false;
+        const response = await fetch('/api/auth-session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            cache: 'no-store',
+            body: JSON.stringify({ password }),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (response.ok && result.success) {
             localStorage.setItem(PASSWORD_CONFIG.localStorageKey, JSON.stringify({
                 verified: true,
                 timestamp: Date.now(),
-                passwordHash: correctHash
+                expiresAt: Number(result.expiresAt) || Date.now() + PASSWORD_CONFIG.verificationTTL,
             }));
+            window.ProxyAuth?.clearAuthCache?.();
+            return true;
         }
-        return isValid;
+        localStorage.removeItem(PASSWORD_CONFIG.localStorageKey);
+        return false;
     } catch (error) {
         console.error('验证密码时出错:', error);
         return false;
@@ -73,11 +79,12 @@ function isPasswordVerified() {
         const stored = localStorage.getItem(PASSWORD_CONFIG.localStorageKey);
         if (!stored) return false;
 
-        const { timestamp, passwordHash } = JSON.parse(stored);
-        const currentHash = window.__ENV__?.PASSWORD;
-
-        return timestamp && passwordHash === currentHash &&
-            Date.now() - timestamp < PASSWORD_CONFIG.verificationTTL;
+        const { verified, timestamp, expiresAt } = JSON.parse(stored);
+        return verified === true
+            && Number.isFinite(timestamp)
+            && Date.now() - timestamp < PASSWORD_CONFIG.verificationTTL
+            && Number.isFinite(expiresAt)
+            && Date.now() < expiresAt;
     } catch (error) {
         console.error('检查密码验证状态时出错:', error);
         return false;
@@ -92,19 +99,7 @@ window.verifyPassword = verifyPassword;
 window.ensurePasswordProtection = ensurePasswordProtection;
 
 // SHA-256实现，可用Web Crypto API
-async function sha256(message) {
-    if (window.crypto && crypto.subtle && crypto.subtle.digest) {
-        const msgBuffer = new TextEncoder().encode(message);
-        const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    }
     // HTTP 下调用原始 js‑sha256
-    if (typeof window._jsSha256 === 'function') {
-        return window._jsSha256(message);
-    }
-    throw new Error('No SHA-256 implementation available.');
-}
 
 /**
  * 显示密码验证弹窗
@@ -113,8 +108,8 @@ function showPasswordModal() {
     const passwordModal = document.getElementById('passwordModal');
     if (passwordModal) {
         // 防止出现豆瓣区域滚动条
-        document.getElementById('doubanArea').classList.add('hidden');
-        document.getElementById('passwordCancelBtn').classList.add('hidden');
+        document.getElementById('doubanArea')?.classList.add('hidden');
+        document.getElementById('passwordCancelBtn')?.classList.add('hidden');
 
         // 检查是否需要强制设置密码
         if (isPasswordRequired()) {
@@ -176,8 +171,8 @@ function hidePasswordModal() {
 
         // 如果启用豆瓣区域则显示豆瓣区域
         if (localStorage.getItem('doubanEnabled') === 'true') {
-            document.getElementById('doubanArea').classList.remove('hidden');
-            initDouban();
+            document.getElementById('doubanArea')?.classList.remove('hidden');
+            if (typeof initDouban === 'function') initDouban();
         }
     }
 }

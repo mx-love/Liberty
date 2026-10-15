@@ -31,11 +31,19 @@ function isDanmuDebugEnabled() {
 }
 
 function danmuDebugLog(...args) {
-    if (isDanmuDebugEnabled()) console.log(...args);
+    if (!isDanmuDebugEnabled()) return;
+    const safeArgs = typeof window.LibertyDebug?.sanitize === 'function'
+        ? args.map((item) => window.LibertyDebug.sanitize(item))
+        : args;
+    console.log(...safeArgs);
 }
 
 function danmuDebugWarn(...args) {
-    if (isDanmuDebugEnabled()) console.warn(...args);
+    if (!isDanmuDebugEnabled()) return;
+    const safeArgs = typeof window.LibertyDebug?.sanitize === 'function'
+        ? args.map((item) => window.LibertyDebug.sanitize(item))
+        : args;
+    console.warn(...safeArgs);
 }
 
 function escapeHtml(value) {
@@ -227,6 +235,7 @@ function goBack(event) {
 // ===== 【增强】页面卸载时的完整清理 =====
 function cleanupResources() {
     window.LibertyDebug.log('🧹 开始彻底清理资源...');
+    invalidatePlayerLifecycle('page-cleanup');
     danmuReloadToken += 1;
     cancelDanmakuRequest('page-cleanup');
 
@@ -239,7 +248,7 @@ function cleanupResources() {
     // 使用 VideoPlayer 的统一销毁方法
     cleanupPlayerShortcuts();
     if (videoPlayer) {
-        videoPlayer.destroy();
+        videoPlayer.destroy({ preserveLifecycle: true });
         videoPlayer = null;
     }
 
@@ -893,20 +902,6 @@ async function addDanmuAuth(url) {
     try {
         const fullUrl = new URL(url, window.location.origin);
 
-        if (fullUrl.pathname.startsWith('/danmu/')) {
-            const passwordHash = window.__ENV__?.PASSWORD;
-
-            if (!passwordHash || passwordHash.length !== 64) {
-                console.warn('弹幕鉴权失败：window.__ENV__.PASSWORD 未正确注入');
-                return fullUrl.toString();
-            }
-
-            fullUrl.searchParams.set('auth', passwordHash);
-            fullUrl.searchParams.set('t', Date.now().toString());
-
-            return fullUrl.toString();
-        }
-
         if (
             fullUrl.origin === window.location.origin &&
             fullUrl.pathname.startsWith('/proxy/') &&
@@ -964,6 +959,14 @@ let activeDanmuReload = null;
 const danmuTerminalResults = new Map();
 const danmuPreferredProviders = new Map();
 const DANMU_TERMINAL_CACHE_LIMIT = 24;
+const DANMU_TRANSIENT_CACHE_MS = 5000;
+const DANMU_TRANSIENT_STATES = new Set([
+    'rate-limited',
+    'network-error',
+    'timeout',
+    'server-error',
+    'invalid-response',
+]);
 const danmuTransactionMetrics = {
     automaticStarted: 0,
     joined: 0,
@@ -1103,13 +1106,20 @@ function logDanmuEpisodeSummary(reason, overrides = {}) {
 window.debugDanmuState = function () {
     const context = createProductionDanmakuContext(currentVideoTitle, currentEpisodeIndex);
     return {
+        playerGeneration: playerLifecycle?.generation ?? 0,
         currentVideoTitle,
         currentVideoYear: getCurrentVideoYearValue(),
+        sourceCode: context?.sourceEpisode?.sourceKey || '',
+        vodId: context?.sourceEpisode?.vodId || '',
+        canonicalMediaId: context?.media?.mediaId || '',
+        canonicalEpisodeId: context?.episode?.canonicalEpisodeId || '',
+        mediaType: context?.media?.mediaType || 'unknown',
+        season: context?.episode?.seasonNumber ?? context?.media?.season ?? null,
         currentEpisodeIndex,
         episodeNumber: context?.episode?.episodeNumber ?? null,
         totalEpisodes: Array.isArray(currentEpisodes) ? currentEpisodes.length : 0,
         currentEpisodeName: getCurrentEpisodeName(currentEpisodeIndex),
-        currentVideoUrl,
+        currentVideoUrl: window.LibertyDebug?.sanitize?.(currentVideoUrl) || '',
         videoIdentity: getVideoIdentity(),
         currentSessionDanmuSource,
         currentDanmuAnimeId,
@@ -1118,6 +1128,8 @@ window.debugDanmuState = function () {
         currentDanmuCacheEpisode: currentDanmuCache?.episodeIndex,
         currentDanmuCacheCount: Array.isArray(currentDanmuCache?.danmuList) ? currentDanmuCache.danmuList.length : 0,
         currentDanmuCacheState: currentDanmuCache?.state || '',
+        bindingScope: currentDanmuCache?.binding?.scope || '',
+        cacheStatus: currentDanmuCache?.key ? 'hit-or-terminal' : 'miss',
         danmuTransactionMetrics: { ...danmuTransactionMetrics },
         lastDanmuMatchInfo,
         lastDanmuFetchStats,
@@ -1378,7 +1390,7 @@ function isDanmuVisibilityDebugEnabled() {
 
 function logDanmakuRuntimeDebug(reason, details = {}) {
     if (!isDanmuVisibilityDebugEnabled()) return;
-    console.log('[DanmuDebug] runtime', {
+    danmuDebugLog('[DanmuDebug] runtime', {
         reason,
         ts: Date.now(),
         isPlaying: Boolean(art?.playing),
@@ -1404,7 +1416,7 @@ function getDanmuPluginVisibleState(danmukuPlugin = getDanmukuPlugin()) {
 function logDanmuVisibilityState(reason, details = {}) {
     if (!isDanmuVisibilityDebugEnabled()) return;
     const danmukuPlugin = getDanmukuPlugin();
-    console.log('[DanmuDebug] danmaku visibility state', {
+    danmuDebugLog('[DanmuDebug] danmaku visibility state', {
         reason,
         preferredVisible: isDanmuUserVisibleEnabled(),
         danmuDisplayConfig: { ...danmuDisplayConfig },
@@ -1681,7 +1693,10 @@ function readDanmuTerminalResult(cacheKey) {
     if (!cacheKey) return null;
     const cached = danmuTerminalResults.get(cacheKey);
     if (!cached) return null;
-    if (Date.now() - cached.timestamp >= DANMU_CONFIG.cacheExpiration.danmuCache) {
+    const ttl = Number.isFinite(cached.ttlMs)
+        ? cached.ttlMs
+        : DANMU_CONFIG.cacheExpiration.danmuCache;
+    if (Date.now() - cached.timestamp >= ttl) {
         danmuTerminalResults.delete(cacheKey);
         return null;
     }
@@ -1697,6 +1712,12 @@ function writeDanmuTerminalResult(cacheKey, result) {
         if (oldestKey === undefined) break;
         danmuTerminalResults.delete(oldestKey);
     }
+}
+
+function getDanmuTerminalCacheTtl(state) {
+    return DANMU_TRANSIENT_STATES.has(state)
+        ? DANMU_TRANSIENT_CACHE_MS
+        : DANMU_CONFIG.cacheExpiration.danmuCache;
 }
 
 function convertCoreDanmuComments(comments, episodeIndex, videoDuration = null) {
@@ -1945,6 +1966,7 @@ async function getDanmukuForVideo(title, episodeIndex) {
                 matchInfo: lastDanmuMatchInfo ? { ...lastDanmuMatchInfo } : null,
                 fetchStats: lastDanmuFetchStats ? { ...lastDanmuFetchStats } : null,
                 timestamp: Date.now(),
+                ttlMs: getDanmuTerminalCacheTtl(state),
             };
             currentDanmuCache = terminal;
             writeDanmuTerminalResult(terminal.key, terminal);
@@ -2348,9 +2370,38 @@ function initializePageContent() {
     currentVideoUrl = videoUrl || '';
 
     const playbackState = window.LibertyUtils?.playbackState;
+    const storageUtils = window.LibertyUtils?.storage;
+    let explicitEpisodeEntries = null;
 
-    // 从localStorage获取数据
-    currentVideoTitle = title || localStorage.getItem('currentVideoTitle') || '未知视频';
+    if (episodesList) {
+        try {
+            const decodedEpisodes = decodeURIComponent(episodesList);
+            const parsedEpisodes = storageUtils
+                ? storageUtils.safeJsonParse(decodedEpisodes, [])
+                : JSON.parse(decodedEpisodes);
+            explicitEpisodeEntries = Array.isArray(parsedEpisodes) ? parsedEpisodes : [];
+        } catch (error) {
+            explicitEpisodeEntries = [];
+        }
+    }
+
+    const sessionRequest = {
+        mediaUrl: currentVideoUrl,
+        episodeIndex: index
+    };
+    if (title !== null) sessionRequest.title = title;
+    if (sourceCode !== null) sessionRequest.sourceCode = sourceCode;
+    if (urlParams.has('id')) sessionRequest.vodId = urlParams.get('id') || '';
+    if (urlParams.has('year')) sessionRequest.year = urlParams.get('year') || '';
+    if (explicitEpisodeEntries !== null) sessionRequest.episodeEntries = explicitEpisodeEntries;
+
+    const activePlaybackSession = playbackState?.beginPlaybackSession
+        ? playbackState.beginPlaybackSession(sessionRequest).session
+        : playbackState?.readPlaybackSession?.() || {};
+
+    // The title and its metadata must come from the same playback context.
+    // A new direct URL cannot inherit the previous work's state.
+    currentVideoTitle = activePlaybackSession.title || title || '未知视频';
     currentEpisodeIndex = index;
 
     // 设置自动连播开关状态
@@ -2368,30 +2419,24 @@ function initializePageContent() {
 
     // 优先使用URL传递的集数信息，否则从localStorage获取
     try {
-        const storageUtils = window.LibertyUtils?.storage;
-        if (episodesList) {
+        if (explicitEpisodeEntries !== null) {
             // 如果URL中有集数数据，优先使用它
-            const decodedEpisodes = decodeURIComponent(episodesList);
-            const parsedEpisodes = storageUtils
-                ? storageUtils.safeJsonParse(decodedEpisodes, [])
-                : JSON.parse(decodedEpisodes);
             currentEpisodeEntries = playbackState?.normalizeEpisodeEntries
-                ? playbackState.normalizeEpisodeEntries(parsedEpisodes)
-                : parsedEpisodes;
+                ? playbackState.normalizeEpisodeEntries(explicitEpisodeEntries)
+                : explicitEpisodeEntries;
             currentEpisodes = playbackState
-                ? playbackState.normalizeEpisodesToUrls(parsedEpisodes)
-                : parsedEpisodes;
+                ? playbackState.normalizeEpisodesToUrls(explicitEpisodeEntries)
+                : explicitEpisodeEntries;
 
         } else {
-            // 否则从localStorage获取
-            currentEpisodes = playbackState
-                ? playbackState.readCurrentEpisodes()
-                : storageUtils
-                    ? storageUtils.readStorage('currentEpisodes', [])
-                    : JSON.parse(localStorage.getItem('currentEpisodes') || '[]');
-            currentEpisodeEntries = playbackState?.readCurrentEpisodeEntries
-                ? playbackState.readCurrentEpisodeEntries()
-                : currentEpisodes;
+            // Read only from the validated active session. A mismatched request
+            // has already replaced old state with a URL-only/unknown context.
+            currentEpisodes = Array.isArray(activePlaybackSession.episodes)
+                ? [...activePlaybackSession.episodes]
+                : [];
+            currentEpisodeEntries = Array.isArray(activePlaybackSession.episodeEntries)
+                ? [...activePlaybackSession.episodeEntries]
+                : [];
 
         }
 
@@ -2888,6 +2933,89 @@ function showShortcutHint(text, direction) {
 // ============================================
 // 🎬 VideoPlayer 类 - 统一资源管理
 // ============================================
+const playerLifecycle = {
+    generation: 0,
+    active: false,
+    url: '',
+    timers: {
+        init: null,
+        recovery: null
+    }
+};
+
+function clearPlayerLifecycleTimer(name) {
+    const handle = playerLifecycle.timers[name];
+    if (handle !== null && handle !== undefined) {
+        clearTimeout(handle);
+        playerLifecycle.timers[name] = null;
+    }
+}
+
+function clearPlayerLifecycleTimers() {
+    Object.keys(playerLifecycle.timers).forEach(clearPlayerLifecycleTimer);
+}
+
+function beginPlayerLifecycle(videoUrl, reason = 'media-change') {
+    clearPlayerLifecycleTimers();
+    playerLifecycle.generation += 1;
+    playerLifecycle.active = true;
+    playerLifecycle.url = String(videoUrl || '');
+    window.LibertyDebug.log('[PlayerLifecycle] begin', {
+        reason,
+        generation: playerLifecycle.generation
+    });
+    return {
+        generation: playerLifecycle.generation,
+        url: playerLifecycle.url
+    };
+}
+
+function invalidatePlayerLifecycle(reason = 'destroy') {
+    clearPlayerLifecycleTimers();
+    playerLifecycle.generation += 1;
+    playerLifecycle.active = false;
+    playerLifecycle.url = '';
+    window.LibertyDebug.log('[PlayerLifecycle] invalidate', {
+        reason,
+        generation: playerLifecycle.generation
+    });
+}
+
+function isCurrentPlayerLifecycle(ownership) {
+    return Boolean(
+        ownership &&
+        playerLifecycle.active &&
+        ownership.generation === playerLifecycle.generation &&
+        ownership.url === playerLifecycle.url &&
+        ownership.url === String(currentVideoUrl || '')
+    );
+}
+
+function setPlayerLifecycleTimer(name, ownership, callback, delay) {
+    clearPlayerLifecycleTimer(name);
+    const handle = setTimeout(() => {
+        if (playerLifecycle.timers[name] === handle) {
+            playerLifecycle.timers[name] = null;
+        }
+        if (!isCurrentPlayerLifecycle(ownership)) return;
+        callback();
+    }, delay);
+    playerLifecycle.timers[name] = handle;
+    return handle;
+}
+
+function scheduleCurrentPlayerRecovery(videoUrl, ownership) {
+    setPlayerLifecycleTimer('recovery', ownership, () => {
+        const loadingElement = document.getElementById('player-loading');
+        if (!loadingElement || loadingElement.style.display === 'none') return;
+
+        console.warn('⚠️ 视频加载超时，尝试重新初始化播放器');
+        // A fresh generation is claimed only after this callback proves that
+        // its original media ownership is still authoritative.
+        initPlayer(videoUrl);
+    }, 10000);
+}
+
 class VideoPlayer {
     constructor(containerId, config = {}) {
         // 核心实例
@@ -2976,20 +3104,58 @@ class VideoPlayer {
         if (!this.eventListeners.has(key)) {
             this.eventListeners.set(key, []);
         }
-        this.eventListeners.get(key).push({ target, event, handler });
+        this.eventListeners.get(key).push({ target, event, handler, options });
     }
 
     removeAllEventListeners() {
         for (const listeners of this.eventListeners.values()) {
-            listeners.forEach(({ target, event, handler }) => {
+            listeners.forEach(({ target, event, handler, options }) => {
                 try {
-                    target.removeEventListener(event, handler);
+                    target.removeEventListener(event, handler, options);
                 } catch (e) {
                     console.warn('移除监听器失败:', e);
                 }
             });
         }
         this.eventListeners.clear();
+    }
+
+    addHlsEventListener(target, event, handler) {
+        target.on(event, handler);
+        this.hlsEventListeners.push({ target, event, handler });
+    }
+
+    removeHlsEventListeners(target = null) {
+        const retained = [];
+        this.hlsEventListeners.forEach((entry) => {
+            if (target && entry.target !== target) {
+                retained.push(entry);
+                return;
+            }
+            try {
+                entry.target.off(entry.event, entry.handler);
+            } catch (error) {}
+        });
+        this.hlsEventListeners = retained;
+    }
+
+    addArtEventListener(target, event, handler) {
+        target.on(event, handler);
+        this.artEventListeners.push({ target, event, handler });
+    }
+
+    removeArtEventListeners(target = null) {
+        const retained = [];
+        this.artEventListeners.forEach((entry) => {
+            if (target && entry.target !== target) {
+                retained.push(entry);
+                return;
+            }
+            try {
+                entry.target.off(entry.event, entry.handler);
+            } catch (error) {}
+        });
+        this.artEventListeners = retained;
     }
 
     // ============================================
@@ -3008,7 +3174,7 @@ class VideoPlayer {
             this.wakeLock.instance = await navigator.wakeLock.request('screen');
             window.LibertyDebug.log('防息屏已激活');
 
-            this.wakeLock.instance.addEventListener('release', () => {
+            this.addEventListener(this.wakeLock.instance, 'release', () => {
                 this.wakeLock.instance = null;
                 if (this.art?.playing) {
                     this.enableNoSleepFallback();
@@ -3051,7 +3217,7 @@ class VideoPlayer {
         this.wakeLock.noSleepVideo.src = 'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAAu1tZGF0AAACrgYF//+q3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE0OCByMjY0MyA1YzY1NzA0IC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAxNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTEgcmVmPTMgZGVibG9jaz0xOjA6MCBhbmFseXNlPTB4MzoweDExMyBtZT1oZXggc3VibWU9NyBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MSA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0tMiB0aHJlYWRzPTEgbG9va2FoZWFkX3RocmVhZHM9MSBzbGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0zIGJfcHlyYW1pZD0yIGJfYWRhcHQ9MSBiX2JpYXM9MCBkaXJlY3Q9MSB3ZWlnaHRiPTEgb3Blbl9nb3A9MCB3ZWlnaHRwPTIga2V5aW50PTI1MCBrZXlpbnRfbWluPTI1IHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByY19sb29rYWhlYWQ9NDAgcmM9Y3JmIG1idHJlZT0xIGNyZj0yMy4wIHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTE6MS4wMACAAAAAD2WIhAA3//728P4FNjuZQQAAAu5tb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAAPoAAAAZAABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACGHRyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAAAAAAZAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAgAAAAIAAAAAACRlZHRzAAAAHGVsc3QAAAAAAAAAAQAAAGQAAAAAAAEAAAAAAZBtZGlhAAAAIG1kaGQAAAAAAAAAAAAAAAAAACgAAAAEAFXEAAAAAAAtaGRscgAAAAAAAAAAdmlkZQAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAE7bWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAAA+3N0YmwAAACXc3RzZAAAAAAAAAABAAAAh2F2YzEAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAgACAEgAAABIAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY//8AAAAxYXZjQwFkAAr/4QAYZ2QACqzZQbCWhAAAAwAEAAADAFA8SJZYAQAGaOvjyyLAAAAAGHN0dHMAAAAAAAAAAQAAAAEAAAQAAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAABAAAAAQAAABRzdHN6AAAAAAAAAAAAAAABAAAAaAAAABRzdGNvAAAAAAAAAAEAAAAsAAAAYXVkdGEAAABZbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAtaWxzdAAAACWpdG9vAAAAHWRhdGEAAAABAAAAAExhdmY1Ni40MC4xMDE=';
         this.wakeLock.noSleepVideo.volume = 0.01;
 
-        this.wakeLock.noSleepVideo.addEventListener('error', () => {
+        this.addEventListener(this.wakeLock.noSleepVideo, 'error', () => {
             console.warn('NoSleep video 加载失败');
             if (this.wakeLock.noSleepVideo?.parentNode) {
                 this.wakeLock.noSleepVideo.remove();
@@ -3092,19 +3258,7 @@ class VideoPlayer {
     destroyHls() {
         if (this.hls) {
             try {
-                const hlsEvents = [
-                    Hls.Events.ERROR,
-                    Hls.Events.MANIFEST_PARSED,
-                    Hls.Events.FRAG_LOADED,
-                    Hls.Events.LEVEL_LOADED,
-                    Hls.Events.FRAG_BUFFERED
-                ];
-
-                hlsEvents.forEach(event => {
-                    try {
-                        this.hls.off(event);
-                    } catch (e) {}
-                });
+                this.removeHlsEventListeners(this.hls);
 
                 this.hls.stopLoad();
                 this.hls.detachMedia();
@@ -3131,18 +3285,7 @@ class VideoPlayer {
     destroyArtPlayer() {
         if (this.art) {
             try {
-                const events = [
-                    'ready', 'seek', 'video:loadedmetadata', 
-                    'video:error', 'video:ended', 'video:playing',
-                    'video:pause', 'fullscreenWeb', 'fullscreen',
-                    'video:play', 'destroy'
-                ];
-
-                events.forEach(event => {
-                    try {
-                        this.art.off(event);
-                    } catch (e) {}
-                });
+                this.removeArtEventListeners(this.art);
 
                 if (this.art.video) {
                     this.art.video.pause();
@@ -3181,7 +3324,10 @@ class VideoPlayer {
     // ============================================
     // 统一销毁方法
     // ============================================
-    destroy() {
+    destroy(options = {}) {
+        if (!options.preserveLifecycle) {
+            invalidatePlayerLifecycle('video-player-destroy');
+        }
         window.LibertyDebug.log('🧹 VideoPlayer 开始销毁...');
         danmuReloadToken += 1;
         cancelDanmakuRequest('player-destroy');
@@ -3189,6 +3335,11 @@ class VideoPlayer {
         cleanupPlayerShortcuts();
         this.clearAllTimers();
         this.removeAllEventListeners();
+        this.removeHlsEventListeners();
+        this.removeArtEventListeners();
+        cleanupMobileOrientationFullscreen();
+        cleanupMobileTouchInputHandlers();
+        cleanupLongPressHandlers();
         this.releaseWakeLock();
         this.destroyHls();
         this.destroyArtPlayer();
@@ -3219,41 +3370,44 @@ class VideoPlayer {
 let videoPlayer = null;
 
 // 初始化播放器
-function initPlayer(videoUrl) {
+function initPlayer(videoUrl, existingOwnership = null) {
+    const ownership = existingOwnership === null
+        ? beginPlayerLifecycle(videoUrl, 'init-player')
+        : existingOwnership;
+    if (!isCurrentPlayerLifecycle(ownership)) return;
+
     // 🔥 使用 VideoPlayer 类管理实例
     if (videoPlayer) {
         window.LibertyDebug.log('🔄 销毁旧播放器实例');
         const status = videoPlayer.getStatus();
         window.LibertyDebug.log('旧实例状态:', status);
-        videoPlayer.destroy();
+        videoPlayer.destroy({ preserveLifecycle: true });
         videoPlayer = null;
 
         // 🔥 销毁后等待 100ms，确保资源完全释放
-        setTimeout(() => initPlayerInternal(videoUrl), 100);
+        setPlayerLifecycleTimer(
+            'init',
+            ownership,
+            () => initPlayerInternal(videoUrl, ownership),
+            100
+        );
         return;
     }
 
-    initPlayerInternal(videoUrl);
+    initPlayerInternal(videoUrl, ownership);
 }
 
 // 内部初始化函数
-function initPlayerInternal(videoUrl) {
-    // 防止短时间内重复初始化
-    const now = Date.now();
-    if (typeof initPlayer.lastInitTime === 'undefined') {
-        initPlayer.lastInitTime = 0;
-    }
-    if (now - initPlayer.lastInitTime < 200) {
-        console.warn('⚠️ 播放器正在初始化或刚初始化过，跳过');
-        return;
-    }
-    initPlayer.lastInitTime = now;
+function initPlayerInternal(videoUrl, ownership) {
+    if (!isCurrentPlayerLifecycle(ownership)) return;
+    if (initPlayer.lastInitializedGeneration === ownership.generation) return;
 
     window.LibertyDebug.log('🎬 开始初始化播放器...');
 
     if (!videoUrl) {
         return
     }
+    initPlayer.lastInitializedGeneration = ownership.generation;
 
     const shouldDisableAutoplayForWatchRoom = isWatchRoomLaunch();
     if (shouldDisableAutoplayForWatchRoom) {
@@ -3267,6 +3421,7 @@ function initPlayerInternal(videoUrl) {
         autoplay: !shouldDisableAutoplayForWatchRoom,
         volume: 0.8
     });
+    videoPlayer.lifecycleGeneration = ownership.generation;
 
     // ✅ 在这里添加移动端检测
     const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -3377,6 +3532,7 @@ function initPlayerInternal(videoUrl) {
 				// ===== 🔥 增强 HLS 销毁 =====
 				if (currentHls) {
 					try {
+						videoPlayer.removeHlsEventListeners(currentHls);
 						// 1. 移除所有事件监听器（关键！）
 						const hlsEvents = [
 							Hls.Events.ERROR,
@@ -3420,14 +3576,14 @@ function initPlayerInternal(videoUrl) {
                 let bufferAppendErrorCount = 0;
 
                 // 监听视频播放事件
-                video.addEventListener('playing', function () {
+                videoPlayer.addEventListener(video, 'playing', function () {
                     playbackStarted = true;
                     document.getElementById('player-loading').style.display = 'none';
                     document.getElementById('error').style.display = 'none';
                 });
 
                 // 监听视频进度事件
-                video.addEventListener('timeupdate', function () {
+                videoPlayer.addEventListener(video, 'timeupdate', function () {
                     if (video.currentTime > 1) {
                         // 视频进度超过1秒，隐藏错误（如果存在）
                         document.getElementById('error').style.display = 'none';
@@ -3448,15 +3604,15 @@ function initPlayerInternal(videoUrl) {
 				const pauseHandler = () => {
 					bufferState.pauseStartTime = Date.now();
 				};
-				video.addEventListener('pause', pauseHandler);
+				videoPlayer.addEventListener(video, 'pause', pauseHandler);
 
 				// 监听播放事件
 				const playHandler = () => {
 					bufferState.pauseStartTime = 0;
 				};
-				video.addEventListener('play', playHandler);
+				videoPlayer.addEventListener(video, 'play', playHandler);
 
-				hls.on(Hls.Events.FRAG_BUFFERED, () => {
+				videoPlayer.addHlsEventListener(hls, Hls.Events.FRAG_BUFFERED, () => {
 					const now = Date.now();
 
 					// 每 5 分钟检查一次（降低检查频率）
@@ -3533,7 +3689,7 @@ function initPlayerInternal(videoUrl) {
                 }
                 video.disableRemotePlayback = false;
 
-                hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                videoPlayer.addHlsEventListener(hls, Hls.Events.MANIFEST_PARSED, function () {
                     if (isWatchRoomLaunch()) {
                         window.LibertyDebug.log('[WatchRoomAudit] skip hls manifest autoplay for watch room mode', {
                             role: getWatchRoomLaunchRole()
@@ -3545,7 +3701,7 @@ function initPlayerInternal(videoUrl) {
                     });
                 });
 
-                hls.on(Hls.Events.ERROR, function (event, data) {
+                videoPlayer.addHlsEventListener(hls, Hls.Events.ERROR, function (event, data) {
                     // 增加错误计数
                     errorCount++;
 
@@ -3585,12 +3741,12 @@ function initPlayerInternal(videoUrl) {
                 });
 
                 // 监听分段加载事件
-                hls.on(Hls.Events.FRAG_LOADED, function () {
+                videoPlayer.addHlsEventListener(hls, Hls.Events.FRAG_LOADED, function () {
                     document.getElementById('player-loading').style.display = 'none';
                 });
 
                 // 监听级别加载事件
-                hls.on(Hls.Events.LEVEL_LOADED, function () {
+                videoPlayer.addHlsEventListener(hls, Hls.Events.LEVEL_LOADED, function () {
                     document.getElementById('player-loading').style.display = 'none';
                 });
             }
@@ -3642,7 +3798,7 @@ function initPlayerInternal(videoUrl) {
     // 从而对播放器状态栏进行隐藏倒计时
     function handleFullScreen(isFullScreen, isWeb) {
         if (isFullScreen) {
-            document.addEventListener('mouseout', handleMouseOut);
+            videoPlayer.addEventListener(document, 'mouseout', handleMouseOut);
 
             // ✅ 移动端横屏锁定（只在原生全屏时）
             if (isMobileDevice && !isWeb && window.screen?.orientation) {
@@ -3666,7 +3822,7 @@ function initPlayerInternal(videoUrl) {
         }
     }
 
-	art.on('ready', () => {
+	videoPlayer.addArtEventListener(art, 'ready', () => {
 		hideControls();
 		applyInlineVideoAttributes(art.video);
 		refreshPlayerViewport('art-ready');
@@ -3675,7 +3831,7 @@ function initPlayerInternal(videoUrl) {
 
 		// ✅ 监听弹幕插件配置变更，持久化用户设置
 		// ArtPlayer 弹幕插件会在用户通过设置面板修改时触发 artplayerPluginDanmuku:config
-		art.on('artplayerPluginDanmuku:config', (config) => {
+		videoPlayer.addArtEventListener(art, 'artplayerPluginDanmuku:config', (config) => {
 		    const toSave = {};
 		    const previousDisplayArea = danmuDisplayConfig.displayArea;
 		    let shouldRefreshDanmakuLayout = false;
@@ -3710,7 +3866,7 @@ function initPlayerInternal(videoUrl) {
 		    }
 		});
 
-		art.on('artplayerPluginDanmuku:show', () => {
+		videoPlayer.addArtEventListener(art, 'artplayerPluginDanmuku:show', () => {
 		    if (!document.hidden) {
 		        saveDanmuConfig({ visible: true });
 		        logDanmuVisibilityState('user-show', {
@@ -3719,7 +3875,7 @@ function initPlayerInternal(videoUrl) {
 		    }
 		});
 
-		art.on('artplayerPluginDanmuku:hide', () => {
+		videoPlayer.addArtEventListener(art, 'artplayerPluginDanmuku:hide', () => {
 		    if (!document.hidden) {
 		        saveDanmuConfig({ visible: false });
 		        danmuReloadToken += 1;
@@ -3735,7 +3891,7 @@ function initPlayerInternal(videoUrl) {
 		// ============================================
 		let lastSeekTime = 0;
 
-		art.on('seek', (currentTime) => {
+		videoPlayer.addArtEventListener(art, 'seek', (currentTime) => {
 			const now = Date.now();
 
 			// 1️⃣ Netflix 风格：激进清理旧缓冲
@@ -3767,7 +3923,7 @@ function initPlayerInternal(videoUrl) {
 		});
 
 		// 播放器销毁时清理
-		art.on('destroy', () => {
+		videoPlayer.addArtEventListener(art, 'destroy', () => {
 			// HLS 缓冲管理变量会在 destroyHls() 中自动重置
 		});
 
@@ -3781,14 +3937,14 @@ function initPlayerInternal(videoUrl) {
 			}, 180000, true); // 3 分钟，使用 setInterval
 
 			// 2️⃣ 暂停时立即保存
-			art.on('video:pause', () => {
+			videoPlayer.addArtEventListener(art, 'video:pause', () => {
 				if (art.video && !art.video.seeking) {
 					saveToHistory(true);
 				}
 			});
 
 			// 3️⃣ 结束时立即保存
-			art.on('video:ended', () => {
+			videoPlayer.addArtEventListener(art, 'video:ended', () => {
 				saveToHistory(true);
 			});
 
@@ -3798,16 +3954,16 @@ function initPlayerInternal(videoUrl) {
 					saveToHistory(true);
 				}
 			};
-			document.addEventListener('visibilitychange', visibilityHandler);
+			videoPlayer.addEventListener(document, 'visibilitychange', visibilityHandler);
 
 			// 5️⃣ 页面卸载时立即保存
 			const beforeUnloadHandler = () => {
 				saveToHistory(true);
 			};
-			window.addEventListener('beforeunload', beforeUnloadHandler);
+			videoPlayer.addEventListener(window, 'beforeunload', beforeUnloadHandler);
 
 			// 清理
-			art.on('destroy', () => {
+			videoPlayer.addArtEventListener(art, 'destroy', () => {
 				videoPlayer.clearTimer('autoSaveHistory');
 				document.removeEventListener('visibilitychange', visibilityHandler);
 				window.removeEventListener('beforeunload', beforeUnloadHandler);
@@ -3818,11 +3974,11 @@ function initPlayerInternal(videoUrl) {
 		// 🔥 使用 VideoPlayer 实例的防息屏方法
 
 		// 事件绑定
-		art.on('video:play', () => videoPlayer.requestWakeLock());
-		art.on('video:pause', () => {
+		videoPlayer.addArtEventListener(art, 'video:play', () => videoPlayer.requestWakeLock());
+		videoPlayer.addArtEventListener(art, 'video:pause', () => {
 			if (!art.video.seeking) videoPlayer.releaseWakeLock();
 		});
-		art.on('video:ended', () => videoPlayer.releaseWakeLock());
+		videoPlayer.addArtEventListener(art, 'video:ended', () => videoPlayer.releaseWakeLock());
 
 		// 页面可见性处理
 		const handleVisibilityChange = () => {
@@ -3834,10 +3990,10 @@ function initPlayerInternal(videoUrl) {
 				videoPlayer.releaseWakeLock();
 			}
 		};
-		document.addEventListener('visibilitychange', handleVisibilityChange);
+		videoPlayer.addEventListener(document, 'visibilitychange', handleVisibilityChange);
 
 		// 清理
-		art.on('destroy', () => {
+		videoPlayer.addArtEventListener(art, 'destroy', () => {
 			if (videoPlayer) {
 				videoPlayer.releaseWakeLock();
 			}
@@ -3861,25 +4017,25 @@ function initPlayerInternal(videoUrl) {
 			};
 
 			if (window.screen?.orientation?.addEventListener) {
-				window.screen.orientation.addEventListener('change', handleOrientationChange);
+				videoPlayer.addEventListener(window.screen.orientation, 'change', handleOrientationChange);
 				_mobileOrientationFullscreenCleanup = () => {
 					window.screen.orientation.removeEventListener('change', handleOrientationChange);
 					_mobileOrientationFullscreenCleanup = null;
 				};
 			} else {
-				window.addEventListener('orientationchange', handleOrientationChange);
+				videoPlayer.addEventListener(window, 'orientationchange', handleOrientationChange);
 				_mobileOrientationFullscreenCleanup = () => {
 					window.removeEventListener('orientationchange', handleOrientationChange);
 					_mobileOrientationFullscreenCleanup = null;
 				};
 			}
 
-			art.on('destroy', cleanupMobileOrientationFullscreen);
+			videoPlayer.addArtEventListener(art, 'destroy', cleanupMobileOrientationFullscreen);
 		}
 	});
 
     // 全屏 Web 模式处理
-    art.on('fullscreenWeb', function (isFullScreen) {
+    videoPlayer.addArtEventListener(art, 'fullscreenWeb', function (isFullScreen) {
         logFullscreenDebug('art-fullscreen-web');
         handleFullScreen(isFullScreen, true);
         refreshPlayerViewport('fullscreenWeb');
@@ -3895,14 +4051,14 @@ function initPlayerInternal(videoUrl) {
     });
 
     // 全屏模式处理
-    art.on('fullscreen', function (isFullScreen) {
+    videoPlayer.addArtEventListener(art, 'fullscreen', function (isFullScreen) {
         logFullscreenDebug('art-fullscreen');
         handleFullScreen(isFullScreen, false);
         refreshPlayerViewport('fullscreen');
     });
 
     // ⭐⭐⭐ 在这里添加 video:loadedmetadata 事件处理 ⭐⭐⭐
-    art.on('video:loadedmetadata', function() {
+    videoPlayer.addArtEventListener(art, 'video:loadedmetadata', function() {
         document.getElementById('player-loading').style.display = 'none';
         videoHasEnded = false;
         const urlParams = new URLSearchParams(window.location.search);
@@ -3980,7 +4136,7 @@ function initPlayerInternal(videoUrl) {
     });
 
     // 错误处理
-    art.on('video:error', function (error) {
+    videoPlayer.addArtEventListener(art, 'video:error', function (error) {
         // 如果正在切换视频，忽略错误
         if (window.isSwitchingVideo) {
             return;
@@ -4000,7 +4156,7 @@ function initPlayerInternal(videoUrl) {
     setupMobileTouchSchemeA();
 
     // 视频播放结束事件
-    art.on('video:ended', function () {
+    videoPlayer.addArtEventListener(art, 'video:ended', function () {
         videoHasEnded = true;
 
         clearVideoProgress();
@@ -4330,6 +4486,7 @@ async function loadEpisodeFromWatchRoomSnapshot(snapshot = {}, options = {}) {
         currentEpisodeIndex = episodeIndex;
         currentVideoUrl = episodeUrl;
         videoHasEnded = false;
+        const lifecycleOwnership = beginPlayerLifecycle(episodeUrl, 'watch-room-episode');
         clearVideoProgress();
 
         try {
@@ -4354,7 +4511,7 @@ async function loadEpisodeFromWatchRoomSnapshot(snapshot = {}, options = {}) {
         if (isWebkit) {
             if (videoPlayer) videoPlayer.destroyHls();
             currentHls = null;
-            initPlayer(episodeUrl);
+            initPlayer(episodeUrl, lifecycleOwnership);
         } else {
             if (videoPlayer) {
                 videoPlayer.clearTimer('autoSaveHistory');
@@ -4366,7 +4523,9 @@ async function loadEpisodeFromWatchRoomSnapshot(snapshot = {}, options = {}) {
                 currentHls.detachMedia();
             }
             requestAnimationFrame(() => {
-                if (art) art.switch = episodeUrl;
+                if (isCurrentPlayerLifecycle(lifecycleOwnership) && art) {
+                    art.switch = episodeUrl;
+                }
             });
         }
 
@@ -4468,6 +4627,7 @@ function playEpisode(index, switchReason = 'manual') {
     currentEpisodeIndex = index;
     currentVideoUrl = url;
     videoHasEnded = false;
+    const lifecycleOwnership = beginPlayerLifecycle(url, `episode-switch:${switchReason}`);
 
     clearVideoProgress();
 
@@ -4483,7 +4643,7 @@ function playEpisode(index, switchReason = 'manual') {
 		// WebKit分支切集前先显式销毁旧HLS，防止资源泄漏
 		if (videoPlayer) videoPlayer.destroyHls();
 		currentHls = null;
-		initPlayer(url);
+		initPlayer(url, lifecycleOwnership);
 	} else {
 		if (videoPlayer) {
 			videoPlayer.clearTimer('autoSaveHistory');
@@ -4498,7 +4658,9 @@ function playEpisode(index, switchReason = 'manual') {
 		}
 
 		requestAnimationFrame(() => {
-			art.switch = url;
+			if (isCurrentPlayerLifecycle(lifecycleOwnership) && art) {
+				art.switch = url;
+			}
 		});
 	}
 
@@ -4514,16 +4676,7 @@ function playEpisode(index, switchReason = 'manual') {
     }
 
     // 【新增】超时保护：如果10秒后仍在加载，尝试重新初始化播放器
-    setTimeout(() => {
-		const loadingElement = document.getElementById('player-loading');
-		if (loadingElement && loadingElement.style.display !== 'none') {
-			console.warn('⚠️ 视频加载超时，尝试重新初始化播放器');
-			// 先置 null，防止 videoPlayer.destroy() 内部二次销毁已销毁的 art 实例
-			art = null;
-			currentHls = null;
-			initPlayer(url);
-		}
-	}, 10000);
+    scheduleCurrentPlayerRecovery(url, lifecycleOwnership);
 
     // 三秒后保存到历史记录
     setTimeout(() => saveToHistory(), 3000);
@@ -4836,19 +4989,7 @@ function setupMobileTouchSchemeA() {
     const videoElement = art.video;
     if (!videoElement) return;
 
-    if (_mobileTouchInputHandlers) {
-        const previousTarget = _mobileTouchInputHandlers.target;
-        if (previousTarget) {
-            previousTarget.removeEventListener('touchstart', _mobileTouchInputHandlers.touchstart);
-            previousTarget.removeEventListener('touchmove', _mobileTouchInputHandlers.touchmove);
-            previousTarget.removeEventListener('touchend', _mobileTouchInputHandlers.touchend);
-            previousTarget.removeEventListener('touchcancel', _mobileTouchInputHandlers.touchcancel);
-        }
-        if (_mobileTouchInputHandlers.singleTapTimer) {
-            clearTimeout(_mobileTouchInputHandlers.singleTapTimer);
-        }
-        _mobileTouchInputHandlers = null;
-    }
+    cleanupMobileTouchInputHandlers();
 
     let lastTapTime = 0;
     let singleTapTimer = null;
@@ -4964,10 +5105,10 @@ function setupMobileTouchSchemeA() {
         _mobileLongPressTriggered = false;
     };
 
-    videoElement.addEventListener('touchstart', touchStartHandler, { passive: true });
-    videoElement.addEventListener('touchmove', touchMoveHandler, { passive: true });
-    videoElement.addEventListener('touchend', touchEndHandler, { passive: false });
-    videoElement.addEventListener('touchcancel', touchCancelHandler);
+    videoPlayer.addEventListener(videoElement, 'touchstart', touchStartHandler, { passive: true });
+    videoPlayer.addEventListener(videoElement, 'touchmove', touchMoveHandler, { passive: true });
+    videoPlayer.addEventListener(videoElement, 'touchend', touchEndHandler, { passive: false });
+    videoPlayer.addEventListener(videoElement, 'touchcancel', touchCancelHandler);
 
     _mobileTouchInputHandlers = {
         target: videoElement,
@@ -4980,6 +5121,41 @@ function setupMobileTouchSchemeA() {
         },
     };
 }
+
+function cleanupMobileTouchInputHandlers() {
+    if (!_mobileTouchInputHandlers) return;
+    const previousTarget = _mobileTouchInputHandlers.target;
+    if (previousTarget) {
+        previousTarget.removeEventListener('touchstart', _mobileTouchInputHandlers.touchstart);
+        previousTarget.removeEventListener('touchmove', _mobileTouchInputHandlers.touchmove);
+        previousTarget.removeEventListener('touchend', _mobileTouchInputHandlers.touchend);
+        previousTarget.removeEventListener('touchcancel', _mobileTouchInputHandlers.touchcancel);
+    }
+    if (_mobileTouchInputHandlers.singleTapTimer) {
+        clearTimeout(_mobileTouchInputHandlers.singleTapTimer);
+    }
+    _mobileTouchInputHandlers = null;
+}
+
+function cleanupLongPressHandlers() {
+    if (!_longPressHandlers) return;
+    const previousTarget = _longPressHandlers.target;
+    const previousVideoTarget = _longPressHandlers.videoTarget;
+    previousTarget?.removeEventListener('touchstart', _longPressHandlers.touchstart);
+    previousTarget?.removeEventListener('touchmove', _longPressHandlers.touchmove);
+    previousTarget?.removeEventListener('touchend', _longPressHandlers.touchend);
+    previousTarget?.removeEventListener('touchcancel', _longPressHandlers.touchcancel);
+    if (previousVideoTarget) {
+        if (_longPressHandlers.videoPause) {
+            previousVideoTarget.removeEventListener('pause', _longPressHandlers.videoPause);
+        }
+        if (_longPressHandlers.videoEnded) {
+            previousVideoTarget.removeEventListener('ended', _longPressHandlers.videoEnded);
+        }
+    }
+    _longPressHandlers = null;
+}
+
 // 设置移动端长按三倍速播放功能（B站风格）
 function setupLongPressSpeedControl() {
     if (!art || !art.video || !videoPlayer) return;
@@ -4990,19 +5166,7 @@ function setupLongPressSpeedControl() {
     if (!videoElement) return;
 
     // 🔥 先清理之前绑定的监听器，防止切集时叠加
-    if (_longPressHandlers) {
-        const previousTarget = _longPressHandlers.target || playerElement;
-        previousTarget.removeEventListener('touchstart', _longPressHandlers.touchstart);
-        previousTarget.removeEventListener('touchmove', _longPressHandlers.touchmove);
-        previousTarget.removeEventListener('touchend', _longPressHandlers.touchend);
-        previousTarget.removeEventListener('touchcancel', _longPressHandlers.touchcancel);
-        // 同时清理 video 上的监听器
-        if (art && art.video) {
-            if (_longPressHandlers.videoPause) art.video.removeEventListener('pause', _longPressHandlers.videoPause);
-            if (_longPressHandlers.videoEnded) art.video.removeEventListener('ended', _longPressHandlers.videoEnded);
-        }
-        _longPressHandlers = null;
-    }
+    cleanupLongPressHandlers();
 
     let originalPlaybackRate = 1.0;
     let isLongPress = false;
@@ -5150,14 +5314,15 @@ function setupLongPressSpeedControl() {
     };
 
     // 🔥 注册监听器
-    videoElement.addEventListener('touchstart', _touchstartHandler, { passive: true });
-    videoElement.addEventListener('touchmove', _touchmoveHandler, { passive: false });
-    videoElement.addEventListener('touchend', _touchendHandler);
-    videoElement.addEventListener('touchcancel', _touchcancelHandler);
+    videoPlayer.addEventListener(videoElement, 'touchstart', _touchstartHandler, { passive: true });
+    videoPlayer.addEventListener(videoElement, 'touchmove', _touchmoveHandler, { passive: false });
+    videoPlayer.addEventListener(videoElement, 'touchend', _touchendHandler);
+    videoPlayer.addEventListener(videoElement, 'touchcancel', _touchcancelHandler);
 
     // 🔥 保存引用，供下次调用时清理
     _longPressHandlers = {
         target: videoElement,
+        videoTarget: videoElement,
         touchstart: _touchstartHandler,
         touchmove: _touchmoveHandler,
         touchend: _touchendHandler,
@@ -5186,8 +5351,8 @@ function setupLongPressSpeedControl() {
         _mobileLongPressTriggered = false;
     };
 
-    art.video.addEventListener('pause', _pauseResetHandler);
-    art.video.addEventListener('ended', _endedResetHandler);
+    videoPlayer.addEventListener(videoElement, 'pause', _pauseResetHandler);
+    videoPlayer.addEventListener(videoElement, 'ended', _endedResetHandler);
 
     // 保存引用到 _longPressHandlers 方便下次清理
     _longPressHandlers.videoPause = _pauseResetHandler;
@@ -5408,6 +5573,138 @@ function getPlayerShortDramaCheck(resource = {}) {
     return { isShortDrama: false, reasons: [] };
 }
 
+function getSourceSwitchRawRecord(candidate = {}, fallbackVodId = '') {
+    const videoInfo = candidate.videoInfo || {};
+    return {
+        ...candidate,
+        vod_id: candidate.vod_id ?? videoInfo.vod_id ?? fallbackVodId,
+        vod_name: candidate.vod_name ?? videoInfo.title ?? videoInfo.vod_name ?? '',
+        vod_year: candidate.vod_year ?? videoInfo.year ?? '',
+        type_name: candidate.type_name ?? videoInfo.type ?? videoInfo.category ?? '',
+        vod_class: candidate.vod_class ?? videoInfo.category ?? '',
+        vod_remarks: candidate.vod_remarks ?? videoInfo.remarks ?? '',
+        vod_director: candidate.vod_director ?? videoInfo.director ?? '',
+        vod_actor: candidate.vod_actor ?? videoInfo.actors ?? videoInfo.actor ?? '',
+        vod_area: candidate.vod_area ?? videoInfo.area ?? '',
+        vod_lang: candidate.vod_lang ?? videoInfo.language ?? videoInfo.lang ?? '',
+        vod_content: candidate.vod_content ?? videoInfo.description ?? videoInfo.desc ?? '',
+        vod_pic: candidate.vod_pic ?? videoInfo.cover ?? '',
+    };
+}
+
+function getSourceSwitchMediaIdentity(media) {
+    const core = getDanmuCoreRuntime()?.core;
+    if (!core || !media) return null;
+    return {
+        recordId: media.mediaId,
+        rawTitle: media.canonicalTitle || currentVideoTitle,
+        parsedTitle: core.parseTitle(media.canonicalTitle || currentVideoTitle),
+        aliases: media.aliases || [],
+        year: media.releaseYear ?? null,
+        season: media.season ?? null,
+        mediaType: media.mediaType || 'unknown',
+        directors: media.directors || [],
+        actors: media.actors || [],
+        externalIds: media.externalIds || {},
+    };
+}
+
+function evaluateSourceSwitchCandidate(candidate, sourceKey, sourceName) {
+    const runtime = getDanmuCoreRuntime();
+    const currentContext = createProductionDanmakuContext(currentVideoTitle, currentEpisodeIndex);
+    if (!runtime || !currentContext?.media) {
+        return { decision: 'uncertain', resolution: null, sourceRecord: null };
+    }
+
+    const rawRecord = getSourceSwitchRawRecord(candidate, candidate?.vod_id || '');
+    const sourceRecord = runtime.core.SourceNormalizer.normalize(rawRecord, {
+        sourceKey,
+        sourceName,
+    });
+    const resolution = new runtime.core.EntityResolver().resolve(
+        getSourceSwitchMediaIdentity(currentContext.media),
+        {
+            recordId: `${sourceKey}:${sourceRecord.vodId}`,
+            rawTitle: sourceRecord.rawTitle,
+            parsedTitle: runtime.core.parseTitle(sourceRecord.rawTitle),
+            year: sourceRecord.parsedYear,
+            season: sourceRecord.parsedSeason,
+            mediaType: sourceRecord.mediaType,
+            directors: sourceRecord.normalizedDirector,
+            actors: sourceRecord.normalizedActors,
+            externalIds: {},
+        }
+    );
+    return { decision: resolution.decision, resolution, sourceRecord };
+}
+
+function buildSourceSwitchPlaybackInput(data, sourceKey, sourceName, vodId, episodeEntries) {
+    const raw = getSourceSwitchRawRecord(data, vodId);
+    const episodes = episodeEntries.map((episode, index) => {
+        const rawName = episode && typeof episode === 'object'
+            ? (episode.rawEpisodeName ?? (
+                episode.episodeNameSource === 'source' ? (episode.name ?? episode.title ?? '') : ''
+            ))
+            : (String(episode || '').includes('$') ? String(episode).split('$')[0] : '');
+        return {
+            rawIndex: Number.isInteger(episode?.rawIndex) ? episode.rawIndex : index,
+            name: String(rawName || ''),
+            url: getPlayerEpisodeUrlValue(episode),
+            rawEntry: String(episode?.rawEntry || ''),
+        };
+    });
+    const firstRawIndex = episodes[0]?.rawIndex;
+    return {
+        sourceKey,
+        sourceName,
+        vodId: String(vodId || raw.vod_id || ''),
+        rawTitle: String(raw.vod_name || ''),
+        rawYear: raw.vod_year,
+        rawRemarks: raw.vod_remarks,
+        rawCategory: [raw.type_name, raw.vod_class].filter(Boolean).join(' '),
+        rawDirector: raw.vod_director,
+        rawActors: raw.vod_actor,
+        rawArea: raw.vod_area,
+        rawLanguage: raw.vod_lang,
+        rawDescription: raw.vod_content,
+        rawCover: raw.vod_pic,
+        playGroup: String(episodeEntries[0]?.playGroup || sourceName || sourceKey),
+        playGroupIndex: Number.isInteger(episodeEntries[0]?.playGroupIndex)
+            ? episodeEntries[0].playGroupIndex
+            : 0,
+        episodes,
+        currentEpisodeIndex: Number.isInteger(firstRawIndex) ? firstRawIndex : 0,
+    };
+}
+
+function resolveSourceSwitchEpisode(data, sourceKey, sourceName, vodId, episodeEntries) {
+    const runtime = getDanmuCoreRuntime();
+    const currentContext = createProductionDanmakuContext(currentVideoTitle, currentEpisodeIndex);
+    if (!runtime || !currentContext?.media || !currentContext.sourceEpisode) {
+        return { state: 'uncertain', targetIndex: -1, resolution: null };
+    }
+
+    const targetContext = runtime.core.createDanmakuPlaybackContext(
+        buildSourceSwitchPlaybackInput(data, sourceKey, sourceName, vodId, episodeEntries)
+    );
+    const candidateEpisodes = targetContext.mediaEpisodes.map((episode) => ({
+        ...episode,
+        mediaId: currentContext.media.mediaId,
+    }));
+    const resolution = runtime.core.resolveEpisode({
+        canonicalMedia: currentContext.media,
+        sourceEpisode: currentContext.sourceEpisode,
+        sourceSequence: currentContext.sourceEpisodes,
+        candidateEpisodes,
+    });
+    const targetIndex = resolution.selectedEpisode
+        ? candidateEpisodes.findIndex((episode) => (
+            episode.canonicalEpisodeId === resolution.selectedEpisode.canonicalEpisodeId
+        ))
+        : -1;
+    return { state: resolution.state, targetIndex, resolution, targetContext };
+}
+
 function logSwitchResourceCandidateQuality(candidate = {}, action = 'kept', shortDramaInfo = {}) {
     window.LibertyDebug.log('[ResourceSwitch] candidate quality', {
         title: candidate.vod_name || candidate.title || candidate.name || '',
@@ -5448,20 +5745,26 @@ async function showSwitchResourceModal() {
         }
         return { key: curr, name: '未知资源' };
     });
-    let allResults = {};
-   await Promise.all(resourceOptions.map(async (opt) => {
-        let queryResult = await searchByAPIAndKeyWord(opt.key, currentVideoTitle);
-        if (queryResult.length == 0) {
-            return 
-        }
-        // 优先取完全同名资源，否则默认取第一个
-        let result = queryResult[0]
-        queryResult.forEach((res) => {
-            if (res.vod_name == currentVideoTitle) {
-                result = res;
-            }
-        })
-        allResults[opt.key] = result;
+    let allResults = [];
+    await Promise.all(resourceOptions.map(async (opt) => {
+        const queryResult = await searchByAPIAndKeyWord(opt.key, currentVideoTitle);
+        if (queryResult.length === 0) return;
+
+        const evaluated = queryResult.map((result) => ({
+            sourceKey: opt.key,
+            sourceName: opt.name,
+            result,
+            identity: evaluateSourceSwitchCandidate(result, opt.key, opt.name),
+        }));
+        const supported = evaluated.filter(({ identity }) => (
+            identity.decision === 'confirmed' || identity.decision === 'supported'
+        ));
+        const selectable = supported.length === 1
+            ? supported.map((entry) => ({ ...entry, selectionMode: 'automatic' }))
+            : (supported.length > 1 ? supported : evaluated.filter(({ identity }) => (
+                identity.decision === 'uncertain'
+            ))).map((entry) => ({ ...entry, selectionMode: 'manual-required' }));
+        allResults.push(...selectable);
     }));
 
     const currentSourceName = resourceOptions.find(opt => String(opt.key) === String(currentSourceCode))?.name || currentSourceCode || '';
@@ -5474,9 +5777,8 @@ async function showSwitchResourceModal() {
     });
 
     if (!currentShortDramaInfo.isShortDrama) {
-        Object.entries(allResults).forEach(([sourceKey, result]) => {
-            if (!result) return;
-            const sourceName = resourceOptions.find(opt => opt.key === sourceKey)?.name || '未知资源';
+        allResults = allResults.filter(({ sourceKey, sourceName, result }) => {
+            if (!result) return false;
             const candidate = {
                 ...result,
                 sourceCode: sourceKey,
@@ -5486,10 +5788,10 @@ async function showSwitchResourceModal() {
             const shortDramaInfo = getPlayerShortDramaCheck(candidate);
             if (shortDramaInfo.isShortDrama) {
                 logSwitchResourceCandidateQuality(candidate, 'filtered', shortDramaInfo);
-                delete allResults[sourceKey];
-                return;
+                return false;
             }
             logSwitchResourceCandidateQuality(candidate, 'kept', shortDramaInfo);
+            return true;
         });
     } else {
         window.LibertyDebug.log('[ResourceSwitch] current video is short drama, keep short-drama candidates', {
@@ -5505,14 +5807,16 @@ async function showSwitchResourceModal() {
 
     // 同时测试所有资源的速率
     const speedResults = {};
-    await Promise.all(Object.entries(allResults).map(async ([sourceKey, result]) => {
+    await Promise.all(allResults.map(async ({ sourceKey, result }) => {
         if (result) {
-            speedResults[sourceKey] = await testVideoSourceSpeed(sourceKey, result.vod_id);
+            speedResults[`${sourceKey}:${result.vod_id}`] = await testVideoSourceSpeed(sourceKey, result.vod_id);
         }
     }));
 
     // 对结果进行排序
-    const sortedResults = Object.entries(allResults).sort(([keyA, resultA], [keyB, resultB]) => {
+    const sortedResults = allResults.sort((entryA, entryB) => {
+        const { sourceKey: keyA, result: resultA } = entryA;
+        const { sourceKey: keyB, result: resultB } = entryB;
         // 当前播放的源放在最前面
         const isCurrentA = String(keyA) === String(currentSourceCode) && String(resultA.vod_id) === String(currentVideoId);
         const isCurrentB = String(keyB) === String(currentSourceCode) && String(resultB.vod_id) === String(currentVideoId);
@@ -5521,8 +5825,8 @@ async function showSwitchResourceModal() {
         if (!isCurrentA && isCurrentB) return 1;
 
         // 其余按照速度排序，速度快的在前面（速度为-1表示失败，排到最后）
-        const speedA = speedResults[keyA]?.speed || 99999;
-        const speedB = speedResults[keyB]?.speed || 99999;
+        const speedA = speedResults[`${keyA}:${resultA.vod_id}`]?.speed || 99999;
+        const speedB = speedResults[`${keyB}:${resultB.vod_id}`]?.speed || 99999;
 
         if (speedA === -1 && speedB !== -1) return 1;
         if (speedA !== -1 && speedB === -1) return -1;
@@ -5534,22 +5838,23 @@ async function showSwitchResourceModal() {
     // 渲染资源列表
     let html = '<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 p-4">';
 
-    for (const [sourceKey, result] of sortedResults) {
+    for (const { sourceKey, sourceName, result, identity, selectionMode } of sortedResults) {
         if (!result) continue;
 
         // 修复 isCurrentSource 判断，确保类型一致
         const isCurrentSource = String(sourceKey) === String(currentSourceCode) && String(result.vod_id) === String(currentVideoId);
-        const sourceName = resourceOptions.find(opt => opt.key === sourceKey)?.name || '未知资源';
-        const speedResult = speedResults[sourceKey] || { speed: -1, error: '未测试' };
+        const speedResult = speedResults[`${sourceKey}:${result.vod_id}`] || { speed: -1, error: '未测试' };
         const safeSourceKey = escapeJsString(sourceKey);
         const safeVodId = escapeJsString(result.vod_id || '');
         const safeVodName = escapeHtml(result.vod_name || '未知资源');
         const safeSourceName = escapeHtml(sourceName);
         const safeImageUrl = getSafeImageUrl(result.vod_pic || '');
+        const requiresManualConfirmation = selectionMode === 'manual-required';
+        const identityLabel = requiresManualConfirmation ? '需人工确认作品' : 'Core 已验证作品';
 
         html += `
             <div class="relative group ${isCurrentSource ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:scale-105 transition-transform'}" 
-                 ${!isCurrentSource ? `onclick="switchToResource('${safeSourceKey}', '${safeVodId}')"` : ''}>
+                 ${!isCurrentSource ? `onclick="switchToResource('${safeSourceKey}', '${safeVodId}', ${requiresManualConfirmation})"` : ''}>
                 <div class="aspect-[2/3] rounded-lg overflow-hidden bg-gray-800 relative">
                     ${safeImageUrl ? `<img src="${escapeHtml(safeImageUrl)}"
                          alt="${safeVodName}"
@@ -5565,6 +5870,7 @@ async function showSwitchResourceModal() {
                 <div class="mt-2">
                     <div class="text-xs font-medium text-gray-200 truncate">${safeVodName}</div>
                     <div class="text-[10px] text-gray-400 truncate">${safeSourceName}</div>
+                    <div class="text-[10px] text-gray-500 truncate">${escapeHtml(identityLabel)}</div>
                     <div class="text-[10px] text-gray-500 mt-1">
                         ${speedResult.episodes ? `${speedResult.episodes}集` : ''}
                     </div>
@@ -5584,8 +5890,26 @@ async function showSwitchResourceModal() {
     modalContent.innerHTML = html;
 }
 
+function showSourceSwitchEpisodeFallback(sourceKey, vodId, episodeEntries, reason) {
+    const modal = document.getElementById('modal');
+    const modalTitle = document.getElementById('modalTitle');
+    const modalContent = document.getElementById('modalContent');
+    if (!modal || !modalTitle || !modalContent) return;
+
+    modalTitle.textContent = '请选择对应播放项';
+    const buttons = episodeEntries.map((episode, index) => {
+        const label = episode?.rawEpisodeName || episode?.name || episode?.displayEpisodeName || `播放项 ${index + 1}`;
+        return `<button class="episode-btn" onclick="switchToResource('${escapeJsString(sourceKey)}', '${escapeJsString(vodId)}', true, ${index})">${escapeHtml(label)}</button>`;
+    }).join('');
+    modalContent.innerHTML = `
+        <div class="col-span-full text-sm text-gray-400 mb-3">${escapeHtml(reason || 'Core 无法自动确认对应剧集，请手动选择。')}</div>
+        <div class="episode-grid col-span-full">${buttons}</div>
+    `;
+    modal.classList.remove('hidden');
+}
+
 // 切换资源的函数
-async function switchToResource(sourceKey, vodId) {
+async function switchToResource(sourceKey, vodId, manualMediaConfirmation = false, manualTargetIndex = null) {
     // 关闭模态框
     document.getElementById('modal').classList.add('hidden');
 
@@ -5621,6 +5945,17 @@ async function switchToResource(sourceKey, vodId) {
 
         const data = await response.json();
 
+        const sourceName = API_SITES[sourceKey]?.name || getCustomApiInfo(sourceKey.replace('custom_', ''))?.name || sourceKey;
+        const mediaIdentity = evaluateSourceSwitchCandidate(data, sourceKey, sourceName);
+        if (mediaIdentity.decision === 'rejected') {
+            showToast('该资源与当前作品身份冲突，已阻止切换', 'error');
+            return;
+        }
+        if (mediaIdentity.decision === 'uncertain' && !manualMediaConfirmation) {
+            showToast('该资源作品身份不确定，请从资源列表手动确认', 'warning');
+            return;
+        }
+
         const episodeEntries = Array.isArray(data.episodes)
             ? data.episodes.filter(episode => getPlayerEpisodeUrlValue(episode))
             : [];
@@ -5632,14 +5967,32 @@ async function switchToResource(sourceKey, vodId) {
             return;
         }
 
-        // 获取当前播放的集数索引
-        const currentIndex = currentEpisodeIndex;
-
-        // 确定要播放的集数索引
-        let targetIndex = 0;
-        if (currentIndex < playableEpisodes.length) {
-            // 如果当前集数在新资源中存在，则使用相同集数
-            targetIndex = currentIndex;
+        const episodeResolution = resolveSourceSwitchEpisode(
+            data,
+            sourceKey,
+            sourceName,
+            vodId,
+            episodeEntries
+        );
+        let targetIndex = episodeResolution.targetIndex;
+        if (Number.isInteger(manualTargetIndex)) {
+            if (manualTargetIndex < 0 || manualTargetIndex >= episodeEntries.length) {
+                showToast('手动选择的播放项无效', 'error');
+                return;
+            }
+            targetIndex = manualTargetIndex;
+        } else if (targetIndex < 0) {
+            if (episodeResolution.state === 'rejected') {
+                showToast('目标资源的剧集身份与当前剧集冲突', 'error');
+                return;
+            }
+            showSourceSwitchEpisodeFallback(
+                sourceKey,
+                vodId,
+                episodeEntries,
+                episodeResolution.resolution?.reason || 'Core 无法自动确认对应剧集，请手动选择。'
+            );
+            return;
         }
 
         // 获取目标集数的URL
@@ -5755,6 +6108,7 @@ function danmuBindingMatchesContext(binding, context, candidate, terminal) {
 }
 
 function getDanmuModalCandidateState(candidate, identity, context) {
+    const isWholeMediaContext = context?.media?.mediaType === 'movie';
     const terminal = danmuTerminalMatchesContext(currentDanmuCache, context)
         ? currentDanmuCache
         : null;
@@ -5773,7 +6127,7 @@ function getDanmuModalCandidateState(candidate, identity, context) {
 
     if (bindingMatches) {
         const scopeLabel = terminal.binding.scope === 'whole_media'
-            ? '整部影片已验证'
+            ? '影片内容已验证'
             : '当前剧集已验证';
         if (terminal.state === 'success') {
             return { state: 'current', label: `当前使用 · ${scopeLabel}`, isActive: true };
@@ -5797,6 +6151,9 @@ function getDanmuModalCandidateState(candidate, identity, context) {
         if (terminal.state === 'episode-uncertain'
             || terminal.state === 'episode-not-found'
             || terminal.state === 'episode-rejected') {
+            if (isWholeMediaContext) {
+                return { state: 'whole-media-uncertain', label: '影片内容身份不确定', isActive: false };
+            }
             return { state: 'episode-uncertain', label: '当前剧集身份不确定', isActive: false };
         }
         if (terminal.state === 'candidate-uncertain'
@@ -5820,7 +6177,13 @@ function getDanmuModalCandidateState(candidate, identity, context) {
     }
 
     if (identity.decision === 'confirmed' || identity.decision === 'supported') {
-        return { state: 'media-verified', label: '作品身份已验证 · 当前剧集待验证', isActive: false };
+        return {
+            state: 'media-verified',
+            label: isWholeMediaContext
+                ? '作品身份已验证 · 影片内容待验证'
+                : '作品身份已验证 · 当前剧集待验证',
+            isActive: false,
+        };
     }
     if (identity.decision === 'uncertain') {
         return { state: 'media-uncertain', label: '作品身份不确定', isActive: false };
@@ -6039,11 +6402,14 @@ async function applyManualDanmuResolution(candidate, manualEpisodeId = null) {
     }
 
     if (!result?.binding) {
+        const isWholeMediaContext = resolution.context?.media?.mediaType === 'movie';
         const stateMessages = {
             'candidate-conflict': '所选作品与当前影片身份冲突',
             'episode-rejected': '所选弹幕剧集与当前播放剧集冲突',
             'episode-not-found': '该作品中未找到当前剧集',
-            'episode-uncertain': '当前剧集信息不足，无法安全匹配',
+            'episode-uncertain': isWholeMediaContext
+                ? '影片内容信息不足，无法安全匹配'
+                : '当前剧集信息不足，无法安全匹配',
             'rate-limited': '弹幕服务请求过快，请稍后重试',
         };
         showToast(stateMessages[result?.state] || '无法安全匹配该弹幕源', 'warning');
@@ -6071,6 +6437,7 @@ async function applyManualDanmuResolution(candidate, manualEpisodeId = null) {
         matchInfo: lastDanmuMatchInfo ? { ...lastDanmuMatchInfo } : null,
         fetchStats: lastDanmuFetchStats ? { ...lastDanmuFetchStats } : null,
         timestamp: Date.now(),
+        ttlMs: getDanmuTerminalCacheTtl(result.state),
     };
     currentDanmuCache = terminal;
     writeDanmuTerminalResult(cacheKey, terminal);
@@ -6085,7 +6452,12 @@ async function applyManualDanmuResolution(candidate, manualEpisodeId = null) {
         showToast(`✓ 已切换到: ${candidate.animeTitle} (${resolution.danmuku.length}条)`, 'success');
     } else if (result.state === 'comments-empty') {
         document.getElementById('danmuSourceModal')?.classList.add('hidden');
-        showToast('该弹幕剧集暂无弹幕', 'warning');
+        showToast(
+            resolution.context?.media?.mediaType === 'movie'
+                ? '该影片暂无弹幕'
+                : '该弹幕剧集暂无弹幕',
+            'warning',
+        );
     } else {
         showToast('弹幕加载失败，请稍后重试', 'warning');
     }
@@ -6134,8 +6506,9 @@ window.debugPlayer = function() {
 };
 
 window.cleanupPlayer = function() {
+    invalidatePlayerLifecycle('manual-cleanup');
     if (videoPlayer) {
-        videoPlayer.destroy();
+        videoPlayer.destroy({ preserveLifecycle: true });
         videoPlayer = null;
         window.LibertyDebug.log('✅ 播放器已手动清理');
     }

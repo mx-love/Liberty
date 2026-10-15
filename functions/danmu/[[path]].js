@@ -1,4 +1,5 @@
 import { proxyDanmuUpstream } from '../_lib/danmu-proxy.js';
+import { readCookie, verifyBrowserSession } from '../_lib/proxy-security.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -17,31 +18,9 @@ function json(data, status = 200) {
   });
 }
 
-async function sha256(text) {
-  const data = new TextEncoder().encode(text);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(hashBuffer))
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
 async function validateAuth(request, env) {
-  const url = new URL(request.url);
-  const auth = url.searchParams.get('auth');
-  const t = url.searchParams.get('t');
-
-  if (!env.PASSWORD) return false;
-  if (!auth) return false;
-
-  const serverHash = await sha256(env.PASSWORD);
-  if (auth !== serverHash) return false;
-
-  if (t) {
-    const diff = Math.abs(Date.now() - Number(t));
-    if (!Number.isFinite(diff) || diff > 10 * 60 * 1000) return false;
-  }
-
-  return true;
+  const token = readCookie(request.headers.get('Cookie'), 'liberty_session');
+  return verifyBrowserSession(token, env);
 }
 
 export async function onRequest(context) {
@@ -58,8 +37,6 @@ export async function onRequest(context) {
   const url = new URL(request.url);
   const apiPath = url.pathname.replace(/^\/danmu\/?/, '');
 
-  url.searchParams.delete('auth');
-  url.searchParams.delete('t');
   return proxyDanmuUpstream({
     request: new Request(url, request),
     env,

@@ -106,6 +106,64 @@
         localStorage.setItem('currentEpisodeIndex', String(Math.max(0, safeIndex)));
     }
 
+    const PLAYBACK_METADATA_FIELDS = [
+        'title',
+        'year',
+        'category',
+        'type',
+        'remarks',
+        'director',
+        'actors',
+        'area',
+        'language',
+        'sourceCode',
+        'sourceName',
+        'vodId',
+        'mediaUrl'
+    ];
+
+    function normalizeIdentityValue(value) {
+        return String(value || '').trim();
+    }
+
+    function isSamePlaybackContext(session = {}, request = {}) {
+        const requestSourceCode = normalizeIdentityValue(request.sourceCode);
+        const requestVodId = normalizeIdentityValue(request.vodId);
+        const sessionSourceCode = normalizeIdentityValue(session.sourceCode);
+        const sessionVodId = normalizeIdentityValue(session.vodId);
+        const requestTitle = normalizeIdentityValue(request.title);
+        const sessionTitle = normalizeIdentityValue(session.title);
+        const requestUrl = normalizeIdentityValue(request.mediaUrl);
+        const sessionUrl = normalizeIdentityValue(session.mediaUrl);
+
+        if (requestSourceCode && sessionSourceCode && requestSourceCode !== sessionSourceCode) {
+            return false;
+        }
+        if (requestVodId && sessionVodId && requestVodId !== sessionVodId) {
+            return false;
+        }
+        if (requestTitle && sessionTitle && requestTitle !== sessionTitle) {
+            return false;
+        }
+
+        // A complete source locator is the strongest playback-session identity.
+        if (
+            requestSourceCode && requestVodId &&
+            requestSourceCode === sessionSourceCode &&
+            requestVodId === sessionVodId
+        ) {
+            return true;
+        }
+
+        if (!requestUrl) return false;
+        const sessionEpisodeUrls = normalizeEpisodesToUrls(session.episodeEntries || session.episodes);
+        const urlBelongsToSession = requestUrl === sessionUrl || sessionEpisodeUrls.includes(requestUrl);
+
+        // URL membership can preserve the same session, but never override an
+        // explicit title conflict checked above.
+        return urlBelongsToSession && Boolean(requestTitle || sessionTitle || sessionUrl);
+    }
+
     function readPlaybackSession() {
         return {
             title: localStorage.getItem('currentVideoTitle') || '',
@@ -120,6 +178,7 @@
             sourceCode: localStorage.getItem('currentSourceCode') || '',
             sourceName: localStorage.getItem('currentSourceName') || '',
             vodId: localStorage.getItem('currentVodId') || '',
+            mediaUrl: localStorage.getItem('currentMediaUrl') || '',
             episodeIndex: readCurrentEpisodeIndex(),
             episodes: readCurrentEpisodes(),
             episodeEntries: readCurrentEpisodeEntries(),
@@ -164,6 +223,9 @@
         if (session.vodId !== undefined) {
             localStorage.setItem('currentVodId', String(session.vodId || ''));
         }
+        if (session.mediaUrl !== undefined) {
+            localStorage.setItem('currentMediaUrl', String(session.mediaUrl || ''));
+        }
         if (session.episodeIndex !== undefined) {
             writeCurrentEpisodeIndex(session.episodeIndex);
         }
@@ -176,6 +238,43 @@
         return readPlaybackSession();
     }
 
+    function replacePlaybackSession(session = {}) {
+        const completeSession = {};
+        PLAYBACK_METADATA_FIELDS.forEach((field) => {
+            completeSession[field] = session[field] === undefined ? '' : session[field];
+        });
+        completeSession.episodeIndex = session.episodeIndex === undefined ? 0 : session.episodeIndex;
+        completeSession.episodeEntries = session.episodeEntries !== undefined
+            ? session.episodeEntries
+            : (session.episodes !== undefined ? session.episodes : []);
+        return writePlaybackSession(completeSession);
+    }
+
+    function beginPlaybackSession(request = {}) {
+        const previous = readPlaybackSession();
+        const canReuse = isSamePlaybackContext(previous, request);
+        const next = canReuse ? { ...previous } : {};
+
+        PLAYBACK_METADATA_FIELDS.forEach((field) => {
+            if (request[field] !== undefined) next[field] = request[field];
+        });
+        if (request.episodeIndex !== undefined) next.episodeIndex = request.episodeIndex;
+        if (request.episodeEntries !== undefined) {
+            next.episodeEntries = request.episodeEntries;
+        } else if (request.episodes !== undefined) {
+            next.episodeEntries = request.episodes;
+        } else if (!canReuse) {
+            // A direct URL is a playable item, but carries no episode identity.
+            // Preserve only the locator and never manufacture a label/index.
+            next.episodeEntries = request.mediaUrl ? [{ url: String(request.mediaUrl) }] : [];
+        }
+
+        return {
+            session: replacePlaybackSession(next),
+            reused: canReuse
+        };
+    }
+
     window.LibertyUtils.playbackState = {
         normalizeEpisodesToUrls,
         normalizeEpisodeEntries,
@@ -186,6 +285,9 @@
         readCurrentEpisodeIndex,
         writeCurrentEpisodeIndex,
         readPlaybackSession,
-        writePlaybackSession
+        writePlaybackSession,
+        replacePlaybackSession,
+        beginPlaybackSession,
+        isSamePlaybackContext
     };
 })();

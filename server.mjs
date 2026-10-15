@@ -1,11 +1,18 @@
 import path from 'path';
 import express from 'express';
-import axios from 'axios';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
-import crypto from 'crypto';
 import dotenv from 'dotenv';
+import {
+  issueBrowserSession,
+  issueProxyCapability,
+  passwordMatches,
+  readCookie,
+  validateProxyTarget,
+  verifyBrowserSession,
+  verifyProxyCapability,
+} from './functions/_lib/proxy-security.js';
 
 dotenv.config();
 
@@ -21,6 +28,13 @@ const config = {
   cacheMaxAge: process.env.CACHE_MAX_AGE || '1d',
   userAgent: process.env.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
   debug: process.env.DEBUG === 'true'
+};
+
+const proxyEnv = {
+  PASSWORD: config.password,
+  PROXY_SIGNING_SECRET: process.env.PROXY_SIGNING_SECRET || '',
+  SESSION_SIGNING_SECRET: process.env.SESSION_SIGNING_SECRET || '',
+  PROXY_ALLOWED_ORIGINS: process.env.PROXY_ALLOWED_ORIGINS || '',
 };
 
 const log = (...args) => {
@@ -44,22 +58,9 @@ app.use((req, res, next) => {
   next();
 });
 
-function sha256Hash(input) {
-  return new Promise((resolve) => {
-    const hash = crypto.createHash('sha256');
-    hash.update(input);
-    resolve(hash.digest('hex'));
-  });
-}
-
 async function renderPage(filePath, password) {
   let content = fs.readFileSync(filePath, 'utf8');
-  if (password !== '') {
-    const sha256 = await sha256Hash(password);
-    content = content.replace('{{PASSWORD}}', sha256);
-  } else {
-    content = content.replace('{{PASSWORD}}', '');
-  }
+  content = content.replace('{{PASSWORD}}', password ? 'required' : '');
   return content;
 }
 
@@ -94,131 +95,126 @@ app.get('/s=:keyword', async (req, res) => {
   }
 });
 
-function isValidUrl(urlString) {
-  try {
-    const parsed = new URL(urlString);
-    const allowedProtocols = ['http:', 'https:'];
-    
-    // 从环境变量获取阻止的主机名列表
-    const blockedHostnames = (process.env.BLOCKED_HOSTS || 'localhost,127.0.0.1,0.0.0.0,::1').split(',');
-    
-    // 从环境变量获取阻止的 IP 前缀
-    const blockedPrefixes = (process.env.BLOCKED_IP_PREFIXES || '192.168.,10.,172.').split(',');
-    
-    if (!allowedProtocols.includes(parsed.protocol)) return false;
-    if (blockedHostnames.includes(parsed.hostname)) return false;
-    
-    for (const prefix of blockedPrefixes) {
-      if (parsed.hostname.startsWith(prefix)) return false;
-    }
-    
-    return true;
-  } catch {
-    return false;
-  }
+function browserSessionCookie(req, token, maxAge) {
+  const forwardedProto = String(req.get('X-Forwarded-Proto') || '').split(',')[0].trim();
+  const secure = req.secure || forwardedProto === 'https' ? '; Secure' : '';
+  return `liberty_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`;
 }
 
-// 验证代理请求的鉴权
-function validateProxyAuth(req) {
-  const authHash = req.query.auth;
-  const timestamp = req.query.t;
-  
-  // 获取服务器端密码哈希
-  const serverPassword = config.password;
-  if (!serverPassword) {
-    console.error('服务器未设置 PASSWORD 环境变量，代理访问被拒绝');
-    return false;
+app.get('/api/auth-session', async (req, res) => {
+  const token = readCookie(req.get('Cookie'), 'liberty_session');
+  res.set('Cache-Control', 'no-store');
+  return res.json({ success: true, authenticated: await verifyBrowserSession(token, proxyEnv) });
+});
+
+app.delete('/api/auth-session', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('Set-Cookie', browserSessionCookie(req, '', 0));
+  return res.json({ success: true });
+});
+
+app.post('/api/auth-session', express.json({ limit: '1kb' }), async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!await passwordMatches(req.body?.password, proxyEnv)) {
+    return res.status(401).json({ success: false, error: 'invalid_password' });
   }
-  
-  // 使用 crypto 模块计算 SHA-256 哈希
-  const serverPasswordHash = crypto.createHash('sha256').update(serverPassword).digest('hex');
-  
-  if (!authHash || authHash !== serverPasswordHash) {
-    console.warn('代理请求鉴权失败：密码哈希不匹配');
-    console.warn(`期望: ${serverPasswordHash}, 收到: ${authHash}`);
-    return false;
+  const session = await issueBrowserSession(proxyEnv);
+  if (!session) return res.status(503).json({ success: false, error: 'session_not_configured' });
+  const maxAge = Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000));
+  res.set('Set-Cookie', browserSessionCookie(req, session.token, maxAge));
+  return res.json({ success: true, expiresAt: session.expiresAt });
+});
+
+app.post('/api/proxy-token', express.json({ limit: '8kb' }), async (req, res) => {
+  const sessionToken = readCookie(req.get('Cookie'), 'liberty_session');
+  if (!await verifyBrowserSession(sessionToken, proxyEnv)) {
+    res.set('Cache-Control', 'no-store');
+    return res.status(401).json({ success: false, error: 'proxy_auth_required' });
   }
-  
-  // 验证时间戳（10分钟有效期）
-  if (timestamp) {
-    const now = Date.now();
-    const maxAge = 10 * 60 * 1000; // 10分钟
-    if (now - parseInt(timestamp) > maxAge) {
-      console.warn('代理请求鉴权失败：时间戳过期');
-      return false;
-    }
+  const capability = await issueProxyCapability({
+    env: proxyEnv,
+    target: req.body?.target,
+    method: req.body?.method,
+  });
+  res.set('Cache-Control', 'no-store');
+  if (!capability.ok) {
+    return res.status(capability.reason === 'proxy_signing_not_configured' ? 503 : 403).json({
+      success: false,
+      error: capability.reason,
+    });
   }
-  
-  return true;
-}
+  return res.json({
+    success: true,
+    expiresAt: capability.expiresAt,
+    nonce: capability.nonce,
+    signature: capability.signature,
+  });
+});
 
 app.get('/proxy/:encodedUrl', async (req, res) => {
   try {
-    // 验证鉴权
-    if (!validateProxyAuth(req)) {
-      return res.status(401).json({
-        success: false,
-        error: '代理访问未授权：请检查密码配置或鉴权参数'
-      });
-    }
-
     const encodedUrl = req.params.encodedUrl;
     const targetUrl = decodeURIComponent(encodedUrl);
-
-    // 安全验证
-    if (!isValidUrl(targetUrl)) {
-      return res.status(400).send('无效的 URL');
+    const targetValidation = validateProxyTarget(targetUrl, proxyEnv);
+    if (!targetValidation.ok) {
+      res.set('Cache-Control', 'no-store');
+      return res.status(403).json({ success: false, error: targetValidation.reason });
+    }
+    const authorization = await verifyProxyCapability({
+      env: proxyEnv,
+      method: 'GET',
+      target: targetValidation.target,
+      expiresAt: req.query.pxe,
+      nonce: req.query.pxn,
+      signature: req.query.pxs,
+    });
+    if (!authorization.ok) {
+      res.set('Cache-Control', 'no-store');
+      return res.status(401).json({ success: false, error: authorization.reason });
     }
 
-    log(`代理请求: ${targetUrl}`);
-
-    // 添加请求超时和重试逻辑
-    const maxRetries = config.maxRetries;
-    let retries = 0;
-    
-    const makeRequest = async () => {
-      try {
-        return await axios({
-          method: 'get',
-          url: targetUrl,
-          responseType: 'stream',
-          timeout: config.timeout,
-          headers: {
-            'User-Agent': config.userAgent
-          }
-        });
-      } catch (error) {
-        if (retries < maxRetries) {
-          retries++;
-          log(`重试请求 (${retries}/${maxRetries}): ${targetUrl}`);
-          return makeRequest();
-        }
-        throw error;
+    const response = await fetch(authorization.target, {
+      headers: {
+        Accept: req.get('Accept') || 'application/json,text/plain,text/html,*/*',
+        'User-Agent': config.userAgent,
+      },
+      redirect: 'error',
+      signal: AbortSignal.timeout(config.timeout),
+    });
+    if (!response.ok) {
+      res.set('Cache-Control', 'no-store');
+      return res.status(response.status).json({ success: false, error: 'proxy_upstream_error' });
+    }
+    const contentType = response.headers.get('Content-Type') || '';
+    if (!/^(?:application\/(?:json|[^;]+\+json|xml)|text\/(?:plain|html|xml|csv))(?:;|$)/iu.test(contentType)) {
+      res.set('Cache-Control', 'no-store');
+      return res.status(415).json({ success: false, error: 'unsafe_response_type' });
+    }
+    const declaredLength = Number(response.headers.get('Content-Length') || 0);
+    if (declaredLength > 5 * 1024 * 1024) {
+      res.set('Cache-Control', 'no-store');
+      return res.status(502).json({ success: false, error: 'response_too_large' });
+    }
+    const chunks = [];
+    let received = 0;
+    for await (const chunk of response.body || []) {
+      received += chunk.byteLength;
+      if (received > 5 * 1024 * 1024) {
+        res.set('Cache-Control', 'no-store');
+        return res.status(502).json({ success: false, error: 'response_too_large' });
       }
-    };
-
-    const response = await makeRequest();
-
-    // 转发响应头（过滤敏感头）
-    const headers = { ...response.headers };
-    const sensitiveHeaders = (
-      process.env.FILTERED_HEADERS || 
-      'content-security-policy,cookie,set-cookie,x-frame-options,access-control-allow-origin'
-    ).split(',');
-    
-    sensitiveHeaders.forEach(header => delete headers[header]);
-    res.set(headers);
-
-    // 管道传输响应流
-    response.data.pipe(res);
-  } catch (error) {
-    console.error('代理请求错误:', error.message);
-    if (error.response) {
-      res.status(error.response.status || 500);
-      error.response.data.pipe(res);
-    } else {
-      res.status(500).send(`请求失败: ${error.message}`);
+      chunks.push(Buffer.from(chunk));
     }
+    const body = Buffer.concat(chunks, received);
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'no-store');
+    return res.send(body);
+  } catch (error) {
+    res.set('Cache-Control', 'no-store');
+    return res.status(error?.name === 'TimeoutError' ? 504 : 502).json({
+      success: false,
+      error: error?.name === 'TimeoutError' ? 'proxy_timeout' : 'proxy_upstream_unavailable',
+    });
   }
 });
 
@@ -227,6 +223,10 @@ app.use(express.static(path.join(__dirname), {
 }));
 
 app.use((err, req, res, next) => {
+  if (err?.type === 'entity.too.large') {
+    res.set('Cache-Control', 'no-store');
+    return res.status(413).json({ success: false, error: 'request_too_large' });
+  }
   console.error('服务器错误:', err);
   res.status(500).send('服务器内部错误');
 });

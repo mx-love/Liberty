@@ -624,11 +624,22 @@ export class DanmuService {
       });
     }
 
+    const selectedIdentity = candidateResolution.evaluations.find(
+      ({ candidate }) => candidate === selectedCandidate,
+    )?.identityInput;
+
     let episodeResolution = this.episodeResolver.resolve({
       media: canonicalInput.media,
       targetEpisode: canonicalInput.episode,
       canonicalEpisodes: canonicalInput.mediaEpisodes,
       danmuEpisodes: bangumi.data.episodes,
+      candidateIdentityTitles: selectedIdentity === undefined
+        ? []
+        : [
+            selectedIdentity.identityTitle,
+            selectedIdentity.parsedTitle?.baseTitle ?? '',
+            ...(selectedIdentity.aliases ?? []),
+          ],
     });
     if (canonicalInput.manualEpisodeId !== undefined) {
       const manualSelection = applyManualEpisodeSelection(

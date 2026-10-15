@@ -23,11 +23,20 @@
     const SESSION_ROOM_ID_KEY = 'watchRoomId';
     const SESSION_ROOM_ROLE_KEY = 'watchRoomRole';
     const SESSION_ROOM_CLIENT_ID_KEY = 'watchRoomClientId';
+    const SESSION_ROOM_CREDENTIAL_KEY = 'watchRoomCredential';
+    const SESSION_PROTOCOL_VERSION_KEY = 'watchRoomProtocolVersion';
     const SESSION_REDIRECTING_KEY = 'watchRoomRedirecting';
+    const WATCH_PROTOCOL = 'liberty-watch-v1';
+    const WATCH_PROTOCOL_VERSION = 2;
+    const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 12000, 12000];
 
     let activeRoom = null;
     let socket = null;
     let heartbeatTimer = null;
+    let reconnectTimer = null;
+    let reconnectAttempt = 0;
+    let socketGeneration = 0;
+    let socketCloseIntentional = true;
     let hostSyncTimer = null;
     let hostSeekDebounceTimer = null;
     let playerSyncSetupTimer = null;
@@ -89,7 +98,7 @@
                 status: 'waiting'
             });
         }
-        if (activeRoom?.role === 'viewer') {
+        if (['ROOM_ENDED', 'ROOM_NOT_FOUND', 'INVALID_CREDENTIAL', 'PROTOCOL_MISMATCH'].includes(payload.code)) {
             clearRoomState();
         }
     }
@@ -329,12 +338,21 @@
         if (room.clientId !== undefined) {
             writeSessionValue(SESSION_ROOM_CLIENT_ID_KEY, room.clientId);
         }
+        if (room.credential !== undefined) {
+            writeSessionValue(SESSION_ROOM_CREDENTIAL_KEY, room.credential);
+        }
+        writeSessionValue(
+            SESSION_PROTOCOL_VERSION_KEY,
+            room.protocolVersion || WATCH_PROTOCOL_VERSION,
+        );
     }
 
     function clearStoredRoomSession() {
         removeSessionValue(SESSION_ROOM_ID_KEY);
         removeSessionValue(SESSION_ROOM_ROLE_KEY);
         removeSessionValue(SESSION_ROOM_CLIENT_ID_KEY);
+        removeSessionValue(SESSION_ROOM_CREDENTIAL_KEY);
+        removeSessionValue(SESSION_PROTOCOL_VERSION_KEY);
         removeSessionValue('watchRoomMediaSnapshot');
         removeSessionValue('watchRoomPlaybackSnapshot');
     }
@@ -1833,6 +1851,8 @@
                 roomId: data.roomId,
                 role: 'host',
                 clientId: data.clientId || data.hostId,
+                credential: data.hostCredential || '',
+                protocolVersion: data.protocolVersion || WATCH_PROTOCOL_VERSION,
                 participantCount: 1,
                 maxMembers: data.maxMembers || 10,
                 status: data.status || 'waiting',
@@ -1845,7 +1865,12 @@
             };
             setActiveRoom(room);
             persistRoomSession(room);
-            connectRoomSocket(data.roomId, 'host', data.clientId || data.hostId);
+            connectRoomSocket(
+                data.roomId,
+                'host',
+                data.clientId || data.hostId,
+                data.hostCredential || '',
+            );
             renderWatchRoomPanel();
             ensureWatchRoomModal().classList.remove('hidden');
         } catch (error) {
@@ -1933,8 +1958,48 @@
         const url = new URL(`${protocol}//${window.location.host}/api/watch/ws`);
         url.searchParams.set('room', roomId);
         url.searchParams.set('role', role);
+        url.searchParams.set('protocolVersion', String(WATCH_PROTOCOL_VERSION));
         if (clientId) url.searchParams.set('clientId', clientId);
         return url.toString();
+    }
+
+    function clearReconnectTimer() {
+        if (reconnectTimer) {
+            window.clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+    }
+
+    function scheduleRoomReconnect(reason = 'socket_closed') {
+        if (!activeRoom || socketCloseIntentional || reconnectTimer) return false;
+        if (reconnectAttempt >= RECONNECT_DELAYS.length) {
+            showMessage('一起看重连失败，请重新加入房间', 'error');
+            return false;
+        }
+        const baseDelay = RECONNECT_DELAYS[reconnectAttempt] || RECONNECT_DELAYS.at(-1);
+        const delay = Math.round(baseDelay * (0.85 + (Math.random() * 0.3)));
+        reconnectAttempt += 1;
+        setActiveRoom({
+            ...(activeRoom || {}),
+            connectionState: 'reconnecting',
+        });
+        reconnectTimer = window.setTimeout(() => {
+            reconnectTimer = null;
+            if (!activeRoom || socketCloseIntentional) return;
+            connectRoomSocket(
+                activeRoom.roomId,
+                activeRoom.role,
+                activeRoom.clientId,
+                activeRoom.credential,
+                { reconnect: true },
+            );
+        }, delay);
+        window.LibertyDebug.warn('[WatchRoom] reconnect scheduled', {
+            reason,
+            attempt: reconnectAttempt,
+            delay,
+        });
+        return true;
     }
 
     async function fetchRoomState(roomId) {
@@ -1979,12 +2044,25 @@
         }
     }
 
-    function connectRoomSocket(roomId, role, clientId = '') {
-        closeSocket(false);
+    function connectRoomSocket(roomId, role, clientId = '', credential = '', options = {}) {
+        if (socket) closeSocket(false, true);
+        clearReconnectTimer();
+        socketCloseIntentional = false;
+        const generation = ++socketGeneration;
+        const protocols = credential
+            ? [WATCH_PROTOCOL, credential]
+            : [WATCH_PROTOCOL];
+        const nextSocket = new WebSocket(buildWebSocketUrl(roomId, role, clientId), protocols);
+        socket = nextSocket;
 
-        socket = new WebSocket(buildWebSocketUrl(roomId, role, clientId));
-
-        socket.addEventListener('open', () => {
+        nextSocket.addEventListener('open', () => {
+            if (generation !== socketGeneration || socket !== nextSocket) return;
+            reconnectAttempt = 0;
+            setActiveRoom({
+                ...(activeRoom || {}),
+                connectionState: 'connected',
+            });
+            getWatchRoomController()?.setContext({ connected: true });
             startHeartbeat();
             if (role === 'viewer') {
                 window.LibertyDebug.log('[WatchRoom] viewer socket connected', {
@@ -1993,26 +2071,30 @@
                     clientId: clientId || '(server-generated)'
                 });
                 window.LibertyDebug.log('[WatchRoom] join room success', roomId);
-                showMessage('已连接一起看房间', 'success');
+                if (!options.reconnect) showMessage('已连接一起看房间', 'success');
             }
         });
 
-        socket.addEventListener('message', (event) => {
+        nextSocket.addEventListener('message', (event) => {
+            if (generation !== socketGeneration || socket !== nextSocket) return;
             handleSocketMessage(event.data);
         });
 
-        socket.addEventListener('close', () => {
+        nextSocket.addEventListener('close', () => {
+            if (generation !== socketGeneration || socket !== nextSocket) return;
+            const intentional = Boolean(nextSocket.__libertyIntentionalClose);
+            socket = null;
             stopHeartbeat();
+            getWatchRoomController()?.setContext({ connected: false });
+            if (!intentional) scheduleRoomReconnect('socket_close');
         });
 
-        socket.addEventListener('error', () => {
-            if (role === 'viewer') {
-                showMessage('房间不存在或已结束', 'error');
-                clearRoomState();
-                return;
-            }
-            showMessage('一起看连接失败', 'error');
-            clearRoomState();
+        nextSocket.addEventListener('error', () => {
+            if (generation !== socketGeneration || socket !== nextSocket) return;
+            window.LibertyDebug.warn('[WatchRoom] socket error; close event will control reconnect', {
+                roomId,
+                role,
+            });
         });
     }
 
@@ -2021,6 +2103,36 @@
         try {
             message = JSON.parse(rawData);
         } catch (error) {
+            return;
+        }
+
+        if (message.type === 'session:credentials') {
+            const payload = message.payload || {};
+            const issuedClientId = String(payload.clientId || message.clientId || '');
+            const issuedCredential = String(payload.credential || '');
+            const protocolVersion = Number(payload.protocolVersion);
+            if (
+                !activeRoom
+                || message.roomId !== activeRoom.roomId
+                || payload.role !== activeRoom.role
+                || !issuedClientId
+                || !issuedCredential
+                || protocolVersion !== WATCH_PROTOCOL_VERSION
+            ) {
+                closeSocket(false);
+                clearRoomState();
+                showMessage('一起看会话凭证无效，请重新加入房间', 'error');
+                return;
+            }
+            const room = {
+                ...activeRoom,
+                clientId: issuedClientId,
+                credential: issuedCredential,
+                protocolVersion,
+            };
+            setActiveRoom(room);
+            persistRoomSession(room);
+            syncControllerContext(room);
             return;
         }
 
@@ -2044,6 +2156,7 @@
             'sync:episode-prepare',
             'sync:episode-start',
             'sync:episode-error',
+            'server:pong',
             'room:ended',
             'room:error',
         ];
@@ -2144,6 +2257,25 @@
             return;
         }
 
+        if (message.type === 'room:host-disconnected') {
+            setActiveRoom({
+                ...(activeRoom || {}),
+                status: 'host_disconnected',
+                connectionState: 'host_reconnecting',
+            });
+            showMessage('房主暂时离线，正在等待重连', 'info');
+            return;
+        }
+
+        if (message.type === 'room:host-reconnected') {
+            setActiveRoom({
+                ...(activeRoom || {}),
+                status: message.payload?.status || activeRoom?.status || 'waiting',
+                connectionState: 'connected',
+            });
+            return;
+        }
+
         if (message.type === 'room:ended') {
             showMessage('房主已结束一起看', 'info');
             clearRoomState();
@@ -2171,8 +2303,15 @@
 
     function startHeartbeat() {
         stopHeartbeat();
+        sendSocketMessage({
+            type: 'client:ping',
+            payload: { clientSentAt: Date.now() },
+        });
         heartbeatTimer = window.setInterval(() => {
-            sendSocketMessage({ type: 'client:heartbeat' });
+            sendSocketMessage({
+                type: 'client:ping',
+                payload: { clientSentAt: Date.now() },
+            });
         }, 30000);
     }
 
@@ -2194,39 +2333,36 @@
         return true;
     }
 
-    function closeSocket(sendLeave = true) {
-        if (socket) {
-            if (sendLeave && socket.readyState === WebSocket.OPEN) {
+    function closeSocket(sendLeave = true, preserveReconnectAttempt = false) {
+        clearReconnectTimer();
+        socketCloseIntentional = true;
+        const closingSocket = socket;
+        if (closingSocket) {
+            closingSocket.__libertyIntentionalClose = true;
+            if (sendLeave && closingSocket.readyState === WebSocket.OPEN) {
                 sendSocketMessage({ type: 'room:leave' });
             }
-            socket.close();
-            socket = null;
+            try {
+                closingSocket.close();
+            } catch (error) {}
+            if (socket === closingSocket) socket = null;
         }
         stopHeartbeat();
+        if (!preserveReconnectAttempt) reconnectAttempt = 0;
     }
 
     function handlePageExit() {
         if (!activeRoom || !socket) return;
-
-        try {
-            if (socket.readyState === WebSocket.OPEN) {
-                sendSocketMessage({
-                    type: activeRoom.role === 'host' ? 'room:end' : 'room:leave'
-                });
-            }
-        } catch (error) {}
-
-        try {
-            socket.close();
-        } catch (error) {}
-        socket = null;
-        stopHeartbeat();
+        // Navigation and refresh are recoverable disconnects. The server-side
+        // grace window owns cleanup; explicit UI actions send leave/end.
+        closeSocket(false, true);
     }
 
     async function endRoom() {
         if (!activeRoom) return;
 
         if (sendSocketMessage({ type: 'room:end' })) {
+            socketCloseIntentional = true;
             return;
         }
 
@@ -2238,7 +2374,8 @@
                 },
                 body: JSON.stringify({
                     roomId: activeRoom.roomId,
-                    clientId: activeRoom.clientId
+                    clientId: activeRoom.clientId,
+                    credential: activeRoom.credential || '',
                 })
             });
         } catch (error) {}
@@ -2312,7 +2449,7 @@
         const roomState = await fetchRoomState(cleaned);
         if (!roomState) return false;
 
-        if (roomState.status !== 'waiting') {
+        if (!['waiting', 'starting', 'playing'].includes(roomState.status)) {
             showMessage(
                 ['starting', 'playing'].includes(roomState.status)
                     ? '房间已开播，暂不支持加入'
@@ -2326,6 +2463,8 @@
             roomId: cleaned,
             role: 'viewer',
             clientId: '',
+            credential: '',
+            protocolVersion: roomState.protocolVersion || WATCH_PROTOCOL_VERSION,
             participantCount: roomState.participantCount || roomState.participantsCount || 1,
             maxMembers: roomState.maxMembers || 10,
             status: roomState.status || 'waiting',
@@ -2349,8 +2488,16 @@
         const roomId = readSessionValue(SESSION_ROOM_ID_KEY);
         const role = readSessionValue(SESSION_ROOM_ROLE_KEY);
         const clientId = readSessionValue(SESSION_ROOM_CLIENT_ID_KEY);
+        const credential = readSessionValue(SESSION_ROOM_CREDENTIAL_KEY);
+        const protocolVersion = Number(readSessionValue(SESSION_PROTOCOL_VERSION_KEY));
 
-        if (!isValidRoomId(roomId) || !['host', 'viewer'].includes(role)) {
+        if (
+            !isValidRoomId(roomId)
+            || !['host', 'viewer'].includes(role)
+            || protocolVersion !== WATCH_PROTOCOL_VERSION
+            || (role === 'host' && (!clientId || !credential))
+            || (role === 'viewer' && clientId && !credential)
+        ) {
             clearStoredRoomSession();
             return;
         }
@@ -2363,12 +2510,14 @@
             roomId,
             role,
             clientId,
+            credential,
+            protocolVersion,
             participantCount: 1,
             maxMembers: 10,
             status: 'waiting',
             pendingPlayerRedirect: false
         });
-        connectRoomSocket(roomId, role, clientId);
+        connectRoomSocket(roomId, role, clientId, credential, { reconnect: Boolean(clientId) });
     }
 
     async function copyRoomId() {

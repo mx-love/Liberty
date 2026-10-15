@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import test from 'node:test';
 
+import { issueBrowserSession } from '../functions/_lib/proxy-security.js';
 import {
   buildDanmuUpstreamUrl,
   proxyDanmuUpstream,
@@ -58,9 +58,9 @@ test('production /api/danmu proxy preserves TOKEN route and query', async () => 
   }
 });
 
-test('legacy /danmu route uses the shared TOKEN-preserving proxy without forwarding auth', async () => {
+test('legacy /danmu route uses an HttpOnly session and preserves the upstream TOKEN route', async () => {
   const password = 'test-password';
-  const auth = createHash('sha256').update(password).digest('hex');
+  const session = await issueBrowserSession({ PASSWORD: password });
   let calledUrl = '';
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
@@ -69,7 +69,9 @@ test('legacy /danmu route uses the shared TOKEN-preserving proxy without forward
   };
   try {
     const response = await onLegacyDanmuRequest({
-      request: request(`/danmu/api/v2/search/anime?keyword=test&auth=${auth}&t=${Date.now()}`),
+      request: request('/danmu/api/v2/search/anime?keyword=test', {
+        headers: { Cookie: `liberty_session=${session.token}` },
+      }),
       env: { DANMU_API_BASE: EXAMPLE_BASE, PASSWORD: password },
     });
     assert.equal(response.status, 200);
@@ -80,6 +82,15 @@ test('legacy /danmu route uses the shared TOKEN-preserving proxy without forward
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('legacy /danmu route rejects the removed password-hash query bearer', async () => {
+  const response = await onLegacyDanmuRequest({
+    request: request(`/danmu/api/v2/search/anime?auth=${'0'.repeat(64)}&t=${Date.now()}`),
+    env: { DANMU_API_BASE: EXAMPLE_BASE, PASSWORD: 'test-password' },
+  });
+  assert.equal(response.status, 401);
+  assert.match(await response.text(), /danmu unauthorized/u);
 });
 
 test('missing DANMU_API_BASE returns a precise 503', async () => {
@@ -163,4 +174,62 @@ test('unsafe endpoint traversal cannot escape the TOKEN route', async () => {
   });
   assert.equal(response.status, 400);
   assert.match(await response.text(), /danmu_upstream_invalid_path/u);
+});
+
+test('oversized danmu request body is rejected before upstream fetch', async () => {
+  let fetched = false;
+  const response = await proxyDanmuUpstream({
+    request: request('/api/danmu/api/v2/match', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: 'x'.repeat(300 * 1024) }),
+    }),
+    env: { DANMU_API_BASE: EXAMPLE_BASE },
+    path: '/api/v2/match',
+    fetchImpl: async () => {
+      fetched = true;
+      return Response.json({});
+    },
+  });
+  assert.equal(response.status, 413);
+  assert.equal(fetched, false);
+  assert.match(await response.text(), /danmu_upstream_body_too_large/u);
+});
+
+test('oversized danmu upstream response is rejected', async () => {
+  const response = await proxyDanmuUpstream({
+    request: request(),
+    env: { DANMU_API_BASE: EXAMPLE_BASE },
+    path: '/api/v2/search/anime',
+    fetchImpl: async () => new Response('{}', {
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': String(9 * 1024 * 1024),
+      },
+    }),
+  });
+  assert.equal(response.status, 413);
+  assert.match(await response.text(), /danmu_upstream_body_too_large/u);
+});
+
+test('danmu proxy rejects unsafe response types and never caches successful metadata', async () => {
+  const unsafe = await proxyDanmuUpstream({
+    request: request(),
+    env: { DANMU_API_BASE: EXAMPLE_BASE },
+    path: '/api/v2/search/anime',
+    fetchImpl: async () => new Response(new Uint8Array([0, 1]), {
+      headers: { 'Content-Type': 'application/octet-stream' },
+    }),
+  });
+  assert.equal(unsafe.status, 502);
+  assert.match(await unsafe.text(), /danmu_upstream_unsafe_content_type/u);
+
+  const safe = await proxyDanmuUpstream({
+    request: request(),
+    env: { DANMU_API_BASE: EXAMPLE_BASE },
+    path: '/api/v2/search/anime',
+    fetchImpl: async () => Response.json({ animes: [] }),
+  });
+  assert.equal(safe.status, 200);
+  assert.equal(safe.headers.get('cache-control'), 'no-store');
 });

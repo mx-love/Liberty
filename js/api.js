@@ -54,9 +54,9 @@ function parseVodPlaySources(vodPlayFrom = '', vodPlayUrl = '') {
             .split('#')
             .map((entry, episodeIndex) => parseEpisodeEntry(entry, episodeIndex))
             .filter(Boolean)
-            .map((episode, rawIndex) => ({
+            .map((episode, filteredIndex) => ({
                 ...episode,
-                rawIndex,
+                filteredIndex,
                 playGroup: sourceName,
                 playGroupIndex: groupIndex
             }));

@@ -1444,12 +1444,17 @@ function stringValue(value) {
   if (value === null || value === void 0) return "";
   return String(value);
 }
+function isMissingPlaceholder(value) {
+  const normalized = stringValue(value).trim().toLowerCase();
+  return normalized === "" || normalized === "n/a" || normalized === "null" || normalized === "undefined" || normalized === "\u672A\u77E5";
+}
 function cleanText(value) {
   let result = stringValue(value).replace(/<[^>]*>/g, " ");
   for (const [entity, replacement] of Object.entries(HTML_ENTITIES)) {
     result = result.replaceAll(entity, replacement);
   }
-  return result.replace(/\s+/g, " ").trim();
+  result = result.replace(/\s+/g, " ").trim();
+  return isMissingPlaceholder(result) ? "" : result;
 }
 function splitPeople(value) {
   const seen = /* @__PURE__ */ new Set();
@@ -1462,9 +1467,6 @@ function splitPeople(value) {
 function parseYear(value) {
   const match = cleanText(value).match(/(?:^|\D)((?:19|20)\d{2})(?:\D|$)/);
   return match ? Number(match[1]) : null;
-}
-function classifyMediaType(category) {
-  return classifyMediaTypeLabels([cleanText(category)], { treatBareTvAsSeries: true });
 }
 function parseSourceEpisodeNumber(rawEpisodeName, mediaType = "unknown") {
   return parseEpisode(stringValue(rawEpisodeName), { mediaType });
@@ -1504,7 +1506,7 @@ function parseAppleCmsPlaySources(sourceKey, vodId, vodPlayFrom, vodPlayUrl, med
     const rawName = groupNames[rawIndex] ?? "";
     const displayName = cleanText(rawName) || `\u64AD\u653E\u6E90 ${rawIndex + 1}`;
     const groupBase = { sourceKey, vodId, rawIndex, displayName };
-    const episodes = rawValue.split("#").map((entry, episodeIndex) => parseEpisodeEntry(entry, episodeIndex, groupBase, mediaType)).filter((episode) => episode !== null);
+    const episodes = rawValue.split("#").map((entry, episodeIndex) => parseEpisodeEntry(entry, episodeIndex, groupBase, mediaType)).filter((episode) => episode !== null).map((episode, filteredIndex) => ({ ...episode, filteredIndex }));
     if (episodes.length === 0) return null;
     return {
       ...groupBase,
@@ -1523,13 +1525,19 @@ var SourceNormalizer = class {
     const rawActors = stringValue(raw.vod_actor);
     const rawArea = stringValue(raw.vod_area);
     const rawLanguage = stringValue(raw.vod_lang);
-    const rawCategory = stringValue(raw.type_name ?? raw.vod_class);
+    const rawTypeName = stringValue(raw.type_name);
+    const rawVodClass = stringValue(raw.vod_class);
+    const rawVodTag = stringValue(raw.vod_tag);
+    const rawCategory = isMissingPlaceholder(rawTypeName) ? rawVodClass : rawTypeName;
     const rawRemarks = stringValue(raw.vod_remarks);
     const rawDescription = stringValue(raw.vod_content);
     const rawCover = stringValue(raw.vod_pic);
     const vodPlayFrom = stringValue(raw.vod_play_from);
     const vodPlayUrl = stringValue(raw.vod_play_url);
-    const mediaType = classifyMediaType(rawCategory);
+    const mediaType = classifyMediaTypeLabels(
+      [cleanText(rawTypeName), cleanText(rawVodClass), cleanText(rawVodTag)],
+      { treatBareTvAsSeries: true }
+    );
     const parsedTitle = parseTitle(rawTitle);
     const parsedRemarks = parseTitle(rawRemarks);
     return {
@@ -2619,6 +2627,60 @@ function resolveDanmakuCandidate(media, candidates, options = {}) {
 }
 
 // src/core/danmaku/danmu-episode-resolver.ts
+var LEADING_DISPLAY_DECORATION = /^(?:\s*【[^】\r\n]{1,64}】\s*)+/u;
+var SEASON_EPISODE_SUFFIX = /^_S0*(\d{1,3})E0*(\d{1,5})$/iu;
+var LABELED_EPISODE_SUFFIX = /^_(EP|E)0*(\d{1,5})$/iu;
+var NUMERIC_EPISODE_SUFFIX = /^_0*(\d{1,5})$/u;
+function positiveEpisodeNumber(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 && number <= 1e5 ? number : null;
+}
+function uniqueIdentityTitles(media, candidateIdentityTitles) {
+  const seen = /* @__PURE__ */ new Set();
+  return [media.canonicalTitle, ...media.aliases, ...candidateIdentityTitles].map((title) => title.normalize("NFKC").trim()).filter((title) => {
+    const key = title.toLocaleLowerCase("en-US");
+    if (!title || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((left, right) => right.length - left.length);
+}
+function contextualEpisodeIdentityToken(rawEpisodeTitle, media, candidateIdentityTitles) {
+  if (media.mediaType === "movie") return null;
+  const normalizedRawTitle = rawEpisodeTitle.normalize("NFKC").trim();
+  const leadingDecoration = LEADING_DISPLAY_DECORATION.exec(normalizedRawTitle)?.[0] ?? "";
+  if (leadingDecoration) {
+    const parsedDecoration = parseEpisode(leadingDecoration, { mediaType: media.mediaType });
+    if (hasExplicitWholeMediaContradiction(parsedDecoration) || parsedDecoration.numberKind !== "none" || parsedDecoration.part !== null) {
+      return null;
+    }
+  }
+  const identityView = normalizedRawTitle.replace(LEADING_DISPLAY_DECORATION, "").trim();
+  const foldedIdentityView = identityView.toLocaleLowerCase("en-US");
+  for (const title of uniqueIdentityTitles(media, candidateIdentityTitles)) {
+    const foldedTitle = title.toLocaleLowerCase("en-US");
+    if (!foldedIdentityView.startsWith(foldedTitle)) continue;
+    const suffix = identityView.slice(title.length);
+    const seasonEpisode = SEASON_EPISODE_SUFFIX.exec(suffix);
+    if (seasonEpisode) {
+      const season = positiveEpisodeNumber(seasonEpisode[1] ?? "");
+      const episode = positiveEpisodeNumber(seasonEpisode[2] ?? "");
+      if (season !== null && episode !== null) return `S${season}E${episode}`;
+      return null;
+    }
+    const labeledEpisode = LABELED_EPISODE_SUFFIX.exec(suffix);
+    if (labeledEpisode) {
+      const episode = positiveEpisodeNumber(labeledEpisode[2] ?? "");
+      return episode === null ? null : `E${episode}`;
+    }
+    const numericEpisode = NUMERIC_EPISODE_SUFFIX.exec(suffix);
+    if (numericEpisode) {
+      const episode = positiveEpisodeNumber(numericEpisode[1] ?? "");
+      if (episode === null || episode >= 1900 && episode <= 2099) return null;
+      return `E${episode}`;
+    }
+  }
+  return null;
+}
 function parsedCanonicalEpisode(episode, media) {
   const parsedTitle = parseEpisode(episode.episodeTitle ?? "", { mediaType: media.mediaType });
   const contentType = episode.contentType === "unknown" ? parsedTitle.contentType : episode.contentType;
@@ -2665,8 +2727,15 @@ function canonicalSourceEpisode(episode, media, coordinate) {
     mappingEvidence: ["Canonical episode supplied by Danmaku Core"]
   };
 }
-function adaptDanmuEpisode(episode, media, coordinate) {
-  const parsed = parseEpisode(episode.episodeTitle, { mediaType: media.mediaType });
+function adaptDanmuEpisode(episode, media, coordinate, candidateIdentityTitles) {
+  const contextualIdentity = contextualEpisodeIdentityToken(
+    episode.episodeTitle,
+    media,
+    candidateIdentityTitles
+  );
+  const parsed = parseEpisode(contextualIdentity ?? episode.episodeTitle, {
+    mediaType: media.mediaType
+  });
   const parsedAirDate = episode.airDate === null ? null : parseEpisode(episode.airDate, { mediaType: media.mediaType });
   const semanticAirDate = parsed.airDate ?? (parsedAirDate?.numberKind === "date" ? parsedAirDate.airDate : null);
   const rawTitle = episode.episodeTitle.trim();
@@ -2766,7 +2835,7 @@ function resolveDanmakuEpisode(input) {
     input.media,
     targetCoordinate ?? -1
   );
-  const adaptedDanmuEpisodes = input.danmuEpisodes.map((episode, index) => adaptDanmuEpisode(episode, input.media, index));
+  const adaptedDanmuEpisodes = input.danmuEpisodes.map((episode, index) => adaptDanmuEpisode(episode, input.media, index, input.candidateIdentityTitles ?? []));
   const episodeByCanonicalId = new Map(
     adaptedDanmuEpisodes.map(({ source, canonical }) => [canonical.canonicalEpisodeId, source])
   );
@@ -3230,11 +3299,19 @@ var DanmuService = class {
         error
       });
     }
+    const selectedIdentity = candidateResolution.evaluations.find(
+      ({ candidate }) => candidate === selectedCandidate
+    )?.identityInput;
     let episodeResolution = this.episodeResolver.resolve({
       media: canonicalInput.media,
       targetEpisode: canonicalInput.episode,
       canonicalEpisodes: canonicalInput.mediaEpisodes,
-      danmuEpisodes: bangumi.data.episodes
+      danmuEpisodes: bangumi.data.episodes,
+      candidateIdentityTitles: selectedIdentity === void 0 ? [] : [
+        selectedIdentity.identityTitle,
+        selectedIdentity.parsedTitle?.baseTitle ?? "",
+        ...selectedIdentity.aliases ?? []
+      ]
     });
     if (canonicalInput.manualEpisodeId !== void 0) {
       const manualSelection = applyManualEpisodeSelection(

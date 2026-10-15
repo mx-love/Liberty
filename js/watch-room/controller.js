@@ -50,6 +50,8 @@
         startingReady: false,
         lastSyncStartAt: 0,
         lastRoomStateAt: 0,
+        rttMs: 0,
+        clockOffsetMs: 0,
     };
 
     class WatchRoomController {
@@ -118,6 +120,7 @@
             if (type === 'sync:episode-prepare') return this.handleSyncEpisodePrepare(payload);
             if (type === 'sync:episode-start') return this.handleSyncEpisodeStart(payload);
             if (type === 'sync:episode-error') return this.handleSyncEpisodeError(payload);
+            if (type === 'server:pong') return this.handleServerPong(payload, message);
             if (type === 'room:ended') return this.handleRoomEnded(payload);
             if (type === 'room:error') return this.handleRoomError(payload);
             return null;
@@ -211,7 +214,7 @@
 
             this.player?.pause?.();
             const targetTime = this.player?.calculateTargetTime
-                ? this.player.calculateTargetTime({ ...payload, paused: true })
+                ? this.player.calculateTargetTime(this.withClockOffset({ ...payload, paused: true }))
                 : Math.max(0, Number(payload.currentTime) || 0);
             Promise.resolve(this.player?.seek?.(targetTime))
                 .finally(() => {
@@ -407,6 +410,37 @@
             }
         }
 
+        handleServerPong(payload = {}, message = {}) {
+            const receivedAt = Date.now();
+            const clientSentAt = Number(payload.clientSentAt);
+            const serverTime = Number(payload.serverTime || message.serverTime);
+            if (!Number.isFinite(clientSentAt) || clientSentAt <= 0 || !Number.isFinite(serverTime)) {
+                return null;
+            }
+
+            const rttMs = Math.max(0, receivedAt - clientSentAt);
+            const offsetSample = serverTime - (clientSentAt + (rttMs / 2));
+            const hasEstimate = Number.isFinite(this.state.clockOffsetMs) && this.state.rttMs > 0;
+            const smoothing = hasEstimate ? 0.2 : 1;
+            this.state = {
+                ...this.state,
+                rttMs: hasEstimate
+                    ? (this.state.rttMs * (1 - smoothing)) + (rttMs * smoothing)
+                    : rttMs,
+                clockOffsetMs: hasEstimate
+                    ? (this.state.clockOffsetMs * (1 - smoothing)) + (offsetSample * smoothing)
+                    : offsetSample,
+            };
+            window.LibertyDebug.log('[WatchRoomController] clock sample', {
+                rttMs: Math.round(this.state.rttMs),
+                clockOffsetMs: Math.round(this.state.clockOffsetMs),
+            });
+            return {
+                rttMs: this.state.rttMs,
+                clockOffsetMs: this.state.clockOffsetMs,
+            };
+        }
+
         markReady() {
             if (this.state.role !== 'viewer' || this.state.status !== 'waiting') return false;
             window.LibertyDebug.log('[WatchRoomController] mark ready');
@@ -478,6 +512,8 @@
                     'watchRoomId',
                     'watchRoomRole',
                     'watchRoomClientId',
+                    'watchRoomCredential',
+                    'watchRoomProtocolVersion',
                     'watchRoomRedirecting',
                     'watchRoomMediaSnapshot',
                     'watchRoomPlaybackSnapshot',
@@ -505,7 +541,7 @@
         async applyPlaybackWithLock(playback = {}, options = {}, shouldWarn = false) {
             this.beginRemoteSyncLock();
             try {
-                const result = await this.player?.applyPlayback?.(playback, options);
+                const result = await this.player?.applyPlayback?.(this.withClockOffset(playback), options);
                 return this.handlePlaybackResult(result, shouldWarn);
             } catch (error) {
                 this.handlePlayError(error);
@@ -585,7 +621,7 @@
         getPlaybackDrift(playback = {}) {
             if (!this.player) return null;
             const expectedTime = this.player.calculateTargetTime
-                ? this.player.calculateTargetTime(playback)
+                ? this.player.calculateTargetTime(this.withClockOffset(playback))
                 : Math.max(0, Number(playback.currentTime) || 0);
             const currentTime = this.player.getCurrentTime
                 ? this.player.getCurrentTime()
@@ -600,6 +636,13 @@
                 expectedTime,
                 currentTime,
                 hostRate,
+            };
+        }
+
+        withClockOffset(playback = {}) {
+            return {
+                ...playback,
+                clockOffsetMs: Number(this.state.clockOffsetMs) || 0,
             };
         }
 

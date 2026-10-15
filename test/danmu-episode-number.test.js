@@ -575,6 +575,12 @@ function createHarness(options = {}) {
                 };
             },
             clearActiveValidation() { activeDanmuResolutionTransaction = null; },
+            ageTerminalCache(milliseconds) {
+                danmuTerminalResults.forEach((entry) => {
+                    entry.timestamp -= milliseconds;
+                });
+            },
+            terminalCacheTtl(state) { return getDanmuTerminalCacheTtl(state); },
             toggleDanmaku() { return toggleDanmakuByShortcut(); },
             beginRequest(reason = 'test-request') {
                 const context = createProductionDanmakuContext(currentVideoTitle, currentEpisodeIndex);
@@ -1595,7 +1601,7 @@ test('37. a missing-label empty whole-media binding is terminal, cached, and ren
     await harness.api.showSourceModal();
     const html = harness.api.sourceModalHtml();
     assert.match(html, /data-danmu-status="empty"/u);
-    assert.match(html, /暂无弹幕 · 整部影片已验证/u);
+    assert.match(html, /暂无弹幕 · 影片内容已验证/u);
     assert.doesNotMatch(html, /E01/u);
     assert.doesNotMatch(html, /✓ 当前使用/u);
 });
@@ -1665,7 +1671,9 @@ test('39. a former whole-media binding is not reused after the source becomes mu
     assert.ok(harness.network.state.calls.length > singleItemRequests);
     assert.doesNotMatch(html, /data-danmu-status="current"/u);
     assert.doesNotMatch(html, /✓ 当前使用/u);
-    assert.match(html, /data-danmu-status="episode-uncertain"/u);
+    assert.match(html, /data-danmu-status="whole-media-uncertain"/u);
+    assert.match(html, /影片内容身份不确定/u);
+    assert.doesNotMatch(html, /当前剧集/u);
 });
 
 test('40. a missing-label movie auto-selects its provider and applies comments through production', async () => {
@@ -1702,6 +1710,7 @@ test('40. a missing-label movie auto-selects its provider and applies comments t
 
     assert.equal(context.state, 'ready');
     assert.equal(context.media.mediaType, 'movie');
+    assert.equal(context.media.season, null);
     assert.equal(context.episode?.episodeNumber, null);
     assert.equal(context.sourceEpisode?.parsedEpisodeInfo.episodeNumber, null);
     assert.equal(result[0]?.text, 'unlabelled-feature-item comment');
@@ -1712,6 +1721,63 @@ test('40. a missing-label movie auto-selects its provider and applies comments t
         !call.url.includes('S01E01') && !JSON.stringify(call.body || {}).includes('S01E01')
     )));
     assert.deepEqual(harness.errors, []);
+});
+
+test('40a. a supported movie selected from the modal resolves whole-media and applies comments', async () => {
+    const movie = createWork({
+        title: 'Example Movie',
+        animeId: 'example-movie-2025',
+        animeTitle: 'Example Movie',
+        type: '华语电影',
+        typeDescription: 'movie',
+        episodes: [{
+            episodeId: 'example-movie-main',
+            episodeTitle: 'HD',
+            episodeNumber: '1',
+            airDate: '',
+        }],
+    });
+    const harness = createHarness({ works: [movie] });
+    setStandardPlayback(harness, {
+        title: 'Example Movie',
+        category: '华语电影',
+        episodes: [{
+            rawIndex: 0,
+            name: '1',
+            rawEpisodeName: '1',
+            episodeNameSource: 'source',
+            url: 'https://media.example.test/example-movie.m3u8',
+        }],
+        index: 0,
+    });
+
+    await harness.api.showSourceModal();
+    const pendingHtml = harness.api.sourceModalHtml();
+    assert.match(pendingHtml, /作品身份已验证 · 影片内容待验证/u);
+    assert.doesNotMatch(pendingHtml, /当前剧集待验证/u);
+
+    await harness.api.switchManual(movie.animeId);
+    const diagnostics = harness.api.debug().lastDanmuMatchInfo;
+    const context = harness.api.createContext();
+
+    assert.equal(context.media.mediaType, 'movie');
+    assert.equal(context.media.season, null);
+    assert.equal(context.episode?.episodeNumber, null);
+    assert.equal(context.sourceEpisode?.parsedEpisodeInfo.episodeNumber, null);
+    assert.equal(diagnostics.bindingScope, 'whole_media');
+    assert.equal(diagnostics.danmuEpisodeId, 'example-movie-main');
+    assert.equal(diagnostics.selectedBy, 'manual');
+    assert.equal(commentRequests(harness).length, 1);
+    assert.equal(nonEmptyApplications(harness).at(-1)?.[0]?.text, 'example-movie-main comment');
+    assert.ok(harness.network.state.calls.every((call) => (
+        !call.url.includes('S01E01') && !JSON.stringify(call.body || {}).includes('S01E01')
+    )));
+    assert.deepEqual(harness.errors, []);
+
+    await harness.api.showSourceModal();
+    const currentHtml = harness.api.sourceModalHtml();
+    assert.match(currentHtml, /data-danmu-status="current"/u);
+    assert.match(currentHtml, /当前使用 · 影片内容已验证/u);
 });
 
 test('41. an explicit third-season title binds E01 without year evidence', async () => {
@@ -1738,6 +1804,105 @@ test('41. an explicit third-season title binds E01 without year evidence', async
     assert.equal(matchCall?.body?.fileName, 'Example Competition S03E01');
     assert.match(commentRequests(harness)[0].path, /\/dm-e1$/u);
     assert.equal(harness.api.debug().lastDanmuMatchInfo.coreState, 'success');
+});
+
+test('43. transient danmu failures use short backoff and recover without a request storm', async () => {
+    const harness = createHarness();
+    setStandardPlayback(harness);
+    let fail = true;
+    harness.network.state.intercept = (call) => {
+        if (call.path.endsWith('/api/v2/match') && fail) {
+            throw new TypeError('temporary fixture network failure');
+        }
+        return undefined;
+    };
+
+    const first = await harness.api.getDanmuku();
+    const callsAfterFailure = harness.network.state.calls.length;
+    const second = await harness.api.getDanmuku();
+
+    assert.equal(first.length, 0);
+    assert.equal(second.length, 0);
+    assert.equal(harness.api.debug().lastDanmuMatchInfo.coreState, 'network-error');
+    assert.equal(harness.network.state.calls.length, callsAfterFailure);
+
+    harness.api.ageTerminalCache(6000);
+    fail = false;
+    const recovered = await harness.api.getDanmuku();
+    const callsAfterRecovery = harness.network.state.calls.length;
+    const cached = await harness.api.getDanmuku();
+
+    assert.equal(recovered[0]?.text, 'dm-e12 comment');
+    assert.equal(cached[0]?.text, 'dm-e12 comment');
+    assert.ok(callsAfterRecovery > callsAfterFailure);
+    assert.equal(harness.network.state.calls.length, callsAfterRecovery);
+    assert.equal(commentRequests(harness).length, 1);
+    assert.equal(harness.api.debug().lastDanmuMatchInfo.coreState, 'success');
+});
+
+test('43a. rate-limit, server, and invalid-response cache entries all recover after backoff', async (t) => {
+    const cases = [
+        {
+            name: 'HTTP 429',
+            state: 'rate-limited',
+            response: () => jsonResponse({ success: false, error: 'rate limited' }, 429, { 'retry-after': '1' }),
+        },
+        {
+            name: 'HTTP 500',
+            state: 'server-error',
+            response: () => jsonResponse({ success: false, error: 'temporary upstream failure' }, 500),
+        },
+        {
+            name: 'invalid response',
+            state: 'invalid-response',
+            response: () => new Response('{invalid-json', {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+            }),
+        },
+    ];
+
+    for (const fixture of cases) {
+        await t.test(fixture.name, async () => {
+            const harness = createHarness();
+            setStandardPlayback(harness);
+            let fail = true;
+            harness.network.state.intercept = (call) => (
+                call.path.endsWith('/api/v2/match') && fail
+                    ? fixture.response()
+                    : undefined
+            );
+
+            await harness.api.getDanmuku();
+            const callsAfterFailure = harness.network.state.calls.length;
+            await harness.api.getDanmuku();
+            assert.equal(harness.api.debug().lastDanmuMatchInfo.coreState, fixture.state);
+            assert.equal(harness.network.state.calls.length, callsAfterFailure);
+
+            harness.api.ageTerminalCache(6000);
+            fail = false;
+            const recovered = await harness.api.getDanmuku();
+            assert.equal(recovered[0]?.text, 'dm-e12 comment');
+            assert.ok(harness.network.state.calls.length > callsAfterFailure);
+            assert.equal(harness.api.debug().lastDanmuMatchInfo.coreState, 'success');
+        });
+    }
+});
+
+test('44. only transient danmu states receive the short terminal-cache TTL', () => {
+    const harness = createHarness();
+    for (const state of [
+        'timeout',
+        'network-error',
+        'rate-limited',
+        'server-error',
+        'invalid-response',
+    ]) {
+        assert.equal(harness.api.terminalCacheTtl(state), 5000, state);
+    }
+
+    assert.ok(harness.api.terminalCacheTtl('comments-empty') > 5000);
+    assert.ok(harness.api.terminalCacheTtl('success') > 5000);
 });
 
 test('42. source modal displays the season parsed by Core instead of stale raw candidate metadata', async () => {

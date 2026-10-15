@@ -1,6 +1,9 @@
 const DEFAULT_TIMEOUT_MS = 12_000;
 const MIN_TIMEOUT_MS = 100;
 const MAX_TIMEOUT_MS = 60_000;
+const MAX_REQUEST_BYTES = 256 * 1024;
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const SAFE_RESPONSE_CONTENT_TYPE = /^(?:application\/(?:json|[^;]+\+json)|text\/plain)(?:;|$)/iu;
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -11,6 +14,8 @@ const CORS_HEADERS = {
 class DanmuUpstreamConfigError extends Error {}
 class DanmuUpstreamPathError extends Error {}
 class DanmuUpstreamTimeoutError extends Error {}
+class DanmuBodyTooLargeError extends Error {}
+class DanmuUnsafeContentTypeError extends Error {}
 
 function withCors(headers = new Headers()) {
   const nextHeaders = new Headers(headers);
@@ -87,8 +92,34 @@ function upstreamResponseHeaders(response, method) {
     const value = response.headers.get(name);
     if (value) headers.set(name, value);
   });
-  if (method === 'POST') headers.set('Cache-Control', 'no-store');
+  headers.set('Cache-Control', 'no-store');
   return withCors(headers);
+}
+
+async function readBoundedBody(stream, declaredLength, maximum) {
+  if (Number(declaredLength || 0) > maximum) throw new DanmuBodyTooLargeError();
+  if (!stream) return new Uint8Array();
+  const reader = stream.getReader();
+  const chunks = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maximum) throw new DanmuBodyTooLargeError();
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 }
 
 function upstreamErrorResponse(response) {
@@ -158,24 +189,53 @@ export async function proxyDanmuUpstream({
   headers.set('Accept', request.headers.get('Accept') || 'application/json,text/plain,*/*');
 
   try {
-    const upstream = await Promise.race([
-      fetchImpl(upstreamUrl, {
+    const upstreamResult = (async () => {
+      const requestBody = ['GET', 'HEAD'].includes(method)
+        ? undefined
+        : await readBoundedBody(
+          request.body,
+          request.headers.get('Content-Length'),
+          MAX_REQUEST_BYTES,
+        );
+      const upstream = await fetchImpl(upstreamUrl, {
         method,
         headers,
-        body: ['GET', 'HEAD'].includes(method) ? undefined : request.body,
+        body: requestBody,
         redirect: 'follow',
         signal: controller.signal,
-      }),
+      });
+      if (!upstream.ok) return { upstream, body: null };
+      const responseContentType = upstream.headers.get('Content-Type') || '';
+      if (!SAFE_RESPONSE_CONTENT_TYPE.test(responseContentType)) {
+        throw new DanmuUnsafeContentTypeError();
+      }
+      const body = method === 'HEAD'
+        ? null
+        : await readBoundedBody(
+          upstream.body,
+          upstream.headers.get('Content-Length'),
+          MAX_RESPONSE_BYTES,
+        );
+      return { upstream, body };
+    })();
+    const { upstream, body } = await Promise.race([
+      upstreamResult,
       timeout,
     ]);
 
     if (!upstream.ok) return upstreamErrorResponse(upstream);
-    return new Response(method === 'HEAD' ? null : upstream.body, {
+    return new Response(body, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers: upstreamResponseHeaders(upstream, method),
     });
   } catch (error) {
+    if (error instanceof DanmuBodyTooLargeError) {
+      return errorResponse('danmu_upstream_body_too_large', 413);
+    }
+    if (error instanceof DanmuUnsafeContentTypeError) {
+      return errorResponse('danmu_upstream_unsafe_content_type', 502);
+    }
     if (timedOut || error instanceof DanmuUpstreamTimeoutError) {
       return errorResponse('danmu_upstream_timeout', 504);
     }

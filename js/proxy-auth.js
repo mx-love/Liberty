@@ -1,127 +1,90 @@
 /**
- * 代理请求鉴权模块
- * 为代理请求添加基于 PASSWORD 的鉴权机制
+ * Issues short-lived, method/target-bound capabilities for the metadata proxy.
+ * Authentication is carried by an HttpOnly same-origin session cookie. No
+ * password verifier or signing secret is exposed to this module or proxy URLs.
  */
+(function () {
+    const TOKEN_ENDPOINT = '/api/proxy-token';
+    const CAPABILITY_REFRESH_MARGIN_MS = 5000;
+    const capabilityCache = new Map();
 
-// 从全局配置获取密码哈希（如果存在）
-let cachedPasswordHash = null;
-
-/**
- * 获取当前会话的密码哈希
- */
-async function getPasswordHash() {
-    if (cachedPasswordHash) {
-        return cachedPasswordHash;
-    }
-    
-    // 1. 优先从已存储的代理鉴权哈希获取
-    const storedHash = localStorage.getItem('proxyAuthHash');
-    if (storedHash) {
-        cachedPasswordHash = storedHash;
-        return storedHash;
-    }
-    
-    // 2. 尝试从密码验证状态获取（password.js 验证后存储的哈希）
-    const passwordVerified = localStorage.getItem('passwordVerified');
-    const storedPasswordHash = localStorage.getItem('passwordHash');
-    if (passwordVerified === 'true' && storedPasswordHash) {
-        localStorage.setItem('proxyAuthHash', storedPasswordHash);
-        cachedPasswordHash = storedPasswordHash;
-        return storedPasswordHash;
-    }
-    
-    // 3. 尝试从用户输入的密码生成哈希
-    const userPassword = localStorage.getItem('userPassword');
-    if (userPassword) {
+    function getProxyTarget(proxyUrl) {
         try {
-            // 动态导入 sha256 函数
-            const { sha256 } = await import('./sha256.js');
-            const hash = await sha256(userPassword);
-            localStorage.setItem('proxyAuthHash', hash);
-            cachedPasswordHash = hash;
-            return hash;
+            const parsed = new URL(proxyUrl, window.location.origin);
+            if (!parsed.pathname.startsWith('/proxy/')) return '';
+            return decodeURIComponent(parsed.pathname.slice('/proxy/'.length));
         } catch (error) {
-            console.error('生成密码哈希失败:', error);
+            return '';
         }
     }
-    
-    // 4. 如果用户没有设置密码，尝试使用环境变量中的密码哈希
-    if (window.__ENV__ && window.__ENV__.PASSWORD) {
-        cachedPasswordHash = window.__ENV__.PASSWORD;
-        return window.__ENV__.PASSWORD;
-    }
-    
-    return null;
-}
 
-/**
- * 为代理请求URL添加鉴权参数
- */
-async function addAuthToProxyUrl(url) {
-    try {
-        const hash = await getPasswordHash();
-        if (!hash) {
-            console.warn('无法获取密码哈希，代理请求可能失败');
-            return url;
+    function cachedCapability(key) {
+        const cached = capabilityCache.get(key);
+        if (!cached || cached.expiresAt <= Date.now() + CAPABILITY_REFRESH_MARGIN_MS) {
+            capabilityCache.delete(key);
+            return null;
         }
-        
-        // 添加时间戳防止重放攻击
-        const timestamp = Date.now();
-        
-        // 检查URL是否已包含查询参数
-        const separator = url.includes('?') ? '&' : '?';
-        
-        return `${url}${separator}auth=${encodeURIComponent(hash)}&t=${timestamp}`;
-    } catch (error) {
-        console.error('添加代理鉴权失败:', error);
-        return url;
+        return cached;
     }
-}
 
-/**
- * 验证代理请求的鉴权
- */
-function validateProxyAuth(authHash, serverPasswordHash, timestamp) {
-    if (!authHash || !serverPasswordHash) {
-        return false;
-    }
-    
-    // 验证哈希是否匹配
-    if (authHash !== serverPasswordHash) {
-        return false;
-    }
-    
-    // 验证时间戳（10分钟有效期）
-    const now = Date.now();
-    const maxAge = 10 * 60 * 1000; // 10分钟
-    
-    if (timestamp && (now - parseInt(timestamp)) > maxAge) {
-        console.warn('代理请求时间戳过期');
-        return false;
-    }
-    
-    return true;
-}
+    async function requestCapability(target, method) {
+        const key = `${method}\n${target}`;
+        const cached = cachedCapability(key);
+        if (cached) return cached;
 
-/**
- * 清除缓存的鉴权信息
- */
-function clearAuthCache() {
-    cachedPasswordHash = null;
-    localStorage.removeItem('proxyAuthHash');
-}
-
-// 监听密码变化，清除缓存
-window.addEventListener('storage', (e) => {
-    if (e.key === 'userPassword' || (window.PASSWORD_CONFIG && e.key === window.PASSWORD_CONFIG.localStorageKey)) {
-        clearAuthCache();
+        const response = await fetch(TOKEN_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            credentials: 'same-origin',
+            cache: 'no-store',
+            body: JSON.stringify({ target, method }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || 'Proxy authorization failed');
+        }
+        const capability = {
+            expiresAt: Number(data.expiresAt),
+            nonce: String(data.nonce || ''),
+            signature: String(data.signature || ''),
+        };
+        if (!Number.isSafeInteger(capability.expiresAt) || !capability.nonce || !capability.signature) {
+            throw new Error('Invalid proxy authorization response');
+        }
+        capabilityCache.set(key, capability);
+        return capability;
     }
-});
 
-// 导出函数
-window.ProxyAuth = {
-    addAuthToProxyUrl,
-    validateProxyAuth,
-    clearAuthCache,
-    getPasswordHash
-};
+    async function addAuthToProxyUrl(url, method = 'GET') {
+        const target = getProxyTarget(url);
+        if (!target) return url;
+        const normalizedMethod = String(method || 'GET').toUpperCase();
+        const capability = await requestCapability(target, normalizedMethod);
+        const authorized = new URL(url, window.location.origin);
+        authorized.searchParams.set('pxe', String(capability.expiresAt));
+        authorized.searchParams.set('pxn', capability.nonce);
+        authorized.searchParams.set('pxs', capability.signature);
+        return authorized.pathname + authorized.search;
+    }
+
+    function clearAuthCache() {
+        capabilityCache.clear();
+    }
+
+    window.addEventListener('storage', (event) => {
+        if (
+            event.key === 'userPassword'
+            || event.key === 'passwordVerified'
+            || event.key === window.PASSWORD_CONFIG?.localStorageKey
+        ) {
+            clearAuthCache();
+        }
+    });
+
+    window.ProxyAuth = {
+        addAuthToProxyUrl,
+        clearAuthCache,
+    };
+})();

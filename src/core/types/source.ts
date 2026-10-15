@@ -11,6 +11,8 @@ export interface SourceEpisode {
     readonly playGroupIndex: number;
     /** Original array position. It must never be treated as an episode number. */
     readonly rawIndex: number;
+    /** Position after invalid entries are filtered; UI-only and never identity evidence. */
+    readonly filteredIndex?: number;
     readonly rawEpisodeName: string;
     readonly displayName: string;
     readonly rawEntry: string;

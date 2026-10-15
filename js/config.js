@@ -10,6 +10,60 @@ const PASSWORD_CONFIG = {
     verificationTTL: 90 * 24 * 60 * 60 * 1000,  // 验证有效期（90天，约3个月）
 };
 
+const DEBUG_SENSITIVE_KEY = /(?:authorization|cookie|credential|password|secret|token|signature)/iu;
+
+function redactDebugString(value) {
+    const redactedHeaders = String(value)
+        .replace(/\b(authorization|cookie|credential|password|secret|token|signature)\s*[:=]\s*[^\r\n]+/giu, '$1: [redacted]')
+        .replace(/\bbearer\s+[a-z0-9._~+/=-]+/giu, 'Bearer [redacted]');
+    return redactedHeaders.replace(/https?:\/\/[^\s"'<>]+/giu, (candidate) => {
+        try {
+            const url = new URL(candidate);
+            return `${url.origin}${url.pathname}${url.search ? '?[redacted]' : ''}`;
+        } catch (error) {
+            return '[redacted-url]';
+        }
+    });
+}
+
+function sanitizeDebugValue(value, seen = new WeakSet()) {
+    if (typeof value === 'string') return redactDebugString(value);
+    if (!value || typeof value !== 'object') return value;
+    if (value instanceof Error) {
+        return { name: value.name, message: redactDebugString(value.message) };
+    }
+    if (seen.has(value)) return '[circular]';
+    seen.add(value);
+    if (Array.isArray(value)) return value.map((item) => sanitizeDebugValue(item, seen));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+        key,
+        DEBUG_SENSITIVE_KEY.test(key) ? '[redacted]' : sanitizeDebugValue(item, seen),
+    ]));
+}
+
+window.LibertyDebug = window.LibertyDebug || {
+    enabled() {
+        try {
+            return localStorage.getItem('LIBRETV_DEBUG') === '1'
+                || new URLSearchParams(window.location.search).get('debug') === '1';
+        } catch (error) {
+            return window.location.search.includes('debug=1');
+        }
+    },
+    sanitize(value) {
+        return sanitizeDebugValue(value);
+    },
+    log(...args) {
+        if (this.enabled()) console.log(...args.map((item) => this.sanitize(item)));
+    },
+    warn(...args) {
+        if (this.enabled()) console.warn(...args.map((item) => this.sanitize(item)));
+    },
+    trace(...args) {
+        if (this.enabled()) console.trace(...args.map((item) => this.sanitize(item)));
+    },
+};
+
 // 网站信息配置
 const SITE_CONFIG = {
     name: 'LibreTV',

@@ -247,6 +247,55 @@ test('known season E12 uses one reliable match query and ignores rawIndex/API li
     assert.match(calls[2].url, /\/api\/v2\/comment\/dm-e12\?/u);
 });
 
+test('production service adapts a decorated work-title suffix before episode resolution', async () => {
+    const media = canonicalMedia({
+        mediaId: 'media:example-show',
+        canonicalTitle: 'Example Show',
+        releaseYear: 2025,
+        season: 1,
+    });
+    const episodes = [canonicalEpisode(media.mediaId, '第01集', 0, { seasonNumber: 1 })];
+    const input = resolveInput({
+        media,
+        episodes,
+        targetIndex: 0,
+        rawIndex: 0,
+        rawEpisodeName: '第01集',
+    });
+    const { service, calls } = recordingService([
+        matchResponse({
+            matches: [{
+                ...matchCandidate({
+                    animeId: 'anime-example-show',
+                    animeTitle: 'Candidate Work S01',
+                    episodeId: 'match-item',
+                    episodeTitle: '第01集',
+                }),
+                aliases: ['Example Show'],
+            }],
+        }),
+        bangumiResponse('anime-example-show', 'Candidate Work S01', [{
+            episodeId: 'comments-e01',
+            episodeTitle: '【alpha】Candidate Work_01',
+            apiEpisodeNumber: '99',
+        }]),
+        commentsResponse(),
+    ]);
+
+    const result = await service.resolve(input);
+
+    assert.equal(result.state, 'success');
+    assert.equal(result.binding?.danmuEpisodeId, 'comments-e01');
+    assert.equal(result.binding?.danmuEpisodeTitle, '【alpha】Candidate Work_01');
+    assert.equal(result.binding?.scope, 'canonical_episode');
+    assert.equal(result.comments.length, 1);
+    assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), [
+        '/private-prefix/api/v2/match',
+        '/private-prefix/api/v2/bangumi/anime-example-show',
+        '/private-prefix/api/v2/comment/comments-e01',
+    ]);
+});
+
 test('unknown season searches by the preserved title and never manufactures S01', async () => {
     const media = canonicalMedia({
         mediaId: 'media:long-runner',

@@ -28,12 +28,22 @@ function stringValue(value: unknown): string {
     return String(value);
 }
 
+function isMissingPlaceholder(value: unknown): boolean {
+    const normalized = stringValue(value).trim().toLowerCase();
+    return normalized === ''
+        || normalized === 'n/a'
+        || normalized === 'null'
+        || normalized === 'undefined'
+        || normalized === '\u672a\u77e5';
+}
+
 function cleanText(value: unknown): string {
     let result = stringValue(value).replace(/<[^>]*>/g, ' ');
     for (const [entity, replacement] of Object.entries(HTML_ENTITIES)) {
         result = result.replaceAll(entity, replacement);
     }
-    return result.replace(/\s+/g, ' ').trim();
+    result = result.replace(/\s+/g, ' ').trim();
+    return isMissingPlaceholder(result) ? '' : result;
 }
 
 function splitPeople(value: unknown): readonly string[] {
@@ -120,7 +130,8 @@ export function parseAppleCmsPlaySources(
             const episodes = rawValue
                 .split('#')
                 .map((entry, episodeIndex) => parseEpisodeEntry(entry, episodeIndex, groupBase, mediaType))
-                .filter((episode): episode is SourceEpisode => episode !== null);
+                .filter((episode): episode is SourceEpisode => episode !== null)
+                .map((episode, filteredIndex) => ({ ...episode, filteredIndex }));
 
             if (episodes.length === 0) return null;
             return {
@@ -142,13 +153,19 @@ export class SourceNormalizer {
         const rawActors = stringValue(raw.vod_actor);
         const rawArea = stringValue(raw.vod_area);
         const rawLanguage = stringValue(raw.vod_lang);
-        const rawCategory = stringValue(raw.type_name ?? raw.vod_class);
+        const rawTypeName = stringValue(raw.type_name);
+        const rawVodClass = stringValue(raw.vod_class);
+        const rawVodTag = stringValue(raw.vod_tag);
+        const rawCategory = isMissingPlaceholder(rawTypeName) ? rawVodClass : rawTypeName;
         const rawRemarks = stringValue(raw.vod_remarks);
         const rawDescription = stringValue(raw.vod_content);
         const rawCover = stringValue(raw.vod_pic);
         const vodPlayFrom = stringValue(raw.vod_play_from);
         const vodPlayUrl = stringValue(raw.vod_play_url);
-        const mediaType = classifyMediaType(rawCategory);
+        const mediaType = classifyMediaTypeLabels(
+            [cleanText(rawTypeName), cleanText(rawVodClass), cleanText(rawVodTag)],
+            { treatBareTvAsSeries: true },
+        );
         const parsedTitle = parseTitle(rawTitle);
         const parsedRemarks = parseTitle(rawRemarks);
 

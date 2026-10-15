@@ -219,12 +219,14 @@
             const currentTime = Number(playback.currentTime) || 0;
             const duration = Number(playback.duration) || 0;
             const updatedAt = Number(playback.updatedAt) || 0;
+            const clockOffsetMs = Number(playback.clockOffsetMs) || 0;
             const paused = Boolean(playback.paused);
             const playbackRate = Number(playback.playbackRate) || 1;
             let targetTime = Math.max(0, currentTime);
 
             if (!paused && updatedAt > 0) {
-                targetTime += (Math.max(0, Date.now() - updatedAt) / 1000) * Math.max(0, playbackRate);
+                const estimatedServerNow = Date.now() + clockOffsetMs;
+                targetTime += (Math.max(0, estimatedServerNow - updatedAt) / 1000) * Math.max(0, playbackRate);
             }
 
             if (duration > 0) {

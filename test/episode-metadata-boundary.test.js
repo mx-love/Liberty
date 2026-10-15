@@ -431,6 +431,7 @@ test('AppleCMS explicit source episode names survive every metadata boundary', (
 
     assert.deepEqual(apiEpisode, {
         rawIndex: 0,
+        filteredIndex: 0,
         rawEpisodeName: '第12集',
         displayEpisodeName: '第12集',
         episodeNameSource: 'source',
@@ -454,6 +455,22 @@ test('AppleCMS explicit source episode names survive every metadata boundary', (
     assert.equal(context.state, 'ready');
     assert.equal(context.episode?.episodeNumber, 12);
     assert.equal(context.sourceEpisode?.mappingState, 'mapped');
+});
+
+test('production AppleCMS parser preserves raw coordinates across invalid entries', () => {
+    const [group] = jsonValue(api.parseVodPlaySources(
+        'line',
+        'E1$https://media.example.test/1.m3u8#invalid#E3$https://media.example.test/3.m3u8'
+    ));
+
+    assert.deepEqual(group.episodes.map((episode) => ({
+        rawIndex: episode.rawIndex,
+        filteredIndex: episode.filteredIndex,
+        rawEpisodeName: episode.rawEpisodeName,
+    })), [
+        { rawIndex: 0, filteredIndex: 0, rawEpisodeName: 'E1' },
+        { rawIndex: 2, filteredIndex: 1, rawEpisodeName: 'E3' },
+    ]);
 });
 
 test('real-shaped dual AppleCMS groups keep source episode evidence at raw indexes 0, 1 and 9', () => {

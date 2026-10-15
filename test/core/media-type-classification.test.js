@@ -35,6 +35,7 @@ function searchCandidate(type, typeDescription = '') {
 const classificationCases = [
     ['动漫电影', 'movie'],
     ['动画电影', 'movie'],
+    ['华语电影', 'movie'],
     ['Animated Movie', 'movie'],
     ['动漫', 'anime'],
     ['动画剧集', 'anime'],

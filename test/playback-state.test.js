@@ -128,3 +128,129 @@ test('app playVideo passes raw episode entries to playback session storage', () 
     assert.doesNotMatch(playVideoSource, /episodes:\s*getCurrentEpisodeUrls\(\)/);
     assert.match(playVideoSource, /currentEpisodeEntries/);
 });
+
+test('direct media B atomically replaces media A metadata and episode state', () => {
+    const mediaAUrl = 'https://media.example/a-01.m3u8';
+    const mediaBUrl = 'https://media.example/b.m3u8';
+    const { api } = loadPlaybackState();
+
+    api.replacePlaybackSession({
+        title: 'Media A',
+        year: '2024',
+        category: 'series',
+        type: 'TV',
+        actors: 'Actor A',
+        sourceCode: 'source-a',
+        vodId: 'vod-a',
+        mediaUrl: mediaAUrl,
+        episodeEntries: Array.from({ length: 24 }, (_, rawIndex) => ({
+            url: `https://media.example/a-${rawIndex + 1}.m3u8`,
+            rawEpisodeName: `E${rawIndex + 1}`,
+            rawIndex
+        }))
+    });
+
+    const result = api.beginPlaybackSession({
+        title: 'Media B',
+        mediaUrl: mediaBUrl,
+        episodeIndex: 0
+    });
+
+    assert.equal(result.reused, false);
+    assert.equal(result.session.title, 'Media B');
+    assert.equal(result.session.year, '');
+    assert.equal(result.session.type, '');
+    assert.equal(result.session.actors, '');
+    assert.equal(result.session.sourceCode, '');
+    assert.equal(result.session.vodId, '');
+    assert.deepEqual(JSON.parse(JSON.stringify(result.session.episodeEntries)), [
+        { url: mediaBUrl }
+    ]);
+    assert.equal('rawIndex' in result.session.episodeEntries[0], false);
+    assert.equal('rawEpisodeName' in result.session.episodeEntries[0], false);
+});
+
+test('matching source locator reuses metadata while an explicit locator conflict replaces it', () => {
+    const { api } = loadPlaybackState();
+    api.replacePlaybackSession({
+        title: 'Example Series',
+        year: '2020',
+        sourceCode: 'source-a',
+        vodId: 'vod-a',
+        episodeEntries: [
+            { url: 'https://media.example/e1.m3u8', rawEpisodeName: '第1集', rawIndex: 0 },
+            { url: 'https://media.example/e2.m3u8', rawEpisodeName: '第2集', rawIndex: 1 }
+        ]
+    });
+
+    const same = api.beginPlaybackSession({
+        title: 'Example Series',
+        sourceCode: 'source-a',
+        vodId: 'vod-a',
+        mediaUrl: 'https://media.example/e2.m3u8',
+        episodeIndex: 1
+    });
+    assert.equal(same.reused, true);
+    assert.equal(same.session.year, '2020');
+    assert.equal(same.session.episodeEntries.length, 2);
+
+    const different = api.beginPlaybackSession({
+        title: 'Other Series',
+        sourceCode: 'source-a',
+        vodId: 'vod-b',
+        mediaUrl: 'https://media.example/other.m3u8',
+        episodeIndex: 0
+    });
+    assert.equal(different.reused, false);
+    assert.equal(different.session.year, '');
+    assert.deepEqual(JSON.parse(JSON.stringify(different.session.episodeEntries)), [
+        { url: 'https://media.example/other.m3u8' }
+    ]);
+});
+
+test('URL membership can restore the same session but equal title alone cannot', () => {
+    const { api } = loadPlaybackState();
+    api.replacePlaybackSession({
+        title: 'Same Title',
+        year: '2019',
+        episodeEntries: [
+            { url: 'https://media.example/known.m3u8', rawEpisodeName: '第12集', rawIndex: 1 }
+        ]
+    });
+
+    const known = api.beginPlaybackSession({
+        title: 'Same Title',
+        mediaUrl: 'https://media.example/known.m3u8'
+    });
+    assert.equal(known.reused, true);
+    assert.equal(known.session.year, '2019');
+
+    const unknown = api.beginPlaybackSession({
+        title: 'Same Title',
+        mediaUrl: 'https://media.example/unrelated.m3u8'
+    });
+    assert.equal(unknown.reused, false);
+    assert.equal(unknown.session.year, '');
+    assert.deepEqual(JSON.parse(JSON.stringify(unknown.session.episodeEntries)), [
+        { url: 'https://media.example/unrelated.m3u8' }
+    ]);
+});
+
+test('production player begins an atomic session and history restore never borrows global episodes', () => {
+    const playerSource = readFileSync(new URL('../js/player.js', import.meta.url), 'utf8');
+    const initializeStart = playerSource.indexOf('function initializePageContent()');
+    const initializeEnd = playerSource.indexOf('\nfunction initPlayer(', initializeStart);
+    const initializeSource = playerSource.slice(initializeStart, initializeEnd);
+    const uiSource = readFileSync(new URL('../js/ui.js', import.meta.url), 'utf8');
+    const historyStart = uiSource.indexOf('async function playFromHistory(');
+    const historyEnd = uiSource.indexOf('\nfunction addToViewingHistory(', historyStart);
+    const historySource = uiSource.slice(historyStart, historyEnd);
+
+    assert.match(initializeSource, /beginPlaybackSession\(sessionRequest\)/);
+    assert.match(initializeSource, /activePlaybackSession\.episodeEntries/);
+    assert.doesNotMatch(initializeSource, /playbackState\.readCurrentEpisodes\(\)/);
+    assert.doesNotMatch(
+        historySource,
+        /localStorage\.getItem\(['"]currentEpisodes['"]\)/
+    );
+});

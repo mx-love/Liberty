@@ -42,10 +42,6 @@ function generateRoomId() {
   return roomId;
 }
 
-function generateClientId(prefix = 'client') {
-  return `${prefix}_${crypto.randomUUID()}`;
-}
-
 async function readJson(request) {
   try {
     return await request.json();
@@ -64,7 +60,6 @@ async function createRoom(request, env) {
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const roomId = generateRoomId();
-    const hostId = body.hostId || generateClientId('host');
     const stub = getDurableObjectStub(env, roomId);
 
     const response = await stub.fetch('https://watch-room.local/create', {
@@ -74,7 +69,6 @@ async function createRoom(request, env) {
       },
       body: JSON.stringify({
         roomId,
-        hostId,
         media: body.media || {},
         playback: body.playback || {},
       }),
@@ -87,7 +81,9 @@ async function createRoom(request, env) {
         roomId: data.roomId,
         status: data.status || 'waiting',
         role: data.role || 'host',
-        clientId: data.hostId || hostId,
+        clientId: data.hostId || data.clientId,
+        hostCredential: data.hostCredential,
+        protocolVersion: data.protocolVersion || 2,
         maxMembers: data.maxMembers || 10,
       });
     }
@@ -123,11 +119,12 @@ async function getRoomState(request, env) {
   return jsonResponse(data, response.status);
 }
 
-function buildWebSocketUrl(roomId, clientId, role) {
+function buildWebSocketUrl(roomId, clientId, role, protocolVersion) {
   const url = new URL('https://watch-room.local/ws');
   url.searchParams.set('room', roomId);
   url.searchParams.set('clientId', clientId);
   url.searchParams.set('role', role);
+  url.searchParams.set('protocolVersion', String(protocolVersion || ''));
   return url.toString();
 }
 
@@ -135,7 +132,8 @@ async function connectWebSocket(request, env) {
   const url = new URL(request.url);
   const roomId = url.searchParams.get('room') || '';
   const role = url.searchParams.get('role') === 'host' ? 'host' : 'viewer';
-  const clientId = url.searchParams.get('clientId') || generateClientId(role);
+  const clientId = url.searchParams.get('clientId') || '';
+  const protocolVersion = url.searchParams.get('protocolVersion') || '';
 
   if (!isValidRoomId(roomId)) {
     return jsonResponse({ success: false, error: 'INVALID_ROOM_ID' }, 400);
@@ -146,7 +144,7 @@ async function connectWebSocket(request, env) {
   }
 
   const stub = getDurableObjectStub(env, roomId);
-  return stub.fetch(new Request(buildWebSocketUrl(roomId, clientId, role), request));
+  return stub.fetch(new Request(buildWebSocketUrl(roomId, clientId, role, protocolVersion), request));
 }
 
 async function endRoom(request, env) {
@@ -165,6 +163,7 @@ async function endRoom(request, env) {
     },
     body: JSON.stringify({
       clientId: body.clientId || '',
+      credential: body.credential || '',
     }),
   });
 
