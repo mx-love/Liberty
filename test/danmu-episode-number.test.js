@@ -1676,7 +1676,7 @@ test('39. a former whole-media binding is not reused after the source becomes mu
     assert.doesNotMatch(html, /当前剧集/u);
 });
 
-test('40. a missing-label movie auto-selects its provider and applies comments through production', async () => {
+test('40. an AppleCMS action-movie category auto-selects its provider and applies comments through production', async () => {
     const movie = createWork({
         title: 'Unlabelled Feature',
         animeId: 'unlabelled-feature-2025',
@@ -1693,7 +1693,7 @@ test('40. a missing-label movie auto-selects its provider and applies comments t
     const harness = createHarness({ works: [movie] });
     setStandardPlayback(harness, {
         title: 'Unlabelled Feature',
-        category: 'movie',
+        category: '动作片',
         episodes: [{
             rawIndex: 0,
             name: '',
@@ -1723,7 +1723,7 @@ test('40. a missing-label movie auto-selects its provider and applies comments t
     assert.deepEqual(harness.errors, []);
 });
 
-test('40a. a supported movie selected from the modal resolves whole-media and applies comments', async () => {
+test('40a. an AppleCMS action-movie category selected from the modal resolves whole-media and applies comments', async () => {
     const movie = createWork({
         title: 'Example Movie',
         animeId: 'example-movie-2025',
@@ -1740,7 +1740,7 @@ test('40a. a supported movie selected from the modal resolves whole-media and ap
     const harness = createHarness({ works: [movie] });
     setStandardPlayback(harness, {
         title: 'Example Movie',
-        category: '华语电影',
+        category: '动作片',
         episodes: [{
             rawIndex: 0,
             name: '1',

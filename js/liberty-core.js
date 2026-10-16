@@ -1415,20 +1415,52 @@ var EpisodeResolver = class {
 function normalizeLabels(values) {
   return values.filter((value) => value !== null && value !== void 0).map((value) => String(value).normalize("NFKC").toLocaleLowerCase("zh-CN").trim()).filter(Boolean).join(" ");
 }
+var MOVIE_CATEGORY_TOKENS = /* @__PURE__ */ new Set([
+  "\u52A8\u4F5C\u7247",
+  "\u52D5\u4F5C\u7247",
+  "\u559C\u5267\u7247",
+  "\u559C\u5287\u7247",
+  "\u7231\u60C5\u7247",
+  "\u611B\u60C5\u7247",
+  "\u79D1\u5E7B\u7247",
+  "\u6050\u6016\u7247",
+  "\u5267\u60C5\u7247",
+  "\u5287\u60C5\u7247",
+  "\u6218\u4E89\u7247",
+  "\u6230\u722D\u7247",
+  "\u72AF\u7F6A\u7247",
+  "\u60AC\u7591\u7247",
+  "\u61F8\u7591\u7247",
+  "\u60CA\u609A\u7247",
+  "\u9A5A\u609A\u7247",
+  "\u5947\u5E7B\u7247",
+  "\u5192\u9669\u7247",
+  "\u5192\u96AA\u7247",
+  "\u707E\u96BE\u7247",
+  "\u707D\u96E3\u7247",
+  "\u6B66\u4FA0\u7247",
+  "\u6B66\u4FE0\u7247",
+  "\u53E4\u88C5\u7247",
+  "\u53E4\u88DD\u7247"
+]);
+function hasBoundedMovieCategory(value) {
+  return value.split(/[\s,，、/|;；·・()[\]【】]+/u).some((token) => MOVIE_CATEGORY_TOKENS.has(token));
+}
 function classifyMediaTypeLabels(values, options = {}) {
   const value = normalizeLabels(values);
   if (!value) return "unknown";
   const hasAnimation = /(?:日番|番剧|动漫|動畫|动画|\banime\b|\banimation\b|\banimated\b)/iu.test(value);
   const hasMovie = /(?:电影|電影|影片|剧场版|劇場版|\bmovie\b|\bfilm\b)/iu.test(value);
+  const hasSeries = /(?:电视剧|電視劇|连续剧|連續劇|剧集|劇集|韩剧|韓劇|日剧|日劇|美剧|美劇|欧美剧|歐美劇|日韩剧|日韓劇|国产剧|國產劇|大陆剧|大陸劇|\bseries\b|\bdrama\b)/iu.test(value);
+  const hasMovieCategory = hasBoundedMovieCategory(value);
   if (hasAnimation && hasMovie) return "movie";
   if (hasAnimation) return "anime";
   if (/(?:综艺|綜藝|真人秀|\bvariety\b)/iu.test(value)) return "variety";
   if (/(?:纪录片|紀錄片|记录片|紀錄|纪录|\bdocumentary\b)/iu.test(value)) return "documentary";
   if (hasMovie) return "movie";
-  if (/(?:电视剧|電視劇|连续剧|連續劇|剧集|劇集|韩剧|韓劇|日剧|日劇|美剧|美劇|欧美剧|歐美劇|日韩剧|日韓劇|国产剧|國產劇|大陆剧|大陸劇|\bseries\b|\bdrama\b)/iu.test(value)) {
-    return "series";
-  }
+  if (hasSeries) return "series";
   if (options.treatBareTvAsSeries && /\btv(?:series|show)?\b/iu.test(value)) return "series";
+  if (hasMovieCategory) return "movie";
   return "unknown";
 }
 
