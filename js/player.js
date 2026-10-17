@@ -5956,6 +5956,14 @@ async function switchToResource(sourceKey, vodId, manualMediaConfirmation = fals
             return;
         }
 
+        // Use the exact target title that passed the source-switch identity
+        // boundary for every handoff to the new player page. Mixing the old
+        // source title into the URL with the target title in playback storage
+        // makes beginPlaybackSession correctly reject its own new metadata.
+        const targetVideoTitle = String(mediaIdentity.sourceRecord?.rawTitle || '').trim()
+            || String(currentVideoTitle || '').trim()
+            || '未知视频';
+
         const episodeEntries = Array.isArray(data.episodes)
             ? data.episodes.filter(episode => getPlayerEpisodeUrlValue(episode))
             : [];
@@ -6006,7 +6014,7 @@ async function switchToResource(sourceKey, vodId, manualMediaConfirmation = fals
 
 		// ✅ 保存播放进度到临时存储
 		try {
-			const progressKey = `videoProgress_temp_${currentVideoTitle}_${targetIndex}`;
+			const progressKey = `videoProgress_temp_${targetVideoTitle}_${targetIndex}`;
 			localStorage.setItem(progressKey, JSON.stringify({
 				position: currentPlaybackTime,
 				timestamp: Date.now()
@@ -6016,7 +6024,7 @@ async function switchToResource(sourceKey, vodId, manualMediaConfirmation = fals
 		}
 
 		// 构建播放页面URL，带上播放位置
-		const watchUrl = `player.html?id=${vodId}&source=${sourceKey}&url=${encodeURIComponent(targetUrl)}&index=${targetIndex}&title=${encodeURIComponent(currentVideoTitle)}&position=${Math.floor(currentPlaybackTime)}`;
+		const watchUrl = `player.html?id=${vodId}&source=${sourceKey}&url=${encodeURIComponent(targetUrl)}&index=${targetIndex}&title=${encodeURIComponent(targetVideoTitle)}&position=${Math.floor(currentPlaybackTime)}`;
 
         // 保存当前状态到localStorage
         try {
@@ -6024,7 +6032,7 @@ async function switchToResource(sourceKey, vodId, manualMediaConfirmation = fals
             if (playbackState) {
                 const videoInfo = data.videoInfo || {};
                 playbackState.writePlaybackSession({
-                    title: data.vod_name || '未知视频',
+                    title: targetVideoTitle,
                     year: videoInfo.year || data.vod_year || '',
                     category: videoInfo.category || '',
                     type: videoInfo.type || data.type_name || data.vod_class || '',
@@ -6040,7 +6048,7 @@ async function switchToResource(sourceKey, vodId, manualMediaConfirmation = fals
                     episodes: episodeEntries
                 });
             } else {
-                localStorage.setItem('currentVideoTitle', data.vod_name || '未知视频');
+                localStorage.setItem('currentVideoTitle', targetVideoTitle);
                 localStorage.setItem('currentEpisodes', JSON.stringify(playableEpisodes));
                 localStorage.setItem('currentEpisodeEntries', JSON.stringify(episodeEntries));
                 localStorage.setItem('currentEpisodeIndex', targetIndex);

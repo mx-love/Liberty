@@ -6,6 +6,10 @@ import vm from 'node:vm';
 import { LibertyCore } from '../js/liberty-core.js';
 
 const playerSource = readFileSync(new URL('../js/player.js', import.meta.url), 'utf8');
+const playbackStateSource = readFileSync(
+    new URL('../js/utils/playback-state.js', import.meta.url),
+    'utf8',
+);
 
 function sourceBetween(source, startMarker, endMarker) {
     const start = source.indexOf(startMarker);
@@ -19,6 +23,11 @@ const adapterSource = sourceBetween(
     playerSource,
     'function getSourceSwitchRawRecord(',
     '\nfunction logSwitchResourceCandidateQuality('
+);
+const switchToResourceSource = sourceBetween(
+    playerSource,
+    'async function switchToResource(',
+    '\n// 关闭弹幕源弹窗'
 );
 
 function playbackContext({
@@ -97,6 +106,132 @@ function detail(title, year, labels, extras = {}) {
             playGroupIndex: 0,
         })),
     };
+}
+
+function createMemoryStorage() {
+    const values = new Map();
+    return {
+        getItem: (key) => values.has(key) ? values.get(key) : null,
+        setItem: (key, value) => values.set(key, String(value)),
+        removeItem: (key) => values.delete(key),
+        clear: () => values.clear(),
+    };
+}
+
+async function runSourceSwitchHandoff({
+    currentTitle,
+    targetTitle,
+    data,
+    targetIndex,
+    sourceKey = 'source-b',
+    vodId = 'media-b',
+    manualMediaConfirmation = false,
+}) {
+    const localStorage = createMemoryStorage();
+    const window = {
+        LibertyCore,
+        LibertyUtils: {
+            media: {
+                getEpisodeUrl: (episode) => typeof episode === 'string'
+                    ? episode
+                    : episode?.url || '',
+            },
+            storage: {},
+        },
+        location: {
+            href: 'https://liberty.example.test/player.html?source=source-a&id=media-a',
+        },
+    };
+    const context = vm.createContext({
+        Date,
+        JSON,
+        LibertyCore,
+        URL,
+        URLSearchParams,
+        console,
+        document: {
+            getElementById: () => ({ classList: { add() {} } }),
+        },
+        encodeURIComponent,
+        localStorage,
+        window,
+    });
+    vm.runInContext(playbackStateSource, context, {
+        filename: 'js/utils/playback-state.js',
+    });
+    context.__switchData = structuredClone(data);
+    context.__targetTitle = targetTitle;
+    context.__targetIndex = targetIndex;
+    vm.runInContext(`
+        let currentVideoTitle = ${JSON.stringify(currentTitle)};
+        let currentEpisodeIndex = 0;
+        let art = null;
+        const API_SITES = { ${JSON.stringify(sourceKey)}: { name: 'Source B' } };
+        function getCustomApiInfo() { return null; }
+        function getPlayerEpisodeUrlValue(episode) {
+            if (!episode) return '';
+            return typeof episode === 'string' ? episode : episode.url || '';
+        }
+        function evaluateSourceSwitchCandidate() {
+            return {
+                decision: 'supported',
+                sourceRecord: { rawTitle: globalThis.__targetTitle },
+            };
+        }
+        function resolveSourceSwitchEpisode() {
+            return { state: 'supported', targetIndex: globalThis.__targetIndex };
+        }
+        async function fetchWithRetry() {
+            return { json: async () => globalThis.__switchData };
+        }
+        function showSourceSwitchEpisodeFallback() {}
+        function showLoading() {}
+        function hideLoading() {}
+        function showToast() {}
+        ${switchToResourceSource}
+        globalThis.runSourceSwitch = switchToResource;
+    `, context, { filename: 'source-switch-title-handoff.js' });
+
+    await context.runSourceSwitch(
+        sourceKey,
+        vodId,
+        manualMediaConfirmation,
+        null,
+    );
+
+    const navigationUrl = new URL(
+        String(window.location.href),
+        'https://liberty.example.test/',
+    );
+    const playbackState = window.LibertyUtils.playbackState;
+    const navigationIndex = Number(navigationUrl.searchParams.get('index'));
+    const begun = playbackState.beginPlaybackSession({
+        title: navigationUrl.searchParams.get('title') || '',
+        sourceCode: navigationUrl.searchParams.get('source') || '',
+        vodId: navigationUrl.searchParams.get('id') || '',
+        mediaUrl: navigationUrl.searchParams.get('url') || '',
+        episodeIndex: navigationIndex,
+    });
+    const selectedEntry = begun.session.episodeEntries[navigationIndex] || null;
+    const danmuContext = LibertyCore.createDanmakuPlaybackContext({
+        sourceKey: begun.session.sourceCode,
+        sourceName: begun.session.sourceName,
+        vodId: begun.session.vodId,
+        rawTitle: begun.session.title,
+        rawYear: begun.session.year,
+        rawCategory: [begun.session.category, begun.session.type].filter(Boolean).join(' '),
+        episodes: begun.session.episodeEntries.map((episode, index) => ({
+            rawIndex: Number.isInteger(episode.rawIndex) ? episode.rawIndex : index,
+            name: episode.rawEpisodeName || '',
+            url: episode.url || '',
+            rawEntry: episode.rawEntry || '',
+        })),
+        currentEpisodeIndex: Number.isInteger(selectedEntry?.rawIndex)
+            ? selectedEntry.rawIndex
+            : navigationIndex,
+    });
+
+    return { begun, danmuContext, navigationUrl, localStorage };
 }
 
 test('source-switch media identity uses Core evidence instead of raw-title/first-result fallback', () => {
@@ -200,6 +335,175 @@ test('URL-only target playback remains uncertain and never uses the current inde
     assert.equal(result.targetIndex, -1);
 });
 
+test('source switch uses one target title for URL and session and retains structured E3 across an inserted SP', async () => {
+    const result = await runSourceSwitchHandoff({
+        currentTitle: 'Example Show',
+        targetTitle: 'Example Show 2024',
+        data: {
+            vod_name: 'Example Show 2024',
+            vod_year: '2024',
+            type_name: '电视剧',
+            videoInfo: { year: '2024', category: '电视剧', type: '电视剧' },
+            episodes: detail('Example Show 2024', '2024', ['第1集', 'SP1', '第3集']).episodes,
+        },
+        targetIndex: 2,
+    });
+
+    assert.equal(result.navigationUrl.searchParams.get('title'), 'Example Show 2024');
+    assert.equal(result.begun.reused, true);
+    assert.equal(result.begun.session.title, 'Example Show 2024');
+    assert.equal(result.begun.session.year, '2024');
+    assert.equal(result.begun.session.category, '电视剧');
+    assert.equal(result.begun.session.episodeEntries[2].rawEpisodeName, '第3集');
+    assert.equal(result.danmuContext.state, 'ready');
+    assert.equal(result.danmuContext.episode?.episodeNumber, 3);
+    assert.equal(result.danmuContext.sourceEpisode?.rawEpisodeName, '第3集');
+});
+
+test('season aliases use the target source title without clearing the accepted playback session', async () => {
+    const result = await runSourceSwitchHandoff({
+        currentTitle: 'Example Show Season 2',
+        targetTitle: 'Example Show 第二季',
+        data: {
+            vod_name: 'Example Show 第二季',
+            vod_year: '2024',
+            type_name: '电视剧',
+            videoInfo: { year: '2024', category: '电视剧', type: '电视剧' },
+            episodes: detail('Example Show 第二季', '2024', ['第1集', '第2集']).episodes,
+        },
+        targetIndex: 1,
+    });
+
+    assert.equal(result.navigationUrl.searchParams.get('title'), 'Example Show 第二季');
+    assert.equal(result.begun.reused, true);
+    assert.equal(result.begun.session.episodeEntries[1].rawEpisodeName, '第2集');
+    assert.equal(result.danmuContext.state, 'ready');
+    assert.equal(result.danmuContext.media.season, 2);
+    assert.equal(result.danmuContext.episode?.episodeNumber, 2);
+});
+
+test('same-title source switches preserve existing behavior', async () => {
+    const result = await runSourceSwitchHandoff({
+        currentTitle: 'Example Show',
+        targetTitle: 'Example Show',
+        data: {
+            vod_name: 'Example Show',
+            vod_year: '2024',
+            type_name: '电视剧',
+            videoInfo: { year: '2024', category: '电视剧', type: '电视剧' },
+            episodes: detail('Example Show', '2024', ['第1集']).episodes,
+        },
+        targetIndex: 0,
+    });
+
+    assert.equal(result.navigationUrl.searchParams.get('title'), 'Example Show');
+    assert.equal(result.begun.reused, true);
+    assert.equal(result.danmuContext.state, 'ready');
+});
+
+test('movie alias handoff preserves movie metadata and a ready whole-media context without E01', async () => {
+    const movieEntry = {
+        rawIndex: 0,
+        rawEpisodeName: '正片',
+        episodeNameSource: 'source',
+        name: '正片',
+        url: 'https://media.example.test/source-b/movie.m3u8',
+        rawEntry: '正片$https://media.example.test/source-b/movie.m3u8',
+        playGroup: 'group-b',
+        playGroupIndex: 0,
+    };
+    const result = await runSourceSwitchHandoff({
+        currentTitle: 'Example Movie',
+        targetTitle: 'Example Movie 2025',
+        data: {
+            vod_name: 'Example Movie 2025',
+            vod_year: '2025',
+            type_name: '动作片',
+            videoInfo: { year: '2025', category: '动作片', type: '动作片' },
+            episodes: [movieEntry],
+        },
+        targetIndex: 0,
+    });
+
+    assert.equal(result.begun.reused, true);
+    assert.equal(result.begun.session.category, '动作片');
+    assert.equal(result.danmuContext.state, 'ready');
+    assert.equal(result.danmuContext.media.mediaType, 'movie');
+    assert.equal(result.danmuContext.episode?.contentType, 'movie');
+    assert.equal(result.danmuContext.episode?.episodeNumber, null);
+});
+
+test('missing target vod_name safely falls back to the current title for both handoffs', async () => {
+    const result = await runSourceSwitchHandoff({
+        currentTitle: 'Example Show',
+        targetTitle: '',
+        data: {
+            vod_year: '2024',
+            type_name: '电视剧',
+            videoInfo: { year: '2024', category: '电视剧', type: '电视剧' },
+            episodes: detail('', '2024', ['第1集']).episodes,
+        },
+        targetIndex: 0,
+        manualMediaConfirmation: true,
+    });
+
+    assert.equal(result.navigationUrl.searchParams.get('title'), 'Example Show');
+    assert.equal(result.begun.session.title, 'Example Show');
+    assert.equal(result.begun.reused, true);
+});
+
+test('unrelated direct navigation still clears the previous media metadata and episode identities', () => {
+    const localStorage = createMemoryStorage();
+    const window = {
+        LibertyUtils: {
+            media: {
+                getEpisodeUrl: (episode) => typeof episode === 'string'
+                    ? episode
+                    : episode?.url || '',
+            },
+            storage: {},
+        },
+    };
+    const context = vm.createContext({ console, localStorage, window });
+    vm.runInContext(playbackStateSource, context, {
+        filename: 'js/utils/playback-state.js',
+    });
+    const playbackState = window.LibertyUtils.playbackState;
+    playbackState.writePlaybackSession({
+        title: 'Example Show A',
+        year: '2020',
+        category: '电视剧',
+        actors: 'Actor A',
+        sourceCode: 'source-a',
+        vodId: 'media-a',
+        episodes: [{
+            rawIndex: 2,
+            rawEpisodeName: '第3集',
+            url: 'https://media.example.test/source-a/e3.m3u8',
+        }],
+    });
+
+    const begun = playbackState.beginPlaybackSession({
+        title: 'Completely Different Show B',
+        sourceCode: 'source-b',
+        vodId: 'media-b',
+        mediaUrl: 'https://media.example.test/source-b/main.m3u8',
+        episodeIndex: 0,
+    });
+
+    assert.equal(begun.reused, false);
+    assert.equal(begun.session.title, 'Completely Different Show B');
+    assert.equal(begun.session.year, '');
+    assert.equal(begun.session.category, '');
+    assert.equal(begun.session.actors, '');
+    assert.equal(begun.session.episodeEntries.length, 1);
+    assert.equal(
+        begun.session.episodeEntries[0].url,
+        'https://media.example.test/source-b/main.m3u8',
+    );
+    assert.equal(begun.session.episodeEntries[0].rawEpisodeName, undefined);
+});
+
 test('production source-switch path contains no legacy first-result or same-index decision', () => {
     const modalSource = sourceBetween(
         playerSource,
@@ -218,4 +522,7 @@ test('production source-switch path contains no legacy first-result or same-inde
     assert.doesNotMatch(switchSource, /targetIndex\s*=\s*currentIndex/);
     assert.doesNotMatch(switchSource, /currentIndex\s*<\s*playableEpisodes\.length/);
     assert.match(switchSource, /resolveSourceSwitchEpisode/);
+    assert.match(switchSource, /const targetVideoTitle =/);
+    assert.match(switchSource, /title=\$\{encodeURIComponent\(targetVideoTitle\)\}/);
+    assert.match(switchSource, /title:\s*targetVideoTitle/);
 });

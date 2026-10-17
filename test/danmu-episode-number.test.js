@@ -1780,6 +1780,94 @@ test('40a. an AppleCMS action-movie category selected from the modal resolves wh
     assert.match(currentHtml, /当前使用 · 影片内容已验证/u);
 });
 
+test('40b. a target-source alias session with an inserted SP reaches DanmuService and applies E03', async () => {
+    const work = createWork({
+        title: 'Example Show',
+        animeId: 'example-show-2024',
+        animeTitle: 'Example Show 2024',
+        year: 2024,
+        episodes: [
+            { episodeId: 'show-e1', episodeTitle: 'E1', episodeNumber: '1', airDate: '' },
+            { episodeId: 'show-sp1', episodeTitle: 'SP1', episodeNumber: '2', airDate: '' },
+            { episodeId: 'show-e3', episodeTitle: 'E3', episodeNumber: '3', airDate: '' },
+        ],
+    });
+    const harness = createHarness({ works: [work] });
+    setStandardPlayback(harness, {
+        title: 'Example Show 2024',
+        year: '2024',
+        category: '电视剧',
+        sourceCode: 'source-b',
+        sourceName: 'Source B',
+        vodId: 'example-show-b',
+        episodes: playbackEpisodes(['第1集', 'SP1', '第3集'], { prefix: 'source-b' }),
+        index: 2,
+    });
+
+    await harness.api.load('source-switch-target-session');
+    const diagnostics = harness.api.debug().lastDanmuMatchInfo;
+
+    assert.equal(harness.api.createContext().state, 'ready');
+    assert.equal(harness.api.createContext().episode?.episodeNumber, 3);
+    assert.equal(diagnostics.coreState, 'success');
+    assert.equal(diagnostics.bindingScope, 'canonical_episode');
+    assert.equal(diagnostics.danmuEpisodeId, 'show-e3');
+    assert.match(commentRequests(harness)[0].path, /\/show-e3$/u);
+    assert.equal(nonEmptyApplications(harness).at(-1)?.[0]?.text, 'show-e3 comment');
+    assert.deepEqual(harness.errors, []);
+});
+
+test('40c. a target-source movie alias session reaches whole-media comments and ArtPlayer apply', async () => {
+    const movie = createWork({
+        title: 'Example Movie',
+        animeId: 'example-movie-alias-2025',
+        animeTitle: 'Example Movie 2025',
+        year: 2025,
+        type: '电影',
+        typeDescription: 'movie',
+        episodes: [{
+            episodeId: 'example-movie-alias-main',
+            episodeTitle: 'HD',
+            episodeNumber: '1',
+            airDate: '',
+        }],
+    });
+    const harness = createHarness({ works: [movie] });
+    setStandardPlayback(harness, {
+        title: 'Example Movie 2025',
+        year: '2025',
+        category: '动作片',
+        sourceCode: 'movie-source-b',
+        sourceName: 'Movie Source B',
+        vodId: 'example-movie-b',
+        episodes: [{
+            rawIndex: 0,
+            name: '正片',
+            rawEpisodeName: '正片',
+            episodeNameSource: 'source',
+            url: 'https://media.example.test/movie-source-b/main.m3u8',
+        }],
+        index: 0,
+    });
+
+    await harness.api.load('source-switch-movie-target-session');
+    const context = harness.api.createContext();
+    const diagnostics = harness.api.debug().lastDanmuMatchInfo;
+
+    assert.equal(context.state, 'ready');
+    assert.equal(context.media.mediaType, 'movie');
+    assert.equal(context.episode?.episodeNumber, null);
+    assert.equal(diagnostics.coreState, 'success');
+    assert.equal(diagnostics.bindingScope, 'whole_media');
+    assert.equal(diagnostics.danmuEpisodeId, 'example-movie-alias-main');
+    assert.equal(commentRequests(harness).length, 1);
+    assert.equal(
+        nonEmptyApplications(harness).at(-1)?.[0]?.text,
+        'example-movie-alias-main comment',
+    );
+    assert.deepEqual(harness.errors, []);
+});
+
 test('41. an explicit third-season title binds E01 without year evidence', async () => {
     const work = createWork({
         title: 'Example Competition',
