@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "include": ["/*"],
+  "exclude": [
+    "/js/*",
+    "/css/*",
+    "/libs/*",
+    "/image/*",
+    "/manifest.json",
+    "/robots.txt",
+    "/service-worker.js",
+    "/version.json",
+    "/VERSION.txt"
+  ]
+}

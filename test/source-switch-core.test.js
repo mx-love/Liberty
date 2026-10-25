@@ -10,6 +10,10 @@ const playbackStateSource = readFileSync(
     new URL('../js/utils/playback-state.js', import.meta.url),
     'utf8',
 );
+const positionHandoffSource = readFileSync(
+    new URL('../js/utils/source-switch-position-handoff.js', import.meta.url),
+    'utf8',
+);
 
 function sourceBetween(source, startMarker, endMarker) {
     const start = source.indexOf(startMarker);
@@ -28,6 +32,11 @@ const switchToResourceSource = sourceBetween(
     playerSource,
     'async function switchToResource(',
     '\n// 关闭弹幕源弹窗'
+);
+const handoffSideSource = sourceBetween(
+    playerSource,
+    'function getSourceSwitchHandoffSide(',
+    '\nfunction removeSourceSwitchHandoffParams('
 );
 
 function playbackContext({
@@ -126,8 +135,11 @@ async function runSourceSwitchHandoff({
     sourceKey = 'source-b',
     vodId = 'media-b',
     manualMediaConfirmation = false,
+    manualTargetIndex = null,
+    positionHandoff = null,
 }) {
     const localStorage = createMemoryStorage();
+    const sessionStorage = createMemoryStorage();
     const window = {
         LibertyCore,
         LibertyUtils: {
@@ -141,6 +153,7 @@ async function runSourceSwitchHandoff({
         location: {
             href: 'https://liberty.example.test/player.html?source=source-a&id=media-a',
         },
+        sessionStorage,
     };
     const context = vm.createContext({
         Date,
@@ -159,13 +172,22 @@ async function runSourceSwitchHandoff({
     vm.runInContext(playbackStateSource, context, {
         filename: 'js/utils/playback-state.js',
     });
+    if (positionHandoff) {
+        vm.runInContext(positionHandoffSource, context, {
+            filename: 'js/utils/source-switch-position-handoff.js',
+        });
+    }
     context.__switchData = structuredClone(data);
     context.__targetTitle = targetTitle;
     context.__targetIndex = targetIndex;
+    context.__currentSwitchContext = positionHandoff?.currentContext || null;
+    context.__targetSwitchContext = positionHandoff?.targetContext || null;
+    context.__artVideo = positionHandoff?.video || null;
     vm.runInContext(`
         let currentVideoTitle = ${JSON.stringify(currentTitle)};
         let currentEpisodeIndex = 0;
-        let art = null;
+        let art = globalThis.__artVideo ? { video: globalThis.__artVideo } : null;
+        const playerLifecycle = { generation: 11 };
         const API_SITES = { ${JSON.stringify(sourceKey)}: { name: 'Source B' } };
         function getCustomApiInfo() { return null; }
         function getPlayerEpisodeUrlValue(episode) {
@@ -179,8 +201,15 @@ async function runSourceSwitchHandoff({
             };
         }
         function resolveSourceSwitchEpisode() {
-            return { state: 'supported', targetIndex: globalThis.__targetIndex };
+            return {
+                state: 'supported',
+                targetIndex: globalThis.__targetIndex,
+                currentContext: globalThis.__currentSwitchContext,
+                targetContext: globalThis.__targetSwitchContext,
+            };
         }
+        function isWatchRoomLaunch() { return false; }
+        ${handoffSideSource}
         async function fetchWithRetry() {
             return { json: async () => globalThis.__switchData };
         }
@@ -196,7 +225,7 @@ async function runSourceSwitchHandoff({
         sourceKey,
         vodId,
         manualMediaConfirmation,
-        null,
+        manualTargetIndex,
     );
 
     const navigationUrl = new URL(
@@ -231,7 +260,14 @@ async function runSourceSwitchHandoff({
             : navigationIndex,
     });
 
-    return { begun, danmuContext, navigationUrl, localStorage };
+    return {
+        begun,
+        danmuContext,
+        navigationUrl,
+        localStorage,
+        sessionStorage,
+        positionHandoffApi: window.LibertyUtils.sourceSwitchPositionHandoff || null,
+    };
 }
 
 test('source-switch media identity uses Core evidence instead of raw-title/first-result fallback', () => {
@@ -452,6 +488,91 @@ test('missing target vod_name safely falls back to the current title for both ha
     assert.equal(result.begun.reused, true);
 });
 
+test('production source switch captures paused currentTime in a trusted one-shot handoff', async () => {
+    const data = detail('Example Show', '2020', ['第1集', '第2集']);
+    const currentContext = playbackContext({
+        title: 'Example Show',
+        year: '2020',
+        labels: ['第1集', '第2集'],
+        currentRawIndex: 1,
+    });
+    const targetContext = LibertyCore.createDanmakuPlaybackContext({
+        sourceKey: 'source-b',
+        sourceName: 'Source B',
+        vodId: 'media-b',
+        rawTitle: 'Example Show',
+        rawYear: '2020',
+        rawCategory: '电视剧',
+        episodes: data.episodes.map((episode) => ({
+            rawIndex: episode.rawIndex,
+            name: episode.rawEpisodeName,
+            url: episode.url,
+            rawEntry: episode.rawEntry,
+        })),
+        currentEpisodeIndex: 1,
+    });
+    const result = await runSourceSwitchHandoff({
+        currentTitle: 'Example Show',
+        targetTitle: 'Example Show',
+        data,
+        targetIndex: 1,
+        positionHandoff: {
+            currentContext,
+            targetContext,
+            video: {
+                paused: true,
+                ended: false,
+                currentTime: 600,
+                duration: 3600,
+            },
+        },
+    });
+
+    const nonce = result.navigationUrl.searchParams.get('switch_handoff');
+    const generation = Number(result.navigationUrl.searchParams.get('switch_generation'));
+    assert.ok(nonce);
+    assert.equal(generation, 11);
+    assert.equal(result.navigationUrl.searchParams.has('position'), false);
+    const targetEpisode = targetContext.sourceEpisode;
+    const consumed = result.positionHandoffApi.consume({
+        nonce,
+        generation,
+        target: {
+            sourceKey: targetEpisode.sourceKey,
+            vodId: targetEpisode.vodId,
+            canonicalMediaId: targetContext.media.mediaId,
+            canonicalEpisodeId: targetContext.episode.canonicalEpisodeId,
+            episode: {
+                rawIndex: targetEpisode.rawIndex,
+                playGroup: targetEpisode.playGroup,
+                playGroupIndex: targetEpisode.playGroupIndex,
+            },
+        },
+        newDuration: 3610,
+    }, { storage: result.sessionStorage });
+    assert.equal(consumed.accepted, true);
+    assert.equal(consumed.position, 600);
+});
+
+test('manual episode selection does not mint a trusted automatic position handoff', async () => {
+    const data = detail('Example Show', '2020', ['第1集', '第2集']);
+    const context = playbackContext({ labels: ['第1集', '第2集'], currentRawIndex: 1 });
+    const result = await runSourceSwitchHandoff({
+        currentTitle: 'Example Show',
+        targetTitle: 'Example Show',
+        data,
+        targetIndex: 1,
+        manualMediaConfirmation: true,
+        manualTargetIndex: 1,
+        positionHandoff: {
+            currentContext: context,
+            targetContext: context,
+            video: { paused: false, ended: false, currentTime: 600, duration: 3600 },
+        },
+    });
+    assert.equal(result.navigationUrl.searchParams.has('switch_handoff'), false);
+});
+
 test('unrelated direct navigation still clears the previous media metadata and episode identities', () => {
     const localStorage = createMemoryStorage();
     const window = {
@@ -523,6 +644,6 @@ test('production source-switch path contains no legacy first-result or same-inde
     assert.doesNotMatch(switchSource, /currentIndex\s*<\s*playableEpisodes\.length/);
     assert.match(switchSource, /resolveSourceSwitchEpisode/);
     assert.match(switchSource, /const targetVideoTitle =/);
-    assert.match(switchSource, /title=\$\{encodeURIComponent\(targetVideoTitle\)\}/);
+    assert.match(switchSource, /searchParams\.set\('title', targetVideoTitle\)/);
     assert.match(switchSource, /title:\s*targetVideoTitle/);
 });
