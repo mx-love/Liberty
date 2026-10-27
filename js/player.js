@@ -2962,10 +2962,12 @@ function clearPlayerLifecycleTimers() {
 }
 
 function beginPlayerLifecycle(videoUrl, reason = 'media-change') {
+    videoPlayer?.startupBuffer?.dispose('generation-change');
     clearPlayerLifecycleTimers();
     playerLifecycle.generation += 1;
     playerLifecycle.active = true;
     playerLifecycle.url = String(videoUrl || '');
+    playerLifecycle.startupFinished = false;
     const now = Date.now();
     playerLifecycle.recovery = {
         generation: playerLifecycle.generation,
@@ -2995,6 +2997,7 @@ function beginPlayerLifecycle(videoUrl, reason = 'media-change') {
 }
 
 function invalidatePlayerLifecycle(reason = 'destroy') {
+    videoPlayer?.startupBuffer?.dispose(reason);
     clearPlayerLifecycleTimers();
     playerLifecycle.generation += 1;
     playerLifecycle.active = false;
@@ -3046,6 +3049,70 @@ function attachPlayerLifecycleOwnership(videoUrl, ownership) {
         isCurrent: () => isCurrentPlayerLifecycle(ownership),
     }) || null;
     videoPlayer.telemetry = playerLifecycle.telemetry;
+    if (videoPlayer.art?.video) setupStartupBuffer(videoPlayer.art.video, ownership);
+}
+
+function isStartupBufferEnabled() {
+    // Opt-in until real CDN and Safari/gesture acceptance is complete.
+    try { return localStorage.getItem('libertyStartupBufferEnabled') === 'true'; }
+    catch (error) { return false; }
+}
+
+function setupStartupBuffer(video, ownership) {
+    const owner = videoPlayer;
+    if (!owner || !video || !isCurrentPlayerLifecycle(ownership)) return null;
+    if (owner.startupBuffer?.generation === ownership.generation) return owner.startupBuffer;
+    owner.startupBuffer?.dispose('source-change');
+    owner.startupBuffer = null;
+    const factory = window.LibertyUtils?.startupBuffer;
+    if (!isStartupBufferEnabled() || isWatchRoomLaunch() || playerLifecycle.startupFinished
+        || !factory?.supported(video)) return null;
+    owner.startupBuffer = factory.create({
+        video,
+        generation: ownership.generation,
+        mode: Hls.isSupported() ? 'hls.js' : 'native',
+        isCurrent: () => videoPlayer === owner && owner.art?.video === video
+            && isCurrentPlayerLifecycle(ownership),
+        telemetry: owner.telemetry,
+        onState: ({ state, intent, completionReason }) => {
+            if (state === 'completed' || state === 'cancelled') playerLifecycle.startupFinished = true;
+            const loading = document.getElementById('player-loading');
+            if (loading && (state === 'waiting' || state === 'ready')) {
+                loading.style.display = intent ? 'flex' : 'none';
+            }
+            if (loading && state === 'cancelled' && completionReason === 'play-rejected') {
+                loading.style.display = 'none';
+            }
+            if (loading && state === 'completed') loading.style.display = 'none';
+            // Reflect pending intent on the existing play/pause control; no
+            // synthetic video:playing event or replacement control is needed.
+            if (state !== 'completed') {
+                const root = owner.art?.template?.$player;
+                const playIcon = root?.querySelector('.art-control-playAndPause .art-icon-play');
+                const pauseIcon = root?.querySelector('.art-control-playAndPause .art-icon-pause');
+                const pending = intent && (state === 'waiting' || state === 'ready');
+                if (playIcon && pauseIcon) {
+                    playIcon.style.display = pending ? 'none' : 'inline-flex';
+                    pauseIcon.style.display = pending ? 'inline-flex' : 'none';
+                }
+            }
+        },
+        onNoData: () => {
+            if (!owner.startupBuffer?.snapshot().userPaused) {
+                const recovery = getPlayerRecoveryState(ownership);
+                if (recovery) recovery.intentionallyPaused = false;
+                scheduleCurrentPlayerRecovery(ownership.url, ownership, 'startup-no-playable-data');
+            }
+        },
+    });
+    return owner.startupBuffer;
+}
+
+function switchPlayerSource(url, ownership) {
+    attachPlayerLifecycleOwnership(url, ownership);
+    const startup = videoPlayer?.startupBuffer;
+    if (startup) startup.duringSwitch(() => { art.switch = url; });
+    else art.switch = url;
 }
 
 function getPlayerRecoveryState(ownership) {
@@ -3296,6 +3363,8 @@ function bindPlayerRecoverySignals(video, ownership) {
         }
     });
     listen('pause', () => {
+        const startup = owner.startupBuffer?.snapshot();
+        if (startup && !startup.userPaused && ['idle', 'waiting', 'ready'].includes(startup.state)) return;
         finishStall('pause');
         const activeOwnership = currentOwnership();
         const recovery = getPlayerRecoveryState(activeOwnership);
@@ -3627,6 +3696,7 @@ class VideoPlayer {
     // 统一销毁方法
     // ============================================
     destroy(options = {}) {
+        this.startupBuffer?.dispose('player-destroy');
         if (!options.preserveLifecycle) {
             invalidatePlayerLifecycle('video-player-destroy');
         }
@@ -3773,7 +3843,7 @@ function initPlayerInternal(videoUrl, ownership) {
         volume: 0.8,
         isLive: false,
         muted: false,
-        autoplay: !shouldDisableAutoplayForWatchRoom,
+        autoplay: !shouldDisableAutoplayForWatchRoom && !isStartupBufferEnabled(),
         pip: true,
         autoSize: false,
         autoMini: !isMobileDevice,
@@ -3868,6 +3938,7 @@ function initPlayerInternal(videoUrl, ownership) {
                 currentHls = hls;
                 videoPlayer.hls = hls; // 🔥 绑定到 VideoPlayer 实例
                 const hlsOwnership = videoPlayer.lifecycleOwnership || ownership;
+                setupStartupBuffer(video, hlsOwnership);
 
                 // 跟踪是否已经显示错误
                 let errorDisplayed = false;
@@ -3915,6 +3986,7 @@ function initPlayerInternal(videoUrl, ownership) {
                 });
                 addObservedHlsListener(Hls.Events.FRAG_BUFFERED, (event, data) => {
                     notePlayerLifecycleProgress(hlsOwnership, 'fragment-buffered');
+                    videoPlayer?.startupBuffer?.progress();
                     recordPlayerTelemetry(hlsOwnership, 'fragment-buffered', {
                         ...window.LibertyUtils?.playbackTelemetry?.fragmentMetrics?.(data),
                         bufferSeconds: window.LibertyUtils?.playbackTelemetry?.bufferSeconds?.(video) || 0,
@@ -4052,7 +4124,9 @@ function initPlayerInternal(videoUrl, ownership) {
                         return;
                     }
 
-                    video.play().catch(e => {
+                    const startup = videoPlayer?.startupBuffer;
+                    const playback = startup ? startup.requestAutomaticPlay() : video.play();
+                    playback.catch(e => {
                     });
                 });
 
@@ -4132,17 +4206,23 @@ function initPlayerInternal(videoUrl, ownership) {
                 videoPlayer.addHlsEventListener(hls, Hls.Events.FRAG_LOADED, function (event, data) {
                     if (!isCurrentPlayerLifecycle(hlsOwnership) || currentHls !== hls) return;
                     notePlayerLifecycleProgress(hlsOwnership, 'fragment-loaded');
+                    videoPlayer?.startupBuffer?.observeFragment(
+                        window.LibertyUtils?.playbackTelemetry?.fragmentMetrics?.(data)
+                    );
                     recordPlayerTelemetry(hlsOwnership, 'fragment-loaded', {
                         ...window.LibertyUtils?.playbackTelemetry?.fragmentMetrics?.(data),
                         bufferSeconds: window.LibertyUtils?.playbackTelemetry?.bufferSeconds?.(video) || 0,
                     });
                     document.getElementById('player-loading').style.display = 'none';
+                    videoPlayer?.startupBuffer?.progress();
                 });
 
                 // 监听级别加载事件
-                videoPlayer.addHlsEventListener(hls, Hls.Events.LEVEL_LOADED, function () {
+                videoPlayer.addHlsEventListener(hls, Hls.Events.LEVEL_LOADED, function (event, data) {
                     if (!isCurrentPlayerLifecycle(hlsOwnership) || currentHls !== hls) return;
+                    videoPlayer?.startupBuffer?.setLive(Boolean(data?.details?.live));
                     document.getElementById('player-loading').style.display = 'none';
+                    videoPlayer?.startupBuffer?.progress();
                 });
             }
         }
@@ -4158,6 +4238,7 @@ function initPlayerInternal(videoUrl, ownership) {
 
     // 🔥 绑定到 VideoPlayer 实例
     videoPlayer.art = art;
+    setupStartupBuffer(art.video, ownership);
     bindPlayerRecoverySignals(art.video, ownership);
     if (!shouldDisableAutoplayForWatchRoom) {
         scheduleCurrentPlayerRecovery(videoUrl, ownership, 'initial-source-loading');
@@ -4536,6 +4617,11 @@ function initPlayerInternal(videoUrl, ownership) {
                 restoredPosition
             });
         }
+
+        // Defer until all ArtPlayer loadedmetadata handlers (including its
+        // switch seek) have applied the destination position.
+        const startup = videoPlayer?.startupBuffer;
+        queueMicrotask(() => startup?.metadataRestored());
 
         // 加载弹幕
         if (isDanmuServiceEnabled() && art.plugins.artplayerPluginDanmuku) {
@@ -4942,8 +5028,7 @@ async function loadEpisodeFromWatchRoomSnapshot(snapshot = {}, options = {}) {
             }
             requestAnimationFrame(() => {
                 if (isCurrentPlayerLifecycle(lifecycleOwnership) && art) {
-                    attachPlayerLifecycleOwnership(episodeUrl, lifecycleOwnership);
-                    art.switch = episodeUrl;
+                    switchPlayerSource(episodeUrl, lifecycleOwnership);
                 }
             });
         }
@@ -5078,8 +5163,7 @@ function playEpisode(index, switchReason = 'manual') {
 
 		requestAnimationFrame(() => {
 			if (isCurrentPlayerLifecycle(lifecycleOwnership) && art) {
-				attachPlayerLifecycleOwnership(url, lifecycleOwnership);
-				art.switch = url;
+				switchPlayerSource(url, lifecycleOwnership);
 			}
 		});
 	}

@@ -24,6 +24,11 @@
         'recoveryAttempt',
         'recoveryReason',
         'recoveryOutcome',
+        'targetSeconds',
+        'waitMs',
+        'completionReason',
+        'intent',
+        'userPaused',
     ]);
     const SENSITIVE_TEXT = /(?:authorization|cookie|password|secret|token|signature|proxy[-_ ]?capability|credential)/iu;
 
